@@ -132,6 +132,7 @@ class SQLiteAsyncDatabaseWrapper:
         params = params or []
         try:
             async with aiosqlite.connect(self.database) as conn:
+                await conn.execute("PRAGMA foreign_keys = ON")
                 cursor = await conn.execute(self._adapt(sql), params)
                 await conn.commit()
                 rowcount = cursor.rowcount
@@ -145,6 +146,7 @@ class SQLiteAsyncDatabaseWrapper:
         params = params or []
         try:
             async with aiosqlite.connect(self.database) as conn:
+                await conn.execute("PRAGMA foreign_keys = ON")
                 cursor = await conn.execute(self._adapt(sql), params)
                 await conn.commit()
                 lastrowid = cursor.lastrowid
