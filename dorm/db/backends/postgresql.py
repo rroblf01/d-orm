@@ -152,6 +152,24 @@ class PostgreSQLDatabaseWrapper:
         with self._get_pool().connection() as c:
             return self._exec(c, sql, params, insert=True)
 
+    def _exec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
+        try:
+            with conn.cursor() as cur:
+                _sql = _to_pyformat(sql) + f' RETURNING "{pk_col}"'
+                cur.execute(_sql, params or [])
+                rows = cur.fetchall()
+                return [r[pk_col] for r in rows]
+        except Exception as exc:
+            normalize_db_exception(exc)
+            raise
+
+    def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
+        conn = self._atomic_conn
+        if conn is not None:
+            return self._exec_bulk(conn, sql, params, pk_col)
+        with self._get_pool().connection() as c:
+            return self._exec_bulk(c, sql, params, pk_col)
+
     def execute_script(self, sql: str):
         with self._get_pool().connection() as conn:
             with conn.cursor() as cur:
@@ -302,6 +320,24 @@ class PostgreSQLAsyncDatabaseWrapper:
             return await self._aexec(state[1], sql, params, insert=True)
         async with (await self._get_pool()).connection() as c:
             return await self._aexec(c, sql, params, insert=True)
+
+    async def _aexec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
+        try:
+            async with conn.cursor() as cur:
+                _sql = _to_pyformat(sql) + f' RETURNING "{pk_col}"'
+                await cur.execute(_sql, params or [])
+                rows = await cur.fetchall()
+                return [r[pk_col] for r in rows]
+        except Exception as exc:
+            normalize_db_exception(exc)
+            raise
+
+    async def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
+        state = ASYNC_ATOMIC_STATE.get()
+        if state is not None and state[0] is self:
+            return await self._aexec_bulk(state[1], sql, params, pk_col)
+        async with (await self._get_pool()).connection() as c:
+            return await self._aexec_bulk(c, sql, params, pk_col)
 
     async def execute_script(self, sql: str):
         async with (await self._get_pool()).connection() as conn:

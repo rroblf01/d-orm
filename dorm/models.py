@@ -201,7 +201,12 @@ class Model(metaclass=ModelBase):
         for key, value in kwargs.items():
             try:
                 field = meta.get_field(key)
-                self.__dict__[field.attname] = field.to_python(value)
+                from .fields import RelatedField
+                if isinstance(field, RelatedField) and key == field.name:
+                    # Use FK descriptor so model instances get their PK extracted
+                    setattr(self, key, value)
+                else:
+                    self.__dict__[field.attname] = field.to_python(value)
             except Exception:
                 # FK descriptor: key is relation name, value is instance or pk
                 setattr(self, key, value)

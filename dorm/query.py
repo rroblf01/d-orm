@@ -35,12 +35,15 @@ class SQLQuery:
         self.limit_val: int | None = None
         self.offset_val: int | None = None
         self.selected_fields: list[str] | None = None  # for .values()
+        self.deferred_loading: bool = False  # True when using only()/defer()
         self.annotations: dict[str, Any] = {}
         self.distinct_flag: bool = False
         self.for_update_flag: bool = False
         self.joins: list[tuple] = []  # (join_type, table, alias, on_condition)
         self.group_by_fields: list[str] = []
         self.having_nodes: list = []
+        self.select_related_fields: list[str] = []
+        self.prefetch_related_fields: list[str] = []
 
     def clone(self) -> "SQLQuery":
         q = SQLQuery(self.model)
@@ -49,12 +52,15 @@ class SQLQuery:
         q.limit_val = self.limit_val
         q.offset_val = self.offset_val
         q.selected_fields = list(self.selected_fields) if self.selected_fields is not None else None
+        q.deferred_loading = self.deferred_loading
         q.annotations = dict(self.annotations)
         q.distinct_flag = self.distinct_flag
         q.for_update_flag = self.for_update_flag
         q.joins = list(self.joins)
         q.group_by_fields = list(self.group_by_fields)
         q.having_nodes = list(self.having_nodes)
+        q.select_related_fields = list(self.select_related_fields)
+        q.prefetch_related_fields = list(self.prefetch_related_fields)
         return q
 
     # ── SQL builders ──────────────────────────────────────────────────────────
@@ -63,12 +69,9 @@ class SQLQuery:
         return self.model._meta.db_table
 
     def get_columns(self, table_alias: str | None = None) -> str:
-        if self.selected_fields is not None:
-            parts = []
-            for f in self.selected_fields:
-                parts.append(f'"{f}"')
-            return ", ".join(parts)
         ta = f'"{table_alias}".' if table_alias else ""
+        if self.selected_fields is not None:
+            return ", ".join(f'{ta}"{f}"' for f in self.selected_fields)
         concrete = [f for f in self.model._meta.fields if f.column]
         return ", ".join(f'{ta}"{f.column}"' for f in concrete)
 
@@ -86,20 +89,53 @@ class SQLQuery:
                 parts.append(f'{agg_sql} AS "{alias_name}"')
             extra_select = ", " + ", ".join(parts)
 
-        cols = self.get_columns(alias)
-        select = f'SELECT {distinct}{cols}{extra_select} FROM "{table}"'
-
         params: list = []
 
-        # JOINs
+        # Compile WHERE first so _resolve_column can populate self.joins via FK traversal
+        where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
+        params.extend(where_params)
+
+        # select_related: build LEFT OUTER JOINs and prefixed columns
+        sr_join_clauses: list[str] = []
+        sr_extra_cols = ""
+        if self.select_related_fields and self.selected_fields is None:
+            sr_parts: list[str] = []
+            for fname in self.select_related_fields:
+                try:
+                    field = self.model._meta.get_field(fname)
+                    if hasattr(field, "_resolve_related_model"):
+                        rel_model = field._resolve_related_model()
+                        sr_alias = f"_sr_{fname}"
+                        pk_col = rel_model._meta.pk.column
+                        join_table = rel_model._meta.db_table
+                        on_cond = f'"{sr_alias}"."{pk_col}" = "{alias}"."{field.column}"'
+                        sr_join_clauses.append(
+                            f'LEFT OUTER JOIN "{join_table}" AS "{sr_alias}" ON {on_cond}'
+                        )
+                        for rf in rel_model._meta.fields:
+                            if rf.column:
+                                sr_parts.append(
+                                    f'"{sr_alias}"."{rf.column}" AS "_sr_{fname}_{rf.column}"'
+                                )
+                except Exception:
+                    pass
+            if sr_parts:
+                sr_extra_cols = ", " + ", ".join(sr_parts)
+
+        cols = self.get_columns(alias)
+        select = f'SELECT {distinct}{cols}{extra_select}{sr_extra_cols} FROM "{table}"'
+
+        # WHERE-derived JOINs (populated by _resolve_column during WHERE compilation above)
         for join_type, join_table, join_alias, on_cond in self.joins:
             select += f' {join_type} JOIN "{join_table}" AS "{join_alias}" ON {on_cond}'
 
+        # select_related JOINs
+        for sr_join in sr_join_clauses:
+            select += f" {sr_join}"
+
         # WHERE
-        where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
         if where_sql:
             select += f" WHERE {where_sql}"
-            params.extend(where_params)
 
         # GROUP BY
         if self.group_by_fields:
@@ -149,12 +185,32 @@ class SQLQuery:
 
         return self._adapt_placeholders(sql, connection), params
 
+    def as_exists(self, connection) -> tuple[str, list]:
+        table = self.get_table()
+        sql = f'SELECT 1 FROM "{table}"'
+        params: list = []
+        where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+            params.extend(where_params)
+        sql += " LIMIT 1"
+        return self._adapt_placeholders(sql, connection), params
+
     def as_insert(self, fields: list, values: list, connection) -> tuple[str, list]:
         table = self.get_table()
         cols = ", ".join(f'"{f.column}"' for f in fields)
         placeholders = ", ".join(["%s"] * len(fields))
         sql = f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders})'
         return self._adapt_placeholders(sql, connection), values
+
+    def as_bulk_insert(self, fields: list, rows_values: list[list], connection) -> tuple[str, list]:
+        table = self.get_table()
+        cols = ", ".join(f'"{f.column}"' for f in fields)
+        row_ph = f"({', '.join(['%s'] * len(fields))})"
+        all_ph = ", ".join([row_ph] * len(rows_values))
+        sql = f'INSERT INTO "{table}" ({cols}) VALUES {all_ph}'
+        params = [v for row in rows_values for v in row]
+        return self._adapt_placeholders(sql, connection), params
 
     def as_update(self, update_kwargs: dict, connection) -> tuple[str, list]:
         table = self.get_table()

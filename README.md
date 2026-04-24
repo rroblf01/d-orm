@@ -12,6 +12,10 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 - **Migration system** — `makemigrations` / `migrate` / rollback, `RunSQL` / `RunPython` with reverse hooks
 - **CLI** — `dorm` command to manage migrations and open a shell (IPython auto-detected)
 - **Thread-safe** — connections are safe to share across threads; async connections are coroutine-safe
+- **Relationship loading** — `select_related()` (SQL JOIN) and `prefetch_related()` (batch query) to avoid N+1 queries
+- **Partial loading** — `only()` / `defer()` to fetch a subset of columns
+- **Convenience** — `get_or_none()` / `aget_or_none()` returns `None` instead of raising `DoesNotExist`
+- **Efficient bulk inserts** — `bulk_create()` uses a single multi-row INSERT per batch
 
 ---
 
@@ -192,6 +196,7 @@ class Book(dorm.Model):
 # Create and save in one call
 author = Author.objects.create(name="Alice", email="alice@example.com", age=30)
 
+
 # Instantiate then save separately
 author = Author(name="Bob", email="bob@example.com", age=25)
 author.save()
@@ -239,6 +244,10 @@ inactive = Author.objects.exclude(active=True)
 
 # Get a single record
 author = Author.objects.get(email="alice@example.com")  # raises DoesNotExist or MultipleObjectsReturned
+
+# Get or None — returns None instead of raising DoesNotExist
+author = Author.objects.get_or_none(email="alice@example.com")
+author = Author.objects.filter(active=True).get_or_none(name="Alice")
 
 # First / last
 first = Author.objects.order_by("age").first()
@@ -319,10 +328,55 @@ rows = Author.objects.values("name", "age")
 pairs = Author.objects.values_list("name", "age")
 # [("Alice", 30), ...]
 
-# flat=True with a single field
+# flat=True — single field only (raises ValueError with more than one field)
 names = Author.objects.values_list("name", flat=True)
 # ["Alice", "Bob", ...]
 ```
+
+### Partial loading — `only()` and `defer()`
+
+Use these to fetch only the columns you need. The returned objects are full model instances; unloaded fields are `None`.
+
+```python
+# only() — fetch just the listed columns (pk is always included)
+authors = Author.objects.only("name", "email")
+for a in authors:
+    print(a.name)    # loaded
+    print(a.age)     # None — not fetched
+
+# defer() — fetch all columns except the listed ones
+authors = Author.objects.defer("bio")
+for a in authors:
+    print(a.name)    # loaded
+    print(a.bio)     # None — not fetched
+
+# Both are chainable with filter, order_by, etc.
+result = Author.objects.filter(active=True).only("name").order_by("name")
+```
+
+### Relationship loading — `select_related()` and `prefetch_related()`
+
+Both methods avoid the N+1 query problem when accessing FK fields on a queryset.
+
+`select_related()` resolves the relation in a single SQL query using a LEFT OUTER JOIN:
+
+```python
+# One query: SELECT books.*, author.* FROM books LEFT OUTER JOIN authors ...
+books = Book.objects.select_related("author")
+for book in books:
+    print(book.author.name)  # no extra DB hit
+```
+
+`prefetch_related()` runs a second batch query and stitches the results in Python:
+
+```python
+# Two queries: one for books, one bulk fetch for all related authors
+books = Book.objects.filter(published=True).prefetch_related("author")
+for book in books:
+    print(book.author.name)  # no extra DB hit
+```
+
+Choose `select_related` for forward FK/OneToOne fields when you always need the related object. Use `prefetch_related` when doing large bulk loads or when the JOIN would produce too many duplicated columns.
 
 ### Aggregations
 
@@ -390,6 +444,9 @@ async def main():
 
     # Get
     author = await Author.objects.aget(email="alice@example.com")
+
+    # Get or None
+    author = await Author.objects.aget_or_none(email="missing@example.com")  # None
 
     # get_or_create / update_or_create
     author, created = await Author.objects.aget_or_create(
@@ -767,6 +824,7 @@ asyncio.run(async_demo())
 |---|---|---|
 | Create | `objects.create(**kw)` | `await objects.acreate(**kw)` |
 | Get one | `objects.get(**kw)` | `await objects.aget(**kw)` |
+| Get or None | `objects.get_or_none(**kw)` | `await objects.aget_or_none(**kw)` |
 | Filter | `objects.filter(**kw)` | `objects.filter(**kw)` + `async for` |
 | First | `objects.first()` | `await objects.afirst()` |
 | Last | `objects.last()` | `await objects.alast()` |
@@ -781,6 +839,10 @@ asyncio.run(async_demo())
 | Update or create | `objects.update_or_create(...)` | `await objects.aupdate_or_create(...)` |
 | Bulk create | `objects.bulk_create([...])` | `await objects.abulk_create([...])` |
 | Aggregate | `objects.aggregate(...)` | `await objects.aaggregate(...)` |
+| Partial load | `objects.only("f1", "f2")` | — |
+| Partial load | `objects.defer("f1", "f2")` | — |
+| Eager FK load | `objects.select_related("fk")` | — |
+| Batch FK load | `objects.prefetch_related("fk")` | — |
 
 ---
 

@@ -94,6 +94,20 @@ class SQLiteDatabaseWrapper:
             conn.commit()
         return cursor.lastrowid
 
+    def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.execute(self._adapt(sql), params or [])
+        except Exception as exc:
+            normalize_db_exception(exc)
+            raise
+        if self._atomic_depth == 0:
+            conn.commit()
+        last = cursor.lastrowid
+        if not last:
+            return []
+        return list(range(last - count + 1, last + 1))
+
     def execute_script(self, sql: str):
         conn = self.get_connection()
         conn.executescript(sql)
@@ -238,6 +252,20 @@ class SQLiteAsyncDatabaseWrapper:
                 if not self._in_atomic():
                     await conn.commit()
                 return cursor.lastrowid
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+
+    async def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
+        async with self._operation_conn() as conn:
+            try:
+                cursor = await conn.execute(self._adapt(sql), params or [])
+                if not self._in_atomic():
+                    await conn.commit()
+                last = cursor.lastrowid
+                if not last:
+                    return []
+                return list(range(last - count + 1, last + 1))
             except Exception as exc:
                 normalize_db_exception(exc)
                 raise

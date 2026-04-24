@@ -81,6 +81,15 @@ class BaseManager(Generic[_T]):
     def get(self, *args: Any, **kwargs: Any) -> _T:
         return self.get_queryset().get(*args, **kwargs)
 
+    def get_or_none(self, *args: Any, **kwargs: Any) -> _T | None:
+        return self.get_queryset().get_or_none(*args, **kwargs)
+
+    def only(self, *fields: str) -> QuerySet[_T]:
+        return self.get_queryset().only(*fields)
+
+    def defer(self, *fields: str) -> QuerySet[_T]:
+        return self.get_queryset().defer(*fields)
+
     def create(self, **kwargs: Any) -> _T:
         return self.get_queryset().create(**kwargs)
 
@@ -128,6 +137,9 @@ class BaseManager(Generic[_T]):
 
     async def aget(self, *args: Any, **kwargs: Any) -> _T:
         return await self.get_queryset().aget(*args, **kwargs)
+
+    async def aget_or_none(self, *args: Any, **kwargs: Any) -> _T | None:
+        return await self.get_queryset().aget_or_none(*args, **kwargs)
 
     async def acreate(self, **kwargs: Any) -> _T:
         return await self.get_queryset().acreate(**kwargs)

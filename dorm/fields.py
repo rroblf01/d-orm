@@ -591,6 +591,11 @@ class RelatedField(Field):
             return _model_registry[self.remote_field_to]
         return self.remote_field_to
 
+    def get_db_prep_value(self, value):
+        if hasattr(value, "pk"):
+            return value.pk
+        return value
+
     def db_type(self, connection) -> str:
         related = self._resolve_related_model()
         pk_field = related._meta.pk
