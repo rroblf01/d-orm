@@ -17,9 +17,6 @@ classifiers = [
     "Topic :: Database",
     "Framework :: AsyncIO",
 ]
-dependencies = [
-]
-
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.3",
@@ -31,6 +28,7 @@ dev = [
 ]
 sqlite = ["aiosqlite>=0.22.1"]
 postgresql = ["psycopg[binary,pool]>=3.3.3"]
+all = ["djanorm[dev,sqlite,postgresql]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"
