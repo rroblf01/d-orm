@@ -15,3 +15,7 @@ wheels/
 
 # IA
 .claude
+
+# example
+*.db*
+example/migrations/
