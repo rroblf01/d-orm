@@ -49,6 +49,20 @@ DATABASES = {
     }
 }
 
+# For PostgreSQL, connection pool size can be tuned (optional):
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "postgresql",
+#         "NAME": "my_database",
+#         "USER": "postgres",
+#         "PASSWORD": "secret",
+#         "HOST": "localhost",
+#         "PORT": 5432,
+#         "MIN_POOL_SIZE": 1,
+#         "MAX_POOL_SIZE": 10,
+#     }
+# }
+
 INSTALLED_APPS = ["myapp"]
 ```
 
@@ -91,6 +105,9 @@ dorm.configure(
             "PASSWORD": "secret",
             "HOST": "localhost",
             "PORT": 5432,
+            # Connection pool size (optional, defaults shown)
+            "MIN_POOL_SIZE": 1,
+            "MAX_POOL_SIZE": 10,
         }
     }
 )
@@ -601,7 +618,7 @@ asyncio.run(async_demo())
 | Extra | Package | Purpose |
 |---|---|---|
 | `sqlite` | `aiosqlite` | Async SQLite |
-| `postgresql` | `psycopg[binary]` | Sync/Async PostgreSQL |
+| `postgresql` | `psycopg[binary,pool]` | Sync/Async PostgreSQL with connection pool |
 
 ## License
 
