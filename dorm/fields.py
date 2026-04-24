@@ -117,7 +117,9 @@ class Field:
         if self.choices and value is not None:
             valid = [c[0] for c in self.choices]
             if value not in valid:
-                raise ValidationError(f"Value '{value}' is not a valid choice for '{self.name}'.")
+                raise ValidationError(
+                    f"Value '{value}' is not a valid choice for '{self.name}'."
+                )
 
     def get_internal_type(self) -> str:
         return self.__class__.__name__
@@ -394,7 +396,11 @@ class DateTimeField(Field):
             value = datetime.datetime.utcnow()
             setattr(model_instance, self.attname, value)
             return value
-        return super().get_default() if not hasattr(model_instance, self.attname) else getattr(model_instance, self.attname)
+        return (
+            super().get_default()
+            if not hasattr(model_instance, self.attname)
+            else getattr(model_instance, self.attname)
+        )
 
 
 class EmailField(CharField):
@@ -553,6 +559,7 @@ class RelatedField(Field):
         if self.verbose_name is None:
             self.verbose_name = name.replace("_", " ")
         cls._meta.add_field(self)
+        setattr(cls, name, self)  # install FK descriptor
 
     def __get__(self, instance, owner):
         if instance is None:
@@ -582,6 +589,7 @@ class RelatedField(Field):
     def _resolve_related_model(self):
         if isinstance(self.remote_field_to, str):
             from .models import _model_registry  # noqa: PLC0415
+
             return _model_registry[self.remote_field_to]
         return self.remote_field_to
 
@@ -632,5 +640,6 @@ class ManyToManyField(Field):
     def _resolve_related_model(self):
         if isinstance(self.remote_field_to, str):
             from .models import _model_registry  # noqa: PLC0415
+
             return _model_registry[self.remote_field_to]
         return self.remote_field_to
