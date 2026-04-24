@@ -46,7 +46,18 @@ from .exceptions import (
 )
 from .expressions import F, Q, Value
 from .aggregates import Avg, Count, Max, Min, StdDev, Sum, Variance
-from .functions import Abs, Case, Cast, Coalesce, Concat, Length, Lower, Now, Upper, When
+from .functions import (
+    Abs,
+    Case,
+    Cast,
+    Coalesce,
+    Concat,
+    Length,
+    Lower,
+    Now,
+    Upper,
+    When,
+)
 from .fields import (
     AutoField,
     BigAutoField,
@@ -97,7 +108,7 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __all__ = [
     # Config
     "configure",

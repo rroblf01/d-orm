@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "0.2.0"
+version = "1.0.0"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -18,6 +18,10 @@ classifiers = [
     "Framework :: AsyncIO",
     "Typing :: Typed",
 ]
+[project.urls]
+Homepage = "https://github.com/rroblf01/d-orm/"
+Repository = "https://github.com/rroblf01/d-orm/"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.3",
