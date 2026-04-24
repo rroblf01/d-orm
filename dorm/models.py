@@ -294,7 +294,7 @@ class Model(metaclass=ModelBase):
 
     async def asave(self, using: str = "default", force_insert: bool = False, force_update: bool = False, update_fields=None):
         from .db.connection import get_async_connection
-        conn = await get_async_connection(using)
+        conn = get_async_connection(using)
         meta = self._meta
 
         if force_insert or self.pk is None:
@@ -348,7 +348,7 @@ class Model(metaclass=ModelBase):
     async def adelete(self, using: str = "default"):
         from .db.connection import get_async_connection
         from .query import SQLQuery
-        conn = await get_async_connection(using)
+        conn = get_async_connection(using)
         query = SQLQuery(self.__class__)
         pk_field = self._meta.pk
         query.where_nodes.append(([pk_field.column], "exact", self.pk))

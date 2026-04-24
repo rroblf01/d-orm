@@ -63,7 +63,7 @@ def get_connection(alias: str = "default"):
     return _sync_connections[alias]
 
 
-async def get_async_connection(alias: str = "default"):
+def get_async_connection(alias: str = "default"):
     if alias not in _async_connections:
         db_settings = _get_settings(alias)
         _async_connections[alias] = _create_async_connection(alias, db_settings)

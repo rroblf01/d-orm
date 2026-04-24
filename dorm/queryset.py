@@ -42,10 +42,10 @@ class QuerySet(Generic[_T]):
 
         return get_connection(self._db)
 
-    async def _get_async_connection(self):
+    def _get_async_connection(self):
         from .db.connection import get_async_connection
 
-        return await get_async_connection(self._db)
+        return get_async_connection(self._db)
 
     # ── Filtering ─────────────────────────────────────────────────────────────
 
@@ -165,7 +165,7 @@ class QuerySet(Generic[_T]):
         return {}
 
     async def aaggregate(self, **kwargs: Any) -> dict[str, Any]:
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         table = self.model._meta.db_table
         parts = []
         for alias_name, agg in kwargs.items():
@@ -429,7 +429,7 @@ class QuerySet(Generic[_T]):
         return self._aiterator()
 
     async def _aiterator(self) -> AsyncIterator[_T]:
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         sql, params = self._query.as_select(conn)
         rows = await conn.execute(sql, params)
         if self._query.selected_fields is not None:
@@ -490,7 +490,7 @@ class QuerySet(Generic[_T]):
     async def aupdate(self, **kwargs: Any) -> int:
         from .expressions import CombinedExpression, F, Value
 
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         col_kwargs = {}
         for k, v in kwargs.items():
             try:
@@ -505,14 +505,14 @@ class QuerySet(Generic[_T]):
         return await conn.execute_write(sql, params)
 
     async def adelete(self) -> tuple[int, dict[str, int]]:
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         sql, params = self._query.as_delete(conn)
         count = await conn.execute_write(sql, params)
         model_label = f"{self.model._meta.app_label}.{self.model.__name__}"
         return count, {model_label: count}
 
     async def acount(self) -> int:
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         sql, params = self._query.as_count(conn)
         rows = await conn.execute(sql, params)
         row = rows[0]
@@ -521,7 +521,7 @@ class QuerySet(Generic[_T]):
     async def aexists(self) -> bool:
         qs = self._clone()
         qs._query.limit_val = 1
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         sql, params = qs._query.as_select(conn)
         rows = await conn.execute(sql, params)
         return bool(rows)
@@ -552,7 +552,7 @@ class QuerySet(Generic[_T]):
     async def abulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         if not objs:
             return objs
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         from .fields import AutoField
 
         meta = self.model._meta
@@ -629,7 +629,7 @@ class ValuesListQuerySet(QuerySet[Any]):
                 yield values
 
     async def _aiterator(self) -> AsyncIterator[Any]:
-        conn = await self._get_async_connection()
+        conn = self._get_async_connection()
         sql, params = self._query.as_select(conn)
         rows = await conn.execute(sql, params)
         fields = self._fields or [f.column for f in self.model._meta.fields if f.column]

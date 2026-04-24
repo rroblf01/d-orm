@@ -4,31 +4,14 @@ import asyncio
 import re
 import threading
 
+from ..utils import raise_migration_hint
+
 _POSITIONAL_PLACEHOLDER = re.compile(r"\$\d+")
 
 
 def _to_pyformat(sql: str) -> str:
     """Convert $1, $2, ... placeholders to %s (psycopg3 style)."""
     return _POSITIONAL_PLACEHOLDER.sub("%s", sql)
-
-
-def _raise_migration_hint(exc: Exception) -> None:
-    from dorm.exceptions import OperationalError
-
-    msg = str(exc)
-    match = re.search(r'relation "([^"]+)" does not exist', msg, re.IGNORECASE)
-    if match:
-        table = match.group(1)
-        raise OperationalError(
-            f'Table "{table}" does not exist.\n\n'
-            "It looks like you forgot to create or apply your migrations.\n\n"
-            "  Run the following commands:\n"
-            "    dorm makemigrations\n"
-            "    dorm migrate\n\n"
-            "  Or, if you use a custom settings module:\n"
-            "    dorm makemigrations --settings=<your_settings_module>\n"
-            "    dorm migrate        --settings=<your_settings_module>\n"
-        ) from exc
 
 
 def _build_dsn(settings: dict) -> dict:
@@ -81,6 +64,7 @@ class PostgreSQLDatabaseWrapper:
                     _dsn_to_conninfo(self._dsn),
                     min_size=self._min_size,
                     max_size=self._max_size,
+                    open=True,
                     kwargs={"row_factory": dict_row},
                 )
         return self._pool
@@ -95,7 +79,7 @@ class PostgreSQLDatabaseWrapper:
                     except Exception:
                         return []
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
 
     def execute_write(self, sql: str, params=None) -> int:
@@ -105,7 +89,7 @@ class PostgreSQLDatabaseWrapper:
                     cur.execute(_to_pyformat(sql), params or [])
                     return cur.rowcount
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
 
     def execute_insert(self, sql: str, params=None):
@@ -116,7 +100,7 @@ class PostgreSQLDatabaseWrapper:
                     row = cur.fetchone()
                 return row["id"] if row else None
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
 
     def execute_script(self, sql: str):
@@ -211,7 +195,7 @@ class PostgreSQLAsyncDatabaseWrapper:
                     except Exception:
                         return []
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
 
     async def execute_write(self, sql: str, params=None) -> int:
@@ -221,7 +205,7 @@ class PostgreSQLAsyncDatabaseWrapper:
                     await cur.execute(_to_pyformat(sql), params or [])
                     return cur.rowcount
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
 
     async def execute_insert(self, sql: str, params=None):
@@ -232,7 +216,7 @@ class PostgreSQLAsyncDatabaseWrapper:
                     row = await cur.fetchone()
                 return row["id"] if row else None
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
 
     async def execute_script(self, sql: str):

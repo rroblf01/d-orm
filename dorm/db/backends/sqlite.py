@@ -1,28 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import sqlite3
 import threading
 
-
-def _raise_migration_hint(exc: Exception, table: str | None = None) -> None:
-    from dorm.exceptions import OperationalError
-
-    msg = str(exc)
-    match = re.search(r"no such table: (\S+)", msg, re.IGNORECASE)
-    if match:
-        table = table or match.group(1)
-        raise OperationalError(
-            f'Table "{table}" does not exist.\n\n'
-            "It looks like you forgot to create or apply your migrations.\n\n"
-            "  Run the following commands:\n"
-            "    dorm makemigrations\n"
-            "    dorm migrate\n\n"
-            "  Or, if you use a custom settings module:\n"
-            "    dorm makemigrations --settings=<your_settings_module>\n"
-            "    dorm migrate        --settings=<your_settings_module>\n"
-        ) from exc
+from ..utils import raise_migration_hint
 
 
 class SQLiteDatabaseWrapper:
@@ -32,7 +14,6 @@ class SQLiteDatabaseWrapper:
     def __init__(self, settings: dict):
         self.settings = settings
         self.database = settings.get("NAME", ":memory:")
-        self._conn: sqlite3.Connection | None = None
 
     def get_connection(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
@@ -49,32 +30,29 @@ class SQLiteDatabaseWrapper:
 
     def execute(self, sql: str, params=None) -> list:
         conn = self.get_connection()
-        params = params or []
         try:
-            cursor = conn.execute(self._adapt(sql), params)
+            cursor = conn.execute(self._adapt(sql), params or [])
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
         return cursor.fetchall()
 
     def execute_write(self, sql: str, params=None) -> int:
         conn = self.get_connection()
-        params = params or []
         try:
-            cursor = conn.execute(self._adapt(sql), params)
+            cursor = conn.execute(self._adapt(sql), params or [])
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
         conn.commit()
         return cursor.rowcount
 
     def execute_insert(self, sql: str, params=None):
         conn = self.get_connection()
-        params = params or []
         try:
-            cursor = conn.execute(self._adapt(sql), params)
+            cursor = conn.execute(self._adapt(sql), params or [])
         except Exception as exc:
-            _raise_migration_hint(exc)
+            raise_migration_hint(exc)
             raise
         conn.commit()
         return cursor.lastrowid
@@ -144,7 +122,7 @@ class SQLiteAsyncDatabaseWrapper:
                 cursor = await conn.execute(self._adapt(sql), params or [])
                 rows = await cursor.fetchall()
             except Exception as exc:
-                _raise_migration_hint(exc)
+                raise_migration_hint(exc)
                 raise
             return list(rows)
 
@@ -156,7 +134,7 @@ class SQLiteAsyncDatabaseWrapper:
                 await conn.commit()
                 return cursor.rowcount
             except Exception as exc:
-                _raise_migration_hint(exc)
+                raise_migration_hint(exc)
                 raise
 
     async def execute_insert(self, sql: str, params=None):
@@ -167,7 +145,7 @@ class SQLiteAsyncDatabaseWrapper:
                 await conn.commit()
                 return cursor.lastrowid
             except Exception as exc:
-                _raise_migration_hint(exc)
+                raise_migration_hint(exc)
                 raise
 
     async def execute_script(self, sql: str):

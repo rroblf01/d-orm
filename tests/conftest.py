@@ -54,6 +54,9 @@ def configure_dorm(db_config):
         DATABASES={"default": db_config},
         INSTALLED_APPS=["tests"],
     )
+    yield
+    from dorm.db.connection import close_all
+    close_all()
 
 
 @pytest.fixture(autouse=True)
