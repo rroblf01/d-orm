@@ -77,7 +77,6 @@ class Author(dorm.Model):
     joined   = dorm.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = "authors"
         ordering = ["name"]
 
 
@@ -87,8 +86,7 @@ class Book(dorm.Model):
     pages     = dorm.IntegerField(default=0)
     published = dorm.BooleanField(default=False)
 
-    class Meta:
-        db_table = "books"
+
 ```
 
 ### Available fields
@@ -487,8 +485,6 @@ class Post(dorm.Model):
     published = dorm.BooleanField(default=False)
     views     = dorm.IntegerField(default=0)
 
-    class Meta:
-        db_table = "posts"
 
 
 # — Sync ───────────────────────────────────────────────────────────────────────
