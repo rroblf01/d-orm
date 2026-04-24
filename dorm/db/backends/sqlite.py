@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import sqlite3
 import threading
 
 
 def _raise_migration_hint(exc: Exception, table: str | None = None) -> None:
-    """Re-raise a missing-table error with a friendly migration hint."""
     from dorm.exceptions import OperationalError
 
     msg = str(exc)
-    # SQLite: "no such table: <name>"
     match = re.search(r"no such table: (\S+)", msg, re.IGNORECASE)
     if match:
         table = table or match.group(1)
@@ -108,56 +107,72 @@ class SQLiteAsyncDatabaseWrapper:
     def __init__(self, settings: dict):
         self.settings = settings
         self.database = settings.get("NAME", ":memory:")
+        self._conn = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        # Safe to create outside a running loop (Python 3.10+).
+        self._lock = asyncio.Lock()
 
     @staticmethod
     def _adapt(sql: str) -> str:
         return sql.replace("%s", "?")
 
-    async def execute(self, sql: str, params=None) -> list:
+    async def _get_conn(self):
         import aiosqlite
-        params = params or []
-        try:
-            async with aiosqlite.connect(self.database) as conn:
-                conn.row_factory = aiosqlite.Row
-                await conn.execute("PRAGMA foreign_keys = ON")
-                cursor = await conn.execute(self._adapt(sql), params)
+
+        current_loop = asyncio.get_event_loop()
+        if self._loop is not current_loop:
+            if self._conn is not None:
+                try:
+                    await self._conn.close()
+                except Exception:
+                    pass
+            self._conn = None
+            self._loop = current_loop
+            self._lock = asyncio.Lock()
+
+        if self._conn is None:
+            self._conn = await aiosqlite.connect(self.database)
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA foreign_keys = ON")
+            await self._conn.execute("PRAGMA journal_mode = WAL")
+        return self._conn
+
+    async def execute(self, sql: str, params=None) -> list:
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                cursor = await conn.execute(self._adapt(sql), params or [])
                 rows = await cursor.fetchall()
-        except Exception as exc:
-            _raise_migration_hint(exc)
-            raise
-        return list(rows)
+            except Exception as exc:
+                _raise_migration_hint(exc)
+                raise
+            return list(rows)
 
     async def execute_write(self, sql: str, params=None) -> int:
-        import aiosqlite
-        params = params or []
-        try:
-            async with aiosqlite.connect(self.database) as conn:
-                await conn.execute("PRAGMA foreign_keys = ON")
-                cursor = await conn.execute(self._adapt(sql), params)
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                cursor = await conn.execute(self._adapt(sql), params or [])
                 await conn.commit()
-                rowcount = cursor.rowcount
-        except Exception as exc:
-            _raise_migration_hint(exc)
-            raise
-        return rowcount
+                return cursor.rowcount
+            except Exception as exc:
+                _raise_migration_hint(exc)
+                raise
 
     async def execute_insert(self, sql: str, params=None):
-        import aiosqlite
-        params = params or []
-        try:
-            async with aiosqlite.connect(self.database) as conn:
-                await conn.execute("PRAGMA foreign_keys = ON")
-                cursor = await conn.execute(self._adapt(sql), params)
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                cursor = await conn.execute(self._adapt(sql), params or [])
                 await conn.commit()
-                lastrowid = cursor.lastrowid
-        except Exception as exc:
-            _raise_migration_hint(exc)
-            raise
-        return lastrowid
+                return cursor.lastrowid
+            except Exception as exc:
+                _raise_migration_hint(exc)
+                raise
 
     async def execute_script(self, sql: str):
-        import aiosqlite
-        async with aiosqlite.connect(self.database) as conn:
+        async with self._lock:
+            conn = await self._get_conn()
             await conn.executescript(sql)
             await conn.commit()
 
@@ -171,3 +186,8 @@ class SQLiteAsyncDatabaseWrapper:
     async def get_table_columns(self, table_name: str) -> list[dict]:
         rows = await self.execute(f'PRAGMA table_info("{table_name}")')
         return [dict(r) for r in rows]
+
+    async def close(self):
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None

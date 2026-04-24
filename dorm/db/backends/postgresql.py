@@ -13,11 +13,9 @@ def _to_pyformat(sql: str) -> str:
 
 
 def _raise_migration_hint(exc: Exception) -> None:
-    """Re-raise a missing-table error with a friendly migration hint."""
     from dorm.exceptions import OperationalError
 
     msg = str(exc)
-    # PostgreSQL: 'relation "<name>" does not exist'
     match = re.search(r'relation "([^"]+)" does not exist', msg, re.IGNORECASE)
     if match:
         table = match.group(1)
@@ -34,7 +32,6 @@ def _raise_migration_hint(exc: Exception) -> None:
 
 
 def _build_dsn(settings: dict) -> dict:
-    """DSN for psycopg3 (uses 'dbname')."""
     return {
         "host": settings.get("HOST", "localhost"),
         "port": int(settings.get("PORT", 5432)),
@@ -44,84 +41,88 @@ def _build_dsn(settings: dict) -> dict:
     }
 
 
+def _dsn_to_conninfo(dsn: dict) -> str:
+    """Build a conninfo string, omitting empty values."""
+    try:
+        from psycopg.conninfo import make_conninfo
+    except ImportError as e:
+        raise ImportError(
+            "psycopg is required for PostgreSQL support. "
+            "Install it with: pip install 'djanorm[postgresql]'"
+        ) from e
+    return make_conninfo(**{k: v for k, v in dsn.items() if v})
+
+
 class PostgreSQLDatabaseWrapper:
     vendor = "postgresql"
-    _local = threading.local()
 
     def __init__(self, settings: dict):
         self.settings = settings
         self._dsn = _build_dsn(settings)
+        self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
+        self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
+        self._pool = None
+        self._pool_lock = threading.Lock()
 
-    def get_connection(self):
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError as e:
-            raise ImportError(
-                "psycopg is required for PostgreSQL support. "
-                "Install it with: pip install 'djanorm[postgresql]'"
-            ) from e
-
-        if (
-            not hasattr(self._local, "conn")
-            or self._local.conn is None
-            or self._local.conn.closed
-        ):
-            import psycopg
-            from psycopg.rows import dict_row
-
-            self._local.conn = psycopg.connect(**self._dsn, row_factory=dict_row)  # type: ignore
-        return self._local.conn
+    def _get_pool(self):
+        if self._pool is not None:
+            return self._pool
+        with self._pool_lock:
+            if self._pool is None:
+                try:
+                    from psycopg_pool import ConnectionPool
+                    from psycopg.rows import dict_row
+                except ImportError as e:
+                    raise ImportError(
+                        "psycopg[pool] is required for PostgreSQL support. "
+                        "Install it with: pip install 'djanorm[postgresql]'"
+                    ) from e
+                self._pool = ConnectionPool(
+                    _dsn_to_conninfo(self._dsn),
+                    min_size=self._min_size,
+                    max_size=self._max_size,
+                    kwargs={"row_factory": dict_row},
+                )
+        return self._pool
 
     def execute(self, sql: str, params=None) -> list:
-        conn = self.get_connection()
         try:
-            with conn.cursor() as cur:
-                cur.execute(_to_pyformat(sql), params or [])
-                try:
-                    return cur.fetchall()
-                except Exception:
-                    return []
+            with self._get_pool().connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_to_pyformat(sql), params or [])
+                    try:
+                        return cur.fetchall()
+                    except Exception:
+                        return []
         except Exception as exc:
-            conn.rollback()
             _raise_migration_hint(exc)
             raise
 
     def execute_write(self, sql: str, params=None) -> int:
-        conn = self.get_connection()
         try:
-            with conn.cursor() as cur:
-                cur.execute(_to_pyformat(sql), params or [])
-                rowcount = cur.rowcount
-            conn.commit()
-            return rowcount
+            with self._get_pool().connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_to_pyformat(sql), params or [])
+                    return cur.rowcount
         except Exception as exc:
-            conn.rollback()
             _raise_migration_hint(exc)
             raise
 
     def execute_insert(self, sql: str, params=None):
-        conn = self.get_connection()
         try:
-            with conn.cursor() as cur:
-                cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
-                row = cur.fetchone()
-            conn.commit()
-            return row["id"] if row else None
+            with self._get_pool().connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
+                    row = cur.fetchone()
+                return row["id"] if row else None
         except Exception as exc:
-            conn.rollback()
             _raise_migration_hint(exc)
             raise
 
     def execute_script(self, sql: str):
-        conn = self.get_connection()
-        try:
+        with self._get_pool().connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql)
-            conn.commit()
-        except Exception as exc:
-            conn.rollback()
-            raise exc
 
     def table_exists(self, table_name: str) -> bool:
         rows = self.execute(
@@ -143,13 +144,9 @@ class PostgreSQLDatabaseWrapper:
         return [dict(r) for r in rows]
 
     def close(self):
-        if (
-            hasattr(self._local, "conn")
-            and self._local.conn
-            and not self._local.conn.closed
-        ):
-            self._local.conn.close()
-            self._local.conn = None
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
 
 
 class PostgreSQLAsyncDatabaseWrapper:
@@ -158,97 +155,90 @@ class PostgreSQLAsyncDatabaseWrapper:
     def __init__(self, settings: dict):
         self.settings = settings
         self._dsn = _build_dsn(settings)
-        self._conn = None
+        self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
+        self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
+        self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        # Lock serialises concurrent coroutines on the same connection.
-        # asyncio.Lock() is safe to instantiate outside a running loop in Python 3.10+.
-        self._lock = asyncio.Lock()
+        # Lock guards pool initialisation. Safe to create outside a running loop (Python 3.10+).
+        self._pool_lock = asyncio.Lock()
 
-    async def _get_conn(self):
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError as e:
-            raise ImportError(
-                "psycopg is required for async PostgreSQL support. "
-                "Install it with: pip install 'djanorm[postgresql]'"
-            ) from e
-
+    async def _get_pool(self):
         current_loop = asyncio.get_event_loop()
-        if self._loop is not current_loop:
-            # Event loop changed (e.g. new asyncio.run() call) — previous connection
-            # is bound to a closed loop and must not be reused.
-            if self._conn is not None and not self._conn.closed:
+
+        if self._loop is not current_loop and self._pool is not None:
+            # Event loop changed — the old pool's connections belong to a closed loop.
+            old_pool = self._pool
+            self._pool = None
+            self._loop = None
+            self._pool_lock = asyncio.Lock()
+            try:
+                await old_pool.close()
+            except Exception:
+                pass
+
+        if self._pool is not None:
+            return self._pool
+
+        async with self._pool_lock:
+            if self._pool is None:
                 try:
-                    await self._conn.close()
-                except Exception:
-                    pass
-            self._conn = None
-            self._loop = current_loop
-            self._lock = asyncio.Lock()
-
-        if self._conn is None or self._conn.closed:
-            import psycopg
-            from psycopg.rows import dict_row
-
-            self._conn = await psycopg.AsyncConnection.connect(
-                **self._dsn, row_factory=dict_row  # type: ignore
-            )
-        return self._conn
+                    from psycopg_pool import AsyncConnectionPool
+                    from psycopg.rows import dict_row
+                except ImportError as e:
+                    raise ImportError(
+                        "psycopg[pool] is required for async PostgreSQL support. "
+                        "Install it with: pip install 'djanorm[postgresql]'"
+                    ) from e
+                pool = AsyncConnectionPool(
+                    _dsn_to_conninfo(self._dsn),
+                    min_size=self._min_size,
+                    max_size=self._max_size,
+                    open=False,
+                    kwargs={"row_factory": dict_row},
+                )
+                await pool.open()
+                self._pool = pool
+                self._loop = current_loop
+        return self._pool
 
     async def execute(self, sql: str, params=None) -> list:
-        async with self._lock:
-            conn = await self._get_conn()
-            try:
+        try:
+            async with (await self._get_pool()).connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_to_pyformat(sql), params or [])
                     try:
                         return await cur.fetchall()
                     except Exception:
                         return []
-            except Exception as exc:
-                await conn.rollback()
-                _raise_migration_hint(exc)
-                raise
+        except Exception as exc:
+            _raise_migration_hint(exc)
+            raise
 
     async def execute_write(self, sql: str, params=None) -> int:
-        async with self._lock:
-            conn = await self._get_conn()
-            try:
+        try:
+            async with (await self._get_pool()).connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_to_pyformat(sql), params or [])
-                    rowcount = cur.rowcount
-                await conn.commit()
-                return rowcount
-            except Exception as exc:
-                await conn.rollback()
-                _raise_migration_hint(exc)
-                raise
+                    return cur.rowcount
+        except Exception as exc:
+            _raise_migration_hint(exc)
+            raise
 
     async def execute_insert(self, sql: str, params=None):
-        async with self._lock:
-            conn = await self._get_conn()
-            try:
+        try:
+            async with (await self._get_pool()).connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
                     row = await cur.fetchone()
-                await conn.commit()
                 return row["id"] if row else None
-            except Exception as exc:
-                await conn.rollback()
-                _raise_migration_hint(exc)
-                raise
+        except Exception as exc:
+            _raise_migration_hint(exc)
+            raise
 
     async def execute_script(self, sql: str):
-        async with self._lock:
-            conn = await self._get_conn()
-            try:
-                async with conn.cursor() as cur:
-                    await cur.execute(sql)
-                await conn.commit()
-            except Exception as exc:
-                await conn.rollback()
-                raise exc
+        async with (await self._get_pool()).connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql)
 
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(
@@ -270,6 +260,6 @@ class PostgreSQLAsyncDatabaseWrapper:
         return [dict(r) for r in rows]
 
     async def close(self):
-        if self._conn and not self._conn.closed:
-            await self._conn.close()
-            self._conn = None
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
