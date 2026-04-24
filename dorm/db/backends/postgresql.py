@@ -49,6 +49,7 @@ class PostgreSQLDatabaseWrapper:
         self._pool = None
         self._pool_lock = threading.Lock()
         self._local = threading.local()  # per-instance atomic state per thread
+        self._autocommit: bool = False
 
     @property
     def _atomic_conn(self):
@@ -132,22 +133,41 @@ class PostgreSQLDatabaseWrapper:
             normalize_db_exception(exc)
             raise
 
+    def _get_persistent_conn(self):
+        """Return a thread-local persistent connection used in autocommit mode."""
+        conn = getattr(self._local, "autocommit_conn", None)
+        if conn is None or conn.closed:
+            import psycopg
+            from psycopg.rows import dict_row
+            conn = psycopg.connect(_dsn_to_conninfo(self._dsn), row_factory=dict_row, autocommit=True)  # type: ignore
+            self._local.autocommit_conn = conn
+        return conn
+
+    def _choose_conn(self):
+        """Return atomic conn, or autocommit persistent conn, or None (use pool)."""
+        atomic = self._atomic_conn
+        if atomic is not None:
+            return atomic
+        if self._autocommit:
+            return self._get_persistent_conn()
+        return None
+
     def execute(self, sql: str, params=None) -> list:
-        conn = self._atomic_conn
+        conn = self._choose_conn()
         if conn is not None:
             return self._exec(conn, sql, params)
         with self._get_pool().connection() as c:
             return self._exec(c, sql, params)
 
     def execute_write(self, sql: str, params=None) -> int:
-        conn = self._atomic_conn
+        conn = self._choose_conn()
         if conn is not None:
             return self._exec(conn, sql, params, write=True)
         with self._get_pool().connection() as c:
             return self._exec(c, sql, params, write=True)
 
     def execute_insert(self, sql: str, params=None):
-        conn = self._atomic_conn
+        conn = self._choose_conn()
         if conn is not None:
             return self._exec(conn, sql, params, insert=True)
         with self._get_pool().connection() as c:
@@ -165,7 +185,7 @@ class PostgreSQLDatabaseWrapper:
             raise
 
     def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
-        conn = self._atomic_conn
+        conn = self._choose_conn()
         if conn is not None:
             return self._exec_bulk(conn, sql, params, pk_col)
         with self._get_pool().connection() as c:
@@ -195,7 +215,35 @@ class PostgreSQLDatabaseWrapper:
         )
         return [{"name": r["column_name"], **{k: v for k, v in dict(r).items() if k != "column_name"}} for r in rows]
 
+    def set_autocommit(self, enabled: bool) -> None:
+        self._autocommit = enabled
+        if not enabled:
+            conn = getattr(self._local, "autocommit_conn", None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self._local.autocommit_conn = None
+
+    def commit(self) -> None:
+        conn = getattr(self._local, "autocommit_conn", None)
+        if conn is not None and not conn.autocommit:
+            conn.commit()
+
+    def rollback(self) -> None:
+        conn = getattr(self._local, "autocommit_conn", None)
+        if conn is not None and not conn.autocommit:
+            conn.rollback()
+
     def close(self):
+        conn = getattr(self._local, "autocommit_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.autocommit_conn = None
         if self._pool is not None:
             self._pool.close()
             self._pool = None
@@ -212,6 +260,8 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pool_lock = asyncio.Lock()
+        self._autocommit: bool = False
+        self._autocommit_conn = None
 
     async def _get_pool(self):
         current_loop = asyncio.get_event_loop()
@@ -302,24 +352,42 @@ class PostgreSQLAsyncDatabaseWrapper:
             normalize_db_exception(exc)
             raise
 
-    async def execute(self, sql: str, params=None) -> list:
+    async def _get_autocommit_conn(self):
+        if self._autocommit_conn is None or self._autocommit_conn.closed:
+            import psycopg
+            from psycopg.rows import dict_row
+            self._autocommit_conn = await psycopg.AsyncConnection.connect(
+                _dsn_to_conninfo(self._dsn), row_factory=dict_row, autocommit=True  # type: ignore
+            )
+        return self._autocommit_conn
+
+    async def _choose_conn(self):
+        """Return atomic conn or autocommit persistent conn, or None (use pool)."""
         state = ASYNC_ATOMIC_STATE.get()
         if state is not None and state[0] is self:
-            return await self._aexec(state[1], sql, params)
+            return state[1]
+        if self._autocommit:
+            return await self._get_autocommit_conn()
+        return None
+
+    async def execute(self, sql: str, params=None) -> list:
+        conn = await self._choose_conn()
+        if conn is not None:
+            return await self._aexec(conn, sql, params)
         async with (await self._get_pool()).connection() as c:
             return await self._aexec(c, sql, params)
 
     async def execute_write(self, sql: str, params=None) -> int:
-        state = ASYNC_ATOMIC_STATE.get()
-        if state is not None and state[0] is self:
-            return await self._aexec(state[1], sql, params, write=True)
+        conn = await self._choose_conn()
+        if conn is not None:
+            return await self._aexec(conn, sql, params, write=True)
         async with (await self._get_pool()).connection() as c:
             return await self._aexec(c, sql, params, write=True)
 
     async def execute_insert(self, sql: str, params=None):
-        state = ASYNC_ATOMIC_STATE.get()
-        if state is not None and state[0] is self:
-            return await self._aexec(state[1], sql, params, insert=True)
+        conn = await self._choose_conn()
+        if conn is not None:
+            return await self._aexec(conn, sql, params, insert=True)
         async with (await self._get_pool()).connection() as c:
             return await self._aexec(c, sql, params, insert=True)
 
@@ -335,9 +403,9 @@ class PostgreSQLAsyncDatabaseWrapper:
             raise
 
     async def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
-        state = ASYNC_ATOMIC_STATE.get()
-        if state is not None and state[0] is self:
-            return await self._aexec_bulk(state[1], sql, params, pk_col)
+        conn = await self._choose_conn()
+        if conn is not None:
+            return await self._aexec_bulk(conn, sql, params, pk_col)
         async with (await self._get_pool()).connection() as c:
             return await self._aexec_bulk(c, sql, params, pk_col)
 
@@ -365,7 +433,30 @@ class PostgreSQLAsyncDatabaseWrapper:
         )
         return [{"name": r["column_name"], **{k: v for k, v in dict(r).items() if k != "column_name"}} for r in rows]
 
+    async def set_autocommit(self, enabled: bool) -> None:
+        self._autocommit = enabled
+        if not enabled and self._autocommit_conn is not None:
+            try:
+                await self._autocommit_conn.close()
+            except Exception:
+                pass
+            self._autocommit_conn = None
+
+    async def commit(self) -> None:
+        if self._autocommit_conn is not None and not self._autocommit_conn.autocommit:
+            await self._autocommit_conn.commit()
+
+    async def rollback(self) -> None:
+        if self._autocommit_conn is not None and not self._autocommit_conn.autocommit:
+            await self._autocommit_conn.rollback()
+
     async def close(self):
+        if self._autocommit_conn is not None:
+            try:
+                await self._autocommit_conn.close()
+            except Exception:
+                pass
+            self._autocommit_conn = None
         if self._pool is not None:
             await self._pool.close()
             self._pool = None

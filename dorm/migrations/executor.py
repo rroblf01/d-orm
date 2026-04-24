@@ -25,6 +25,8 @@ class MigrationExecutor:
         self.loader.load_applied(self.recorder)
 
         all_migs = self._sorted(app_label)
+        # Auto-mark squashed migrations as applied when all their replaces are done
+        self._sync_squashed(app_label, all_migs)
         applied = self._applied_names(app_label)
         self._apply_forward(app_label, all_migs, applied)
 
@@ -89,6 +91,19 @@ class MigrationExecutor:
     def _applied_names(self, app_label: str) -> set[str]:
         return {name for app, name in self.loader.applied if app == app_label}
 
+    def _sync_squashed(self, app_label: str, all_migs: list) -> None:
+        """Mark a squashed migration as applied if all its replaces are applied."""
+        applied = self.loader.applied
+        for _num, name, module in all_migs:
+            replaces = getattr(module, "replaces", [])
+            if not replaces:
+                continue
+            if (app_label, name) in applied:
+                continue
+            if all((rep_app, rep_name) in applied for rep_app, rep_name in replaces):
+                self.recorder.record_applied(app_label, name)
+                self.loader.applied.add((app_label, name))
+
     @staticmethod
     def _resolve_target_num(target: str, all_migs: list, app_label: str) -> int:
         """Return the migration number for *target*, or -1 for ``"zero"``."""
@@ -133,6 +148,8 @@ class MigrationExecutor:
                 from_state = to_state.clone()
 
             self.recorder.record_applied(app_label, name)
+            for rep_app, rep_name in getattr(module, "replaces", []):
+                self.recorder.record_applied(rep_app, rep_name)
             if self.verbosity:
                 print("OK")
 

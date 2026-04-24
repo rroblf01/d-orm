@@ -14,13 +14,16 @@ class SQLiteDatabaseWrapper:
     def __init__(self, settings: dict):
         self.settings = settings
         self.database = settings.get("NAME", ":memory:")
-        self._local = threading.local()  # per-instance to support multiple aliases
+        self._local = threading.local()
+        self._autocommit: bool = False
 
     def _new_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.database, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
+        if self._autocommit:
+            conn.isolation_level = None
         return conn
 
     def get_connection(self) -> sqlite3.Connection:
@@ -93,7 +96,7 @@ class SQLiteDatabaseWrapper:
         except Exception as exc:
             normalize_db_exception(exc)
             raise
-        if self._atomic_depth == 0:
+        if self._atomic_depth == 0 and not self._autocommit:
             conn.commit()
         return cursor.rowcount
 
@@ -104,7 +107,7 @@ class SQLiteDatabaseWrapper:
         except Exception as exc:
             normalize_db_exception(exc)
             raise
-        if self._atomic_depth == 0:
+        if self._atomic_depth == 0 and not self._autocommit:
             conn.commit()
         return cursor.lastrowid
 
@@ -115,7 +118,7 @@ class SQLiteDatabaseWrapper:
         except Exception as exc:
             normalize_db_exception(exc)
             raise
-        if self._atomic_depth == 0:
+        if self._atomic_depth == 0 and not self._autocommit:
             conn.commit()
         last = cursor.lastrowid
         if not last:
@@ -138,6 +141,22 @@ class SQLiteDatabaseWrapper:
         rows = self.execute(f'PRAGMA table_info("{table_name}")')
         return [dict(r) for r in rows]
 
+    def set_autocommit(self, enabled: bool) -> None:
+        self._autocommit = enabled
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.isolation_level = None if enabled else ""
+
+    def commit(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.commit()
+
+    def rollback(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.rollback()
+
     def close(self):
         if hasattr(self._local, "conn") and self._local.conn:
             self._local.conn.close()
@@ -152,6 +171,7 @@ class SQLiteAsyncDatabaseWrapper:
         self.database = settings.get("NAME", ":memory:")
         self._conn = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._autocommit: bool = False
         # Safe to create outside a running loop (Python 3.10+).
         self._lock = asyncio.Lock()
 
@@ -175,7 +195,8 @@ class SQLiteAsyncDatabaseWrapper:
     async def _new_connection(self):
         import aiosqlite
 
-        conn = await aiosqlite.connect(self.database)
+        isolation = None if self._autocommit else ""
+        conn = await aiosqlite.connect(self.database, isolation_level=isolation)
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.execute("PRAGMA journal_mode = WAL")
@@ -265,7 +286,7 @@ class SQLiteAsyncDatabaseWrapper:
         async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])
-                if not self._in_atomic():
+                if not self._in_atomic() and not self._autocommit:
                     await conn.commit()
                 return cursor.rowcount
             except Exception as exc:
@@ -276,7 +297,7 @@ class SQLiteAsyncDatabaseWrapper:
         async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])
-                if not self._in_atomic():
+                if not self._in_atomic() and not self._autocommit:
                     await conn.commit()
                 return cursor.lastrowid
             except Exception as exc:
@@ -287,7 +308,7 @@ class SQLiteAsyncDatabaseWrapper:
         async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])
-                if not self._in_atomic():
+                if not self._in_atomic() and not self._autocommit:
                     await conn.commit()
                 last = cursor.lastrowid
                 if not last:
@@ -313,6 +334,25 @@ class SQLiteAsyncDatabaseWrapper:
     async def get_table_columns(self, table_name: str) -> list[dict]:
         rows = await self.execute(f'PRAGMA table_info("{table_name}")')
         return [dict(r) for r in rows]
+
+    async def set_autocommit(self, enabled: bool) -> None:
+        self._autocommit = enabled
+        # Close the current connection so the next operation opens a fresh one
+        # with the correct isolation_level passed to aiosqlite.connect().
+        if self._conn is not None:
+            try:
+                await self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    async def commit(self) -> None:
+        if self._conn is not None:
+            await self._conn.commit()
+
+    async def rollback(self) -> None:
+        if self._conn is not None:
+            await self._conn.rollback()
 
     async def close(self):
         if self._conn is not None:

@@ -123,6 +123,62 @@ def cmd_makemigrations(args):
         print(f"  Created migration: {path}")
 
 
+def cmd_squashmigrations(args):
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
+    _load_apps(installed_apps)
+
+    app_label = args.app_label
+    start = int(args.start_migration)
+    end = int(args.end_migration)
+    squashed_name = args.squashed_name or "squashed"
+
+    from .migrations.loader import MigrationLoader
+    from .migrations.squasher import squash_operations
+    from .migrations.writer import write_squashed_migration
+    from .db.connection import get_connection
+
+    mig_dir = _find_migrations_dir(app_label)
+    if not mig_dir.exists():
+        print(f"Error: no migrations directory found for '{app_label}'.")
+        return
+
+    conn = get_connection()
+    loader = MigrationLoader(conn)
+    loader.load(mig_dir, app_label)
+
+    all_migs = sorted(loader.migrations.get(app_label, []), key=lambda x: x[0])
+    in_range = [(num, name, mod) for num, name, mod in all_migs if start <= num <= end]
+
+    if not in_range:
+        print(f"Error: no migrations found for '{app_label}' in range [{start}, {end}].")
+        return
+
+    operations = []
+    replaces = []
+    for _num, name, mod in in_range:
+        operations.extend(getattr(mod, "operations", []))
+        replaces.append((app_label, name))
+
+    optimized = squash_operations(operations)
+
+    next_num = _next_migration_number(mig_dir)
+    path = write_squashed_migration(
+        app_label,
+        mig_dir,
+        next_num,
+        optimized,
+        replaces,
+        name=squashed_name,
+    )
+    print(f"  Created squashed migration: {path}")
+    print(f"  Replaces: {[name for _, name in replaces]}")
+    print(f"  Operations before: {len(operations)}, after: {len(optimized)}")
+
+
 def cmd_migrate(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
@@ -260,6 +316,25 @@ def main():
     sm.add_argument("apps", nargs="*")
     sm.add_argument("--settings", default=None)
     sm.set_defaults(func=cmd_showmigrations)
+
+    # squashmigrations
+    sq = sub.add_parser("squashmigrations", help="Squash a range of migrations into one")
+    sq.add_argument("app_label", help="App label")
+    sq.add_argument(
+        "start_migration",
+        nargs="?",
+        default="1",
+        help="Migration number to start from (default: 1)",
+    )
+    sq.add_argument("end_migration", help="Migration number to squash up to (inclusive)")
+    sq.add_argument(
+        "--squashed-name",
+        default="squashed",
+        metavar="NAME",
+        help="Name suffix for the squashed migration file (default: squashed)",
+    )
+    sq.add_argument("--settings", default=None)
+    sq.set_defaults(func=cmd_squashmigrations)
 
     # shell
     sh = sub.add_parser("shell", help="Start an interactive Python shell")

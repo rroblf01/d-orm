@@ -1355,6 +1355,93 @@ class Migration:
 The `MigrationAutodetector` automatically detects added and removed indexes when
 comparing two `ProjectState` objects.
 
+### Subquery support (`__in=queryset`)
+
+Pass a `QuerySet` directly as the value of an `__in` lookup. dorm compiles it as
+an `IN (SELECT …)` subquery — no intermediate Python list is materialised:
+
+```python
+# All books whose author is in the "active authors" set
+active_authors = Author.objects.filter(active=True)
+books = Book.objects.filter(author__in=active_authors)
+
+# Works with slicing too
+top3 = Author.objects.order_by("-rating")[:3]
+books = Book.objects.filter(author__in=top3)
+
+# Same-model self-referential subquery
+promoted = Author.objects.filter(rank__gte=5)
+result = Author.objects.filter(pk__in=promoted)
+
+# Async
+books = await Book.objects.filter(author__in=active_authors).all()
+```
+
+Plain list values for `__in` continue to work unchanged.
+
+### `squashmigrations` command
+
+Combine a range of migrations into a single squashed file to keep your migration
+history manageable:
+
+```bash
+# Squash migrations 0001 through 0005 for the "myapp" app
+dorm squashmigrations myapp 0001 0005
+
+# With a custom name
+dorm squashmigrations myapp 0001 0005 --squashed-name initial_squashed
+
+# Start from the very beginning (omit start_migration)
+dorm squashmigrations myapp 0005
+```
+
+The generated file has a `replaces` list that the executor honours — once all
+replaced migrations are recorded as applied, the squashed migration is
+automatically marked applied too. Operations are automatically optimised
+(e.g. consecutive `AddField`/`RemoveField` pairs cancel out, `AddField` followed
+by `AlterField` is merged into a single `AddField`).
+
+### `connection.set_autocommit()` for long-running processes
+
+Control transaction behaviour on the active connection. Useful for batch jobs and
+long-running workers where you want each statement to commit individually or where
+you manage commits manually:
+
+```python
+from dorm.db.connection import get_connection, get_async_connection
+
+# ── Sync ──────────────────────────────────────────────────────────────────────
+conn = get_connection()
+
+# Enable autocommit — each statement commits immediately
+conn.set_autocommit(True)
+for row in big_data:
+    MyModel.objects.create(**row)
+
+# Disable autocommit and manage transactions manually
+conn.set_autocommit(False)
+try:
+    MyModel.objects.create(name="A")
+    MyModel.objects.create(name="B")
+    conn.commit()
+except Exception:
+    conn.rollback()
+    raise
+
+# ── Async ─────────────────────────────────────────────────────────────────────
+conn = get_async_connection()
+await conn.set_autocommit(True)
+await MyModel.objects.acreate(name="immediate")
+await conn.set_autocommit(False)
+
+await conn.commit()    # manual commit
+await conn.rollback()  # manual rollback
+```
+
+`set_autocommit()` is supported on all backends: SQLite sync/async and
+PostgreSQL sync/async. On PostgreSQL a dedicated persistent connection
+(separate from the pool) is used when autocommit is enabled.
+
 ---
 
 ## Dependencies

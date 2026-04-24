@@ -328,10 +328,17 @@ class SQLQuery:
             joined = f"({joined})"
         if q.negated:
             joined = f"NOT {joined}"
-        return self._adapt_placeholders(joined, connection), params
+        # Return raw %s — outer as_* method adapts placeholders once for the full SQL
+        return joined, params
 
     def _compile_leaf(self, field_parts: list[str], lookup: str, value, connection) -> tuple[str, list]:
         col = self._resolve_column(field_parts)
+
+        # QuerySet as value → compile as an IN subquery
+        if lookup == "in" and hasattr(value, "_query") and hasattr(value, "model"):
+            sub_sql, sub_params = self._compile_subquery(value, connection)
+            return f"{col} IN ({sub_sql})", sub_params
+
         # Extract PK from model instances (e.g. filter(author=instance))
         if hasattr(value, "_meta") and hasattr(value, "pk"):
             value = value.pk
@@ -341,7 +348,24 @@ class SQLQuery:
                 for v in value
             ]
         sql, params = build_lookup_sql(col, lookup, value)
-        return self._adapt_placeholders(sql, connection), params
+        # Return raw %s — outer as_* method adapts placeholders once for the full SQL
+        return sql, params
+
+    def _compile_subquery(self, qs, connection) -> tuple[str, list]:
+        """Compile a QuerySet as a SELECT subquery returning the PK column."""
+        inner = qs._query.clone()
+        pk_col = qs.model._meta.pk.column
+        table = qs.model._meta.db_table
+
+        where_sql, where_params = inner._compile_nodes(inner.where_nodes, connection)
+        sql = f'SELECT "{pk_col}" FROM "{table}"'
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+        if inner.limit_val is not None:
+            sql += f" LIMIT {int(inner.limit_val)}"
+        if inner.offset_val is not None:
+            sql += f" OFFSET {int(inner.offset_val)}"
+        return sql, where_params
 
     def _resolve_column(self, field_parts: list[str]) -> str:
         model = self.model

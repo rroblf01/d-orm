@@ -246,4 +246,86 @@ def _serialize_operation(op) -> str:
     if cls == "RunSQL":
         return f"RunSQL(sql={op.sql!r})"
 
+    if cls == "AddIndex":
+        idx = op.index
+        fields_repr = repr(idx.fields)
+        unique_repr = repr(idx.unique)
+        name_repr = repr(getattr(idx, "name", None))
+        return (
+            f"AddIndex(\n        model_name={op.model_name!r},\n"
+            f"        index=Index(fields={fields_repr}, unique={unique_repr}, name={name_repr}),\n    )"
+        )
+
+    if cls == "RemoveIndex":
+        idx = op.index
+        fields_repr = repr(idx.fields)
+        unique_repr = repr(idx.unique)
+        name_repr = repr(getattr(idx, "name", None))
+        return (
+            f"RemoveIndex(\n        model_name={op.model_name!r},\n"
+            f"        index=Index(fields={fields_repr}, unique={unique_repr}, name={name_repr}),\n    )"
+        )
+
     return repr(op)
+
+
+def write_squashed_migration(
+    app_label: str,
+    migrations_dir: Path,
+    number: int,
+    operations: list,
+    replaces: list,
+    name: str = "squashed",
+) -> Path:
+    """Write a squashed migration that replaces a range of existing migrations."""
+    migrations_dir = Path(migrations_dir)
+    migrations_dir.mkdir(parents=True, exist_ok=True)
+
+    init = migrations_dir / "__init__.py"
+    if not init.exists():
+        init.write_text("")
+
+    filename = f"{number:04d}_{name}"
+    filepath = migrations_dir / f"{filename}.py"
+
+    op_classes = {type(op).__name__ for op in operations}
+
+    has_index = any(c in op_classes for c in ("AddIndex", "RemoveIndex"))
+
+    op_import = "    " + ",\n    ".join(sorted(op_classes)) + ","
+
+    op_lines = [_serialize_operation(op) for op in operations]
+    ops_str = ",\n    ".join(op_lines)
+
+    replaces_str = repr(replaces)
+
+    content = f'''"""
+Squashed migration — replaces {replaces_str}.
+Generated: {_dt.datetime.now(_dt.timezone.utc).isoformat()}
+"""
+from dorm.migrations.operations import (
+{op_import}
+)
+'''
+
+    if has_index:
+        content += "from dorm.indexes import Index\n"
+
+    field_imports: set[str] = set()
+    for op in operations:
+        _gather_field_imports(op, field_imports)
+    for imp in sorted(field_imports):
+        content += imp + "\n"
+
+    content += f"""
+replaces = {replaces_str}
+
+dependencies = []
+
+operations = [
+    {ops_str},
+]
+"""
+
+    filepath.write_text(content)
+    return filepath
