@@ -86,5 +86,12 @@ async def close_all_async():
 
 def reset_connections():
     """Force re-creation of connections (useful for testing)."""
+    for conn in _sync_connections.values():
+        if hasattr(conn, "close"):
+            try:
+                conn.close()
+            except Exception:
+                pass
     _sync_connections.clear()
+    # Async pools can only be closed with await; they will be GC'd.
     _async_connections.clear()
