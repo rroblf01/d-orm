@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from .exceptions import DoesNotExist, MultipleObjectsReturned, ValidationError
 
 if TYPE_CHECKING:
-    pass
+    from typing import Self
+    from .manager import Manager
 
 # Global model registry: "AppLabel.ModelName" → class
 _model_registry: dict[str, type] = {}
@@ -169,6 +170,9 @@ class ModelBase(type):
 
 class Model(metaclass=ModelBase):
     """Base class for all ORM models."""
+
+    if TYPE_CHECKING:
+        objects: ClassVar[Manager[Self]]
 
     class Meta:
         abstract = True
