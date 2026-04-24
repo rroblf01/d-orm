@@ -326,12 +326,14 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
                 parts.append(f"DEFAULT {default_val}")
 
     # FK reference
-    from ..fields import ForeignKey, OneToOneField
+    from ..fields import ForeignKey, OneToOneField, PROTECT
     if isinstance(field, (ForeignKey, OneToOneField)):
         rel = field._resolve_related_model()
         ref_table = rel._meta.db_table
         ref_col = rel._meta.pk.column
         on_delete = getattr(field, "on_delete", "CASCADE")
-        parts.append(f'REFERENCES "{ref_table}"("{ref_col}") ON DELETE {on_delete}')
+        # PROTECT is Python-only; use RESTRICT at the DB level
+        db_on_delete = "RESTRICT" if on_delete == PROTECT else on_delete
+        parts.append(f'REFERENCES "{ref_table}"("{ref_col}") ON DELETE {db_on_delete}')
 
     return " ".join(parts)

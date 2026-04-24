@@ -43,3 +43,9 @@ class ImproperlyConfigured(Exception):
 
 class ObjectDoesNotExist(DoesNotExist):
     pass
+
+
+class ProtectedError(IntegrityError):
+    def __init__(self, msg: str, protected_objects: list):
+        self.protected_objects = protected_objects
+        super().__init__(msg)

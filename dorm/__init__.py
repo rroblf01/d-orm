@@ -30,7 +30,8 @@ Quick start:
 """
 
 from .conf import configure, settings
-from . import transaction
+from . import signals, transaction
+from .signals import Signal, post_delete, post_save, pre_delete, pre_save
 from .exceptions import (
     DatabaseError,
     DoesNotExist,
@@ -40,10 +41,12 @@ from .exceptions import (
     MigrationError,
     MultipleObjectsReturned,
     OperationalError,
+    ProtectedError,
     ValidationError,
 )
 from .expressions import F, Q, Value
 from .aggregates import Avg, Count, Max, Min, StdDev, Sum, Variance
+from .functions import Abs, Case, Cast, Coalesce, Concat, Length, Lower, Now, Upper, When
 from .fields import (
     AutoField,
     BigAutoField,
@@ -82,7 +85,7 @@ from .fields import (
 )
 from .models import Model
 from .manager import Manager
-from .queryset import QuerySet
+from .queryset import CombinedQuerySet, QuerySet
 
 __version__ = "0.1.0"
 __all__ = [
@@ -90,10 +93,18 @@ __all__ = [
     "configure",
     "settings",
     "transaction",
+    "signals",
+    # Signals
+    "Signal",
+    "pre_save",
+    "post_save",
+    "pre_delete",
+    "post_delete",
     # Base
     "Model",
     "Manager",
     "QuerySet",
+    "CombinedQuerySet",
     # Fields
     "AutoField",
     "BigAutoField",
@@ -142,6 +153,17 @@ __all__ = [
     "Min",
     "StdDev",
     "Variance",
+    # Functions
+    "Case",
+    "When",
+    "Coalesce",
+    "Now",
+    "Concat",
+    "Cast",
+    "Upper",
+    "Lower",
+    "Length",
+    "Abs",
     # Exceptions
     "DoesNotExist",
     "MultipleObjectsReturned",
@@ -149,6 +171,7 @@ __all__ = [
     "ValidationError",
     "DatabaseError",
     "IntegrityError",
+    "ProtectedError",
     "OperationalError",
     "MigrationError",
     "ImproperlyConfigured",

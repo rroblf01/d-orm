@@ -38,7 +38,7 @@ class ProjectState:
         for key, model_cls in _model_registry.items():
             if "." in key:
                 continue  # skip aliased entries
-            meta = model_cls._meta  # type: ignore
+            meta = model_cls._meta
             if meta.abstract:
                 continue
             target_app = meta.app_label

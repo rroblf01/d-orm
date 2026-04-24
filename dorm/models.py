@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from .manager import Manager
 
 # Global model registry: "AppLabel.ModelName" → class
-_model_registry: dict[str, type] = {}
+_model_registry: dict[str, Any] = {}
 
 
 class Options:
@@ -112,6 +112,13 @@ class ModelBase(type):
         if not opts.db_table:
             opts.db_table = f"{app_label}_{name.lower()}"
 
+        # Inherit Meta options from abstract parents (unless explicitly set on this class)
+        explicitly_set = set(meta.__dict__) if meta else set()
+        for parent in parents:
+            if hasattr(parent, "_meta") and parent._meta.abstract:
+                if "ordering" not in explicitly_set and parent._meta.ordering:
+                    opts.ordering = list(parent._meta.ordering)
+
         # Collect fields from class attributes
         declared_fields = []
         for k, v in list(attrs.items()):
@@ -146,9 +153,9 @@ class ModelBase(type):
         for fname, field in declared_fields:
             field.contribute_to_class(new_class, fname)
 
-        # Add default manager if none defined
+        # Add default manager only for concrete models
         from .manager import Manager
-        if not any(isinstance(v, Manager) for v in attrs.values()):
+        if not opts.abstract and not any(isinstance(v, Manager) for v in attrs.values()):
             manager = Manager()
             manager.contribute_to_class(new_class, "objects")
 
@@ -172,6 +179,18 @@ class ModelBase(type):
         _model_registry[name] = new_class
         _model_registry[f"{app_label}.{name}"] = new_class
 
+        # Resolve any pending reverse FK relations that target this model
+        from .fields import _pending_reverse_relations
+        from .related_managers import ReverseFKDescriptor
+        still_pending = []
+        for src_model, fk_field, rel_name in _pending_reverse_relations:
+            try:
+                target = fk_field._resolve_related_model()
+                setattr(target, rel_name, ReverseFKDescriptor(src_model, fk_field))
+            except Exception:
+                still_pending.append((src_model, fk_field, rel_name))
+        _pending_reverse_relations[:] = still_pending
+
         return new_class
 
 
@@ -189,8 +208,10 @@ class Model(metaclass=ModelBase):
 
     def __init__(self, **kwargs):
         meta = self._meta
-        # Set defaults first
+        # Set defaults first (skip M2M fields — they have no column and use descriptors)
         for field in meta.fields:
+            if field.many_to_many:
+                continue
             if field.attname not in kwargs:
                 if field.has_default():
                     self.__dict__[field.attname] = field.get_default()
@@ -224,31 +245,57 @@ class Model(metaclass=ModelBase):
 
     # ── Sync persistence ──────────────────────────────────────────────────────
 
-    def save(self, using: str = "default", force_insert: bool = False, force_update: bool = False, update_fields=None):
+    def save(
+        self,
+        using: str = "default",
+        force_insert: bool = False,
+        force_update: bool = False,
+        update_fields: list[str] | None = None,
+    ) -> None:
         from .db.connection import get_connection
+        from .signals import post_save, pre_save
+
         conn = get_connection(using)
         meta = self._meta
+        adding = force_insert or self.pk is None
 
-        if force_insert or self.pk is None:
+        pre_save.send(
+            self.__class__,
+            instance=self,
+            raw=False,
+            using=using,
+            update_fields=update_fields,
+        )
+        if adding:
             self._do_insert(conn, meta)
         else:
             self._do_update(conn, meta, update_fields)
+        post_save.send(
+            self.__class__,
+            instance=self,
+            created=adding,
+            raw=False,
+            using=using,
+            update_fields=update_fields,
+        )
 
-    def _do_insert(self, conn, meta):
+    def _do_insert(self, conn, meta) -> None:
         from .fields import AutoField
         from .query import SQLQuery
+
         fields = []
         values = []
         for field in meta.fields:
-            if isinstance(field, AutoField) and field.attname not in self.__dict__:
+            if not field.column:  # skip M2M and other non-column fields
                 continue
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
-            col_val = field.get_db_prep_value(self.__dict__.get(field.attname))
+            col_val = field.get_db_prep_value(field.pre_save(self, add=True))
             if col_val is None and not field.null and not isinstance(field, AutoField):
                 if field.has_default():
-                    col_val = field.get_db_prep_value(field.get_default())
-                    self.__dict__[field.attname] = field.get_default()
+                    default = field.get_default()
+                    col_val = field.get_db_prep_value(default)
+                    self.__dict__[field.attname] = default
             fields.append(field)
             values.append(col_val)
 
@@ -258,24 +305,28 @@ class Model(metaclass=ModelBase):
         if meta.pk and pk is not None:
             self.__dict__[meta.pk.attname] = pk
 
-    def _do_update(self, conn, meta, update_fields=None):
+    def _do_update(self, conn, meta, update_fields: list[str] | None = None) -> None:
+        from .fields import AutoField
         from .query import SQLQuery
-        fields_to_update = []
-        if update_fields:
+
+        if update_fields is not None:
+            fields_to_update = []
             for fname in update_fields:
                 try:
-                    fields_to_update.append(meta.get_field(fname))
+                    f = meta.get_field(fname)
+                    if f.column:
+                        fields_to_update.append(f)
                 except Exception:
                     pass
         else:
-            from .fields import AutoField
-            fields_to_update = [f for f in meta.fields if not isinstance(f, AutoField)]
+            fields_to_update = [
+                f for f in meta.fields if not isinstance(f, AutoField) and f.column
+            ]
 
         col_kwargs = {}
         for field in fields_to_update:
-            col_kwargs[field.column] = field.get_db_prep_value(
-                self.__dict__.get(field.attname)
-            )
+            val = field.pre_save(self, add=False)
+            col_kwargs[field.column] = field.get_db_prep_value(val)
 
         query = SQLQuery(self.__class__)
         pk_field = meta.pk
@@ -283,39 +334,105 @@ class Model(metaclass=ModelBase):
         sql, params = query.as_update(col_kwargs, conn)
         conn.execute_write(sql, params)
 
-    def delete(self, using: str = "default"):
+    def _handle_on_delete(self, using: str = "default") -> None:
+        """Apply Python-level on_delete behaviour for all reverse FK relations."""
+        from .exceptions import ProtectedError
+        from .fields import CASCADE, DO_NOTHING, PROTECT, SET_DEFAULT, SET_NULL
+        from .related_managers import ReverseFKDescriptor
+
+        for attr_val in type(self).__dict__.values():
+            if not isinstance(attr_val, ReverseFKDescriptor):
+                continue
+            fk_field = attr_val.fk_field
+            on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
+            if on_delete == DO_NOTHING:
+                continue
+
+            related_manager = attr_val.__get__(self, type(self))
+            related_qs = related_manager.get_queryset()
+
+            if on_delete == PROTECT:
+                objs = list(related_qs)
+                if objs:
+                    raise ProtectedError(
+                        f"Cannot delete {self!r} because related "
+                        f"{attr_val.source_model.__name__} objects exist.",
+                        objs,
+                    )
+            elif on_delete == CASCADE:
+                for obj in list(related_qs):
+                    obj.delete(using=using)
+            elif on_delete == SET_NULL:
+                related_qs.update(**{fk_field.name: None})
+            elif on_delete == SET_DEFAULT:
+                related_qs.update(**{fk_field.name: fk_field.get_default()})
+
+    def delete(self, using: str = "default") -> tuple[int, dict[str, int]]:
         from .db.connection import get_connection
         from .query import SQLQuery
+        from .signals import post_delete, pre_delete
+
+        self._handle_on_delete(using=using)
+
         conn = get_connection(using)
+        pre_delete.send(self.__class__, instance=self, using=using)
+
         query = SQLQuery(self.__class__)
         pk_field = self._meta.pk
         query.where_nodes.append(([pk_field.column], "exact", self.pk))
         sql, params = query.as_delete(conn)
         count = conn.execute_write(sql, params)
+
+        post_delete.send(self.__class__, instance=self, using=using)
         self.pk = None
         return count, {f"{self._meta.app_label}.{self.__class__.__name__}": count}
 
     # ── Async persistence ─────────────────────────────────────────────────────
 
-    async def asave(self, using: str = "default", force_insert: bool = False, force_update: bool = False, update_fields=None):
+    async def asave(
+        self,
+        using: str = "default",
+        force_insert: bool = False,
+        force_update: bool = False,
+        update_fields: list[str] | None = None,
+    ) -> None:
         from .db.connection import get_async_connection
+        from .signals import post_save, pre_save
+
         conn = get_async_connection(using)
         meta = self._meta
+        adding = force_insert or self.pk is None
 
-        if force_insert or self.pk is None:
+        pre_save.send(
+            self.__class__,
+            instance=self,
+            raw=False,
+            using=using,
+            update_fields=update_fields,
+        )
+        if adding:
             await self._ado_insert(conn, meta)
         else:
             await self._ado_update(conn, meta, update_fields)
+        post_save.send(
+            self.__class__,
+            instance=self,
+            created=adding,
+            raw=False,
+            using=using,
+            update_fields=update_fields,
+        )
 
-    async def _ado_insert(self, conn, meta):
+    async def _ado_insert(self, conn, meta) -> None:
         from .fields import AutoField
         from .query import SQLQuery
+
         fields = []
         values = []
         for field in meta.fields:
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
-            col_val = field.get_db_prep_value(self.__dict__.get(field.attname))
+            col_val = field.get_db_prep_value(field.pre_save(self, add=True))
             fields.append(field)
             values.append(col_val)
 
@@ -325,24 +442,30 @@ class Model(metaclass=ModelBase):
         if meta.pk and pk is not None:
             self.__dict__[meta.pk.attname] = pk
 
-    async def _ado_update(self, conn, meta, update_fields=None):
+    async def _ado_update(
+        self, conn, meta, update_fields: list[str] | None = None
+    ) -> None:
         from .fields import AutoField
         from .query import SQLQuery
-        fields_to_update = []
-        if update_fields:
+
+        if update_fields is not None:
+            fields_to_update = []
             for fname in update_fields:
                 try:
-                    fields_to_update.append(meta.get_field(fname))
+                    f = meta.get_field(fname)
+                    if f.column:
+                        fields_to_update.append(f)
                 except Exception:
                     pass
         else:
-            fields_to_update = [f for f in meta.fields if not isinstance(f, AutoField)]
+            fields_to_update = [
+                f for f in meta.fields if not isinstance(f, AutoField) and f.column
+            ]
 
         col_kwargs = {}
         for field in fields_to_update:
-            col_kwargs[field.column] = field.get_db_prep_value(
-                self.__dict__.get(field.attname)
-            )
+            val = field.pre_save(self, add=False)
+            col_kwargs[field.column] = field.get_db_prep_value(val)
 
         query = SQLQuery(self.__class__)
         pk_field = meta.pk
@@ -350,15 +473,23 @@ class Model(metaclass=ModelBase):
         sql, params = query.as_update(col_kwargs, conn)
         await conn.execute_write(sql, params)
 
-    async def adelete(self, using: str = "default"):
+    async def adelete(self, using: str = "default") -> tuple[int, dict[str, int]]:
         from .db.connection import get_async_connection
         from .query import SQLQuery
+        from .signals import post_delete, pre_delete
+
+        self._handle_on_delete(using=using)
+
         conn = get_async_connection(using)
+        pre_delete.send(self.__class__, instance=self, using=using)
+
         query = SQLQuery(self.__class__)
         pk_field = self._meta.pk
         query.where_nodes.append(([pk_field.column], "exact", self.pk))
         sql, params = query.as_delete(conn)
         count = await conn.execute_write(sql, params)
+
+        post_delete.send(self.__class__, instance=self, using=using)
         self.pk = None
         return count, {f"{self._meta.app_label}.{self.__class__.__name__}": count}
 
@@ -381,11 +512,13 @@ class Model(metaclass=ModelBase):
                     instance.__dict__[field.attname] = field.from_db_value(row[i])
         return instance
 
-    def full_clean(self):
+    def clean_fields(self, exclude: list[str] | None = None) -> None:
         from .fields import AutoField
-        errors = {}
+
+        errors: dict[str, str] = {}
         for field in self._meta.fields:
-            # Skip AutoField when pk is not yet assigned (new unsaved instance)
+            if exclude and field.name in exclude:
+                continue
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
             value = self.__dict__.get(field.attname)
@@ -395,6 +528,68 @@ class Model(metaclass=ModelBase):
                 errors[field.name] = str(e)
         if errors:
             raise ValidationError(errors)
+
+    def clean(self) -> None:
+        """Override to add model-level validation. Call super().clean() to chain."""
+
+    def validate_unique(self, exclude: list[str] | None = None) -> None:
+        from .fields import AutoField
+        from .queryset import QuerySet
+
+        errors: dict[str, str] = {}
+        # Per-field unique
+        for field in self._meta.fields:
+            if not getattr(field, "unique", False) or field.primary_key:
+                continue
+            if isinstance(field, AutoField):
+                continue
+            if exclude and field.name in exclude:
+                continue
+            value = self.__dict__.get(field.attname)
+            if value is None:
+                continue
+            qs: Any = QuerySet(self.__class__).filter(**{field.column: value})
+            if self.pk is not None:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                errors[field.name] = (
+                    f"A {self.__class__.__name__} with this {field.verbose_name or field.name} "
+                    "already exists."
+                )
+        # unique_together
+        for combo in self._meta.unique_together:
+            if exclude and any(f in exclude for f in combo):
+                continue
+            lookup: dict[str, Any] = {}
+            skip = False
+            for fname in combo:
+                try:
+                    f = self._meta.get_field(fname)
+                    val = self.__dict__.get(f.attname)
+                    if val is None:
+                        skip = True
+                        break
+                    lookup[fname] = val
+                except Exception:
+                    skip = True
+                    break
+            if skip:
+                continue
+            qs2: Any = QuerySet(self.__class__).filter(**lookup)
+            if self.pk is not None:
+                qs2 = qs2.exclude(pk=self.pk)
+            if qs2.exists():
+                combo_str = ", ".join(combo)
+                errors["__all__"] = (
+                    f"{self.__class__.__name__} with this {combo_str} already exists."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def full_clean(self, exclude: list[str] | None = None) -> None:
+        self.clean_fields(exclude=exclude)
+        self.clean()
+        self.validate_unique(exclude=exclude)
 
     def refresh_from_db(self, using: str = "default", fields=None):
         from .queryset import QuerySet

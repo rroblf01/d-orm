@@ -68,13 +68,21 @@ def clean_db(configure_dorm):
     reset_connections()
     conn = get_connection()
 
-    # Drop in dependency order (referencing table first)
-    for tbl in ["books", "authors"]:
-        conn.execute_script(f'DROP TABLE IF EXISTS "{tbl}"')
+    # Drop in dependency order (referencing tables first).
+    # Use CASCADE on PostgreSQL to handle orphaned FK constraints from migration tests.
+    cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
+    for tbl in ["articles_tags", "books", "articles", "tags", "authors", "publishers"]:
+        conn.execute_script(f'DROP TABLE IF EXISTS "{tbl}"{cascade}')
 
-    from tests.models import Author, Book  # noqa: PLC0415
+    from tests.models import Article, Author, Book, Publisher, Tag  # noqa: PLC0415
 
-    for model, tbl in [(Author, "authors"), (Book, "books")]:
+    for model, tbl in [
+        (Publisher, "publishers"),
+        (Author, "authors"),
+        (Book, "books"),
+        (Tag, "tags"),
+        (Article, "articles"),
+    ]:
         cols = [
             _field_to_column_sql(f.name, f, conn)
             for f in model._meta.fields
@@ -85,3 +93,14 @@ def clean_db(configure_dorm):
             + ",\n  ".join(filter(None, cols))
             + "\n)"
         )
+
+    # Junction table for Article.tags (ManyToManyField)
+    vendor = getattr(conn, "vendor", "sqlite")
+    pk_type = "INTEGER PRIMARY KEY AUTOINCREMENT" if vendor == "sqlite" else "SERIAL PRIMARY KEY"
+    conn.execute_script(
+        f'CREATE TABLE IF NOT EXISTS "articles_tags" (\n'
+        f'  "id" {pk_type},\n'
+        f'  "article_id" BIGINT NOT NULL REFERENCES "articles"("id"),\n'
+        f'  "tag_id" BIGINT NOT NULL REFERENCES "tags"("id")\n'
+        f")"
+    )

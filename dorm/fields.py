@@ -10,7 +10,26 @@ from typing import Any
 
 from .exceptions import ValidationError
 
-NOT_PROVIDED = object()
+class _NotProvided:
+    """Sentinel for fields with no default. Survives deepcopy as a singleton."""
+    _instance: "_NotProvided | None" = None
+
+    def __new__(cls) -> "_NotProvided":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __deepcopy__(self, memo: dict) -> "_NotProvided":
+        return self
+
+    def __copy__(self) -> "_NotProvided":
+        return self
+
+    def __repr__(self) -> str:
+        return "NOT_PROVIDED"
+
+
+NOT_PROVIDED = _NotProvided()
 CASCADE = "CASCADE"
 PROTECT = "PROTECT"
 SET_NULL = "SET NULL"
@@ -118,6 +137,9 @@ class Field:
                     f"Value '{value}' is not a valid choice for '{self.name}'."
                 )
 
+    def pre_save(self, model_instance: Any, add: bool) -> Any:
+        return model_instance.__dict__.get(self.attname)
+
     def get_internal_type(self) -> str:
         return self.__class__.__name__
 
@@ -138,6 +160,12 @@ class AutoField(Field):
             return "SERIAL"
         return "INTEGER"
 
+    def rel_db_type(self, connection) -> str:
+        backend = getattr(connection, "vendor", "sqlite")
+        if backend == "postgresql":
+            return "INTEGER"
+        return "INTEGER"
+
     def to_python(self, value):
         if value is None:
             return None
@@ -151,12 +179,24 @@ class BigAutoField(AutoField):
             return "BIGSERIAL"
         return "INTEGER"
 
+    def rel_db_type(self, connection) -> str:
+        backend = getattr(connection, "vendor", "sqlite")
+        if backend == "postgresql":
+            return "BIGINT"
+        return "INTEGER"
+
 
 class SmallAutoField(AutoField):
     def db_type(self, connection) -> str:
         backend = getattr(connection, "vendor", "sqlite")
         if backend == "postgresql":
             return "SMALLSERIAL"
+        return "INTEGER"
+
+    def rel_db_type(self, connection) -> str:
+        backend = getattr(connection, "vendor", "sqlite")
+        if backend == "postgresql":
+            return "SMALLINT"
         return "INTEGER"
 
 
@@ -386,7 +426,8 @@ class DateTimeField(Field):
         return value
 
     def db_type(self, connection) -> str:
-        return "DATETIME"
+        vendor = getattr(connection, "vendor", "sqlite")
+        return "TIMESTAMP" if vendor == "postgresql" else "DATETIME"
 
     def pre_save(self, model_instance, add: bool):
         assert self.attname is not None
@@ -599,14 +640,24 @@ class RelatedField(Field):
     def db_type(self, connection) -> str:
         related = self._resolve_related_model()
         pk_field = related._meta.pk
+        rel_type = getattr(pk_field, "rel_db_type", None)
+        if rel_type is not None:
+            return rel_type(connection)
         return pk_field.db_type(connection)
+
+
+_pending_reverse_relations: list[tuple] = []
 
 
 class ForeignKey(RelatedField):
     def contribute_to_class(self, cls, name: str):
         super().contribute_to_class(cls, name)
-        _rel_name = self.related_name or f"{cls.__name__.lower()}_set"
-        # Reverse accessor is added lazily to avoid circular imports
+        rel_name = self.related_name or f"{cls.__name__.lower()}_set"
+        if not isinstance(self.remote_field_to, str):
+            from .related_managers import ReverseFKDescriptor
+            setattr(self.remote_field_to, rel_name, ReverseFKDescriptor(cls, self))
+        else:
+            _pending_reverse_relations.append((cls, self, rel_name))
 
 
 class OneToOneField(RelatedField):
@@ -627,6 +678,8 @@ class ManyToManyField(Field):
         self.related_name = related_name
         kwargs["null"] = True
         super().__init__(**kwargs)
+        self.many_to_many = True
+        self.concrete = False
 
     def contribute_to_class(self, cls, name: str):
         self.name = name
@@ -635,6 +688,8 @@ class ManyToManyField(Field):
         if self.verbose_name is None:
             self.verbose_name = name.replace("_", " ")
         cls._meta.add_field(self)
+        from .related_managers import ManyToManyDescriptor
+        setattr(cls, name, ManyToManyDescriptor(self))
 
     def db_type(self, connection) -> str | None:
         return None  # no column; uses junction table
@@ -645,3 +700,45 @@ class ManyToManyField(Field):
 
             return _model_registry[self.remote_field_to]
         return self.remote_field_to
+
+    def _get_through_table(self) -> str:
+        assert self.model is not None
+        if self.through:
+            if isinstance(self.through, str):
+                from .models import _model_registry
+                tm: Any = _model_registry[self.through]
+                return tm._meta.db_table
+            tm2: Any = self.through
+            return tm2._meta.db_table
+        return f"{self.model._meta.db_table}_{self.name}"  # type: ignore[union-attr]
+
+    def _get_through_columns(self) -> tuple[str, str]:
+        """Return (source_col, target_col) in the junction table."""
+        assert self.model is not None
+        if self.through:
+            if isinstance(self.through, str):
+                from .models import _model_registry
+                through_model: Any = _model_registry[self.through]
+            else:
+                through_model = self.through
+            rel_model = self._resolve_related_model()
+            src_col = tgt_col = None
+            for f in through_model._meta.fields:
+                if hasattr(f, "_resolve_related_model"):
+                    try:
+                        rm = f._resolve_related_model()
+                        if rm is self.model:
+                            src_col = f.column
+                        elif rm is rel_model:
+                            tgt_col = f.column
+                    except Exception:
+                        pass
+            return (
+                src_col or f"{self.model.__name__}_id".lower(),
+                tgt_col or f"{rel_model.__name__}_id".lower(),
+            )
+        rel_model = self._resolve_related_model()
+        return (
+            f"{self.model.__name__}_id".lower(),
+            f"{rel_model.__name__}_id".lower(),
+        )

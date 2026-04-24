@@ -91,7 +91,7 @@ class QuerySet(Generic[_T]):
 
     def none(self) -> QuerySet[_T]:
         qs = self._clone()
-        qs._query.where_nodes.append(("__none__", "exact", "__none__"))
+        qs._query.where_nodes.append(Q(pk__in=[]))
         qs._result_cache = []
         return qs
 
@@ -111,6 +111,15 @@ class QuerySet(Generic[_T]):
         qs = self._clone()
         qs._query.distinct_flag = True
         return qs
+
+    def union(self, *other_qs: QuerySet[_T], all: bool = False) -> "CombinedQuerySet[_T]":
+        return CombinedQuerySet._combine(self, list(other_qs), "UNION", all)
+
+    def intersection(self, *other_qs: QuerySet[_T]) -> "CombinedQuerySet[_T]":
+        return CombinedQuerySet._combine(self, list(other_qs), "INTERSECT", False)
+
+    def difference(self, *other_qs: QuerySet[_T]) -> "CombinedQuerySet[_T]":
+        return CombinedQuerySet._combine(self, list(other_qs), "EXCEPT", False)
 
     def select_related(self, *fields: str) -> QuerySet[_T]:
         qs = self._clone()
@@ -265,71 +274,211 @@ class QuerySet(Generic[_T]):
     def _hydrate_select_related(
         model: type[Model], instance: _T, sr_fields: list[str], row_dict: dict
     ) -> None:
-        for fname in sr_fields:
-            try:
-                field = model._meta.get_field(fname)
-                if not hasattr(field, "_resolve_related_model"):
-                    continue
-                rel_model = field._resolve_related_model()
-                prefix = f"_sr_{fname}_"
-                rel_data = {
-                    k[len(prefix) :]: v
-                    for k, v in row_dict.items()
-                    if k.startswith(prefix)
-                }
-                if rel_data and any(v is not None for v in rel_data.values()):
-                    rel_inst = rel_model.__new__(rel_model)
-                    rel_inst.__dict__ = {}
-                    for rf in rel_model._meta.fields:
-                        if rf.column in rel_data:
-                            rel_inst.__dict__[rf.attname] = rf.from_db_value(
-                                rel_data[rf.column]
-                            )
-                    instance.__dict__[f"_cache_{fname}"] = rel_inst
-                else:
-                    instance.__dict__[f"_cache_{fname}"] = None
-            except Exception:
-                pass
+        # Collect all unique path prefixes, sorted by depth (shortest first)
+        all_paths: list[str] = []
+        for path_str in sr_fields:
+            parts = path_str.split("__")
+            for depth in range(len(parts)):
+                step_path = "__".join(parts[: depth + 1])
+                if step_path not in all_paths:
+                    all_paths.append(step_path)
+
+        # Map path → created related instance
+        created: dict[str, Any] = {}
+
+        for step_path in all_paths:
+            parts = step_path.split("__")
+            # Resolve model for this path
+            current_model: Any = model
+            for step in parts:
+                try:
+                    field = current_model._meta.get_field(step)
+                    if not hasattr(field, "_resolve_related_model"):
+                        current_model = None
+                        break
+                    current_model = field._resolve_related_model()
+                except Exception:
+                    current_model = None
+                    break
+            if current_model is None:
+                created[step_path] = None
+                continue
+
+            prefix = f"_sr_{step_path}_"
+            rel_data = {k[len(prefix):]: v for k, v in row_dict.items() if k.startswith(prefix)}
+            if rel_data and any(v is not None for v in rel_data.values()):
+                rel_inst = current_model.__new__(current_model)
+                rel_inst.__dict__ = {}
+                for rf in current_model._meta.fields:
+                    if rf.column in rel_data:
+                        rel_inst.__dict__[rf.attname] = rf.from_db_value(rel_data[rf.column])
+                created[step_path] = rel_inst
+            else:
+                created[step_path] = None
+
+            # Attach to parent
+            cache_key = f"_cache_{parts[-1]}"
+            if len(parts) == 1:
+                instance.__dict__[cache_key] = created[step_path]
+            else:
+                parent_path = "__".join(parts[:-1])
+                parent_inst = created.get(parent_path)
+                if parent_inst is not None:
+                    parent_inst.__dict__[cache_key] = created[step_path]
 
     def _do_prefetch_related(self, instances: list[_T]) -> None:
         for fname in self._query.prefetch_related_fields:
+            field = None
             try:
                 field = self.model._meta.get_field(fname)
             except Exception:
-                continue
-            if not hasattr(field, "_resolve_related_model"):
-                continue
-            rel_model = field._resolve_related_model()
-            pk_vals = list(
-                {
-                    obj.__dict__.get(field.attname)
-                    for obj in instances
-                    if obj.__dict__.get(field.attname) is not None
+                pass
+
+            if field is not None and getattr(field, "many_to_many", False):
+                self._prefetch_m2m(instances, fname, field)
+            elif field is not None and hasattr(field, "_resolve_related_model"):
+                # Forward FK
+                rel_model = field._resolve_related_model()
+                pk_vals = list(
+                    {
+                        obj.__dict__.get(field.attname)
+                        for obj in instances
+                        if obj.__dict__.get(field.attname) is not None
+                    }
+                )
+                cache_key = f"_cache_{fname}"
+                if not pk_vals:
+                    for inst in instances:
+                        inst.__dict__.setdefault(cache_key, None)
+                    continue
+                related_objs: dict = {
+                    obj.pk: obj
+                    for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals)  # type: ignore[arg-type]
                 }
-            )
-            cache_key = f"_cache_{fname}"
-            if not pk_vals:
                 for inst in instances:
-                    inst.__dict__.setdefault(cache_key, None)
-                continue
-            related_objs: dict = {
-                obj.pk: obj
-                for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals)  # type: ignore[arg-type]
-            }
+                    fk_val = inst.__dict__.get(field.attname)
+                    inst.__dict__[cache_key] = related_objs.get(fk_val)
+            else:
+                # Reverse FK
+                self._prefetch_reverse_fk(instances, fname)
+
+    def _prefetch_m2m(self, instances: list[_T], fname: str, field: Any) -> None:
+        from .query import SQLQuery
+
+        cache_key = f"_prefetch_{fname}"
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        if not src_pks:
             for inst in instances:
-                fk_val = inst.__dict__.get(field.attname)
-                inst.__dict__[cache_key] = related_objs.get(fk_val)
+                inst.__dict__[cache_key] = []
+            return
+
+        conn = self._get_connection()
+        rel_model = field._resolve_related_model()
+        through = field._get_through_table()
+        src_col, tgt_col = field._get_through_columns()
+
+        ph = ", ".join(["%s"] * len(src_pks))
+        sql = f'SELECT "{src_col}", "{tgt_col}" FROM "{through}" WHERE "{src_col}" IN ({ph})'
+        sql = SQLQuery(self.model)._adapt_placeholders(sql, conn)
+        rows = conn.execute(sql, src_pks)
+
+        src_to_tgts: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        all_tgt_pks: list[Any] = []
+        for row in rows:
+            s = row[src_col] if hasattr(row, "keys") else row[0]
+            t = row[tgt_col] if hasattr(row, "keys") else row[1]
+            if s in src_to_tgts:
+                src_to_tgts[s].append(t)
+            all_tgt_pks.append(t)
+
+        if all_tgt_pks:
+            tgt_objs: dict[Any, Any] = {
+                obj.pk: obj
+                for obj in QuerySet(rel_model, self._db).filter(pk__in=all_tgt_pks)  # type: ignore[arg-type]
+            }
+        else:
+            tgt_objs = {}
+
+        for inst in instances:
+            tpks = src_to_tgts.get(inst.pk, [])
+            inst.__dict__[cache_key] = [tgt_objs[pk] for pk in tpks if pk in tgt_objs]
+
+    def _prefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
+        from .related_managers import ReverseFKDescriptor
+
+        cache_key = f"_prefetch_{fname}"
+
+        # Primary path: ReverseFKDescriptor installed directly on model class
+        descriptor = self.model.__dict__.get(fname)
+        if isinstance(descriptor, ReverseFKDescriptor):
+            target_model = descriptor.source_model
+            target_field = descriptor.fk_field
+        else:
+            # Fallback: scan model registry (less reliable across name clashes)
+            from .models import _model_registry
+            from .fields import ForeignKey, OneToOneField
+
+            target_field = None
+            target_model = None
+            seen: set[Any] = set()
+            for model_cls in _model_registry.values():
+                if model_cls in seen:
+                    continue
+                seen.add(model_cls)
+                for f in model_cls._meta.fields:
+                    if not isinstance(f, (ForeignKey, OneToOneField)):
+                        continue
+                    try:
+                        rel = f._resolve_related_model()
+                    except Exception:
+                        continue
+                    if rel is not self.model:
+                        continue
+                    rel_name = f.related_name or f"{model_cls.__name__.lower()}_set"
+                    if rel_name == fname:
+                        target_field = f
+                        target_model = model_cls
+                        break
+                if target_field:
+                    break
+
+            if target_field is None or target_model is None:
+                return
+
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        if not src_pks:
+            for inst in instances:
+                inst.__dict__[cache_key] = []
+            return
+
+        related_objs = list(
+            QuerySet(target_model, self._db).filter(**{f"{target_field.name}__in": src_pks})  # type: ignore[arg-type]
+        )
+
+        fk_attname = target_field.attname
+        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        for obj in related_objs:
+            fk_val = obj.__dict__.get(fk_attname)
+            if fk_val in grouped:
+                grouped[fk_val].append(obj)
+
+        for inst in instances:
+            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
 
     def _iterator(self) -> Iterator[_T]:
         connection = self._get_connection()
-        sql, params = self._query.as_select(connection)
+        query = self._query
+        if not query.order_by_fields and self.model._meta.ordering:
+            query = query.clone()
+            query.order_by_fields = list(self.model._meta.ordering)
+        sql, params = query.as_select(connection)
         rows = connection.execute(sql, params)
 
-        sf = self._query.selected_fields
-        values_mode = sf is not None and not self._query.deferred_loading
-        sr_fields = self._query.select_related_fields
+        sf = query.selected_fields
+        values_mode = sf is not None and not query.deferred_loading
+        sr_fields = query.select_related_fields
         collect_for_prefetch = (
-            bool(self._query.prefetch_related_fields) and not values_mode
+            bool(query.prefetch_related_fields) and not values_mode
         )
 
         instances: list[_T] = []
@@ -345,6 +494,13 @@ class QuerySet(Generic[_T]):
 
             instance = self.model._from_db_row(row, connection)  # type: ignore[misc]
 
+            # Hydrate annotation values onto the instance
+            if self._query.annotations:
+                row_dict = dict(row) if hasattr(row, "keys") else {}
+                for alias in self._query.annotations:
+                    if alias in row_dict:
+                        instance.__dict__[alias] = row_dict[alias]
+
             if sr_fields:
                 self._hydrate_select_related(
                     self.model, instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
@@ -358,6 +514,15 @@ class QuerySet(Generic[_T]):
         if collect_for_prefetch and instances:
             self._do_prefetch_related(instances)
             yield from instances
+
+    def iterator(self, chunk_size: int | None = None) -> Iterator[_T]:
+        """Stream results one by one without populating the result cache."""
+        return self._iterator()
+
+    async def aiterator(self, chunk_size: int | None = None) -> AsyncIterator[_T]:
+        """Async stream results one by one without populating the result cache."""
+        async for item in self._aiterator():
+            yield item
 
     def get(self, *args: Q, **kwargs: Any) -> _T:
         qs = self.filter(*args, **kwargs)
@@ -596,14 +761,18 @@ class QuerySet(Generic[_T]):
 
     async def _aiterator(self) -> AsyncIterator[_T]:
         conn = self._get_async_connection()
-        sql, params = self._query.as_select(conn)
+        query = self._query
+        if not query.order_by_fields and self.model._meta.ordering:
+            query = query.clone()
+            query.order_by_fields = list(self.model._meta.ordering)
+        sql, params = query.as_select(conn)
         rows = await conn.execute(sql, params)
 
-        sf = self._query.selected_fields
-        values_mode = sf is not None and not self._query.deferred_loading
-        sr_fields = self._query.select_related_fields
+        sf = query.selected_fields
+        values_mode = sf is not None and not query.deferred_loading
+        sr_fields = query.select_related_fields
         collect_for_prefetch = (
-            bool(self._query.prefetch_related_fields) and not values_mode
+            bool(query.prefetch_related_fields) and not values_mode
         )
 
         instances: list[_T] = []
@@ -890,3 +1059,107 @@ class ValuesListQuerySet(QuerySet[Any]):
         fields = self._resolve_fields()
         for row in rows:
             yield self._extract_row(row, fields)
+
+
+class CombinedQuerySet(QuerySet[_T]):
+    """Produced by .union() / .intersection() / .difference()."""
+
+    def __init__(self, model: type[_T], using: str = "default") -> None:
+        super().__init__(model, using)
+        self._combined_queries: list[tuple[str, list]] = []
+        self._combinator: str = "UNION"
+        self._union_all: bool = False
+
+    @classmethod
+    def _combine(
+        cls,
+        base_qs: QuerySet[_T],
+        other_qs: list[QuerySet[_T]],
+        combinator: str,
+        union_all: bool,
+    ) -> "CombinedQuerySet[_T]":
+        result: CombinedQuerySet[_T] = cls(base_qs.model, base_qs._db)
+        result._combinator = combinator
+        result._union_all = union_all
+        connection = base_qs._get_connection()
+        sql, params = base_qs._query.as_select(connection)
+        result._combined_queries.append((sql, params))
+        for oqs in other_qs:
+            osql, oparams = oqs._query.as_select(connection)
+            result._combined_queries.append((osql, oparams))
+        return result
+
+    def _clone(self) -> "CombinedQuerySet[_T]":
+        qs: CombinedQuerySet[_T] = CombinedQuerySet(self.model, self._db)
+        qs._query = self._query.clone()
+        qs._combined_queries = list(self._combined_queries)
+        qs._combinator = self._combinator
+        qs._union_all = self._union_all
+        return qs
+
+    def _build_sql(self, connection) -> tuple[str, list]:
+        import re as _re
+
+        vendor = getattr(connection, "vendor", "sqlite")
+        parts: list[str] = []
+        all_params: list = []
+
+        for sub_sql, sub_params in self._combined_queries:
+            if vendor == "postgresql":
+                sub_sql = _re.sub(r"\$\d+", "%s", sub_sql)
+            parts.append(sub_sql)
+            all_params.extend(sub_params)
+
+        op = "UNION ALL" if self._combinator == "UNION" and self._union_all else self._combinator
+        combined = f" {op} ".join(parts)
+
+        if self._query.order_by_fields:
+            order_parts = []
+            for f in self._query.order_by_fields:
+                fname = f[1:] if f.startswith("-") else f
+                order_parts.append(f'"{fname}" {"DESC" if f.startswith("-") else "ASC"}')
+            combined += " ORDER BY " + ", ".join(order_parts)
+
+        if self._query.limit_val is not None:
+            combined += f" LIMIT {int(self._query.limit_val)}"
+        if self._query.offset_val is not None:
+            combined += f" OFFSET {int(self._query.offset_val)}"
+
+        if vendor == "postgresql":
+            idx = [0]
+
+            def _repl(m: Any) -> str:
+                idx[0] += 1
+                return f"${idx[0]}"
+
+            combined = _re.sub(r"%s", _repl, combined)
+
+        return combined, all_params
+
+    def _iterator(self) -> Iterator[_T]:
+        connection = self._get_connection()
+        sql, params = self._build_sql(connection)
+        rows = connection.execute(sql, params)
+        for row in rows:
+            yield self.model._from_db_row(row, connection)  # type: ignore[misc]
+
+    async def _aiterator(self) -> AsyncIterator[_T]:  # type: ignore[override]
+        conn = self._get_async_connection()
+        sql, params = self._build_sql(conn)
+        rows = await conn.execute(sql, params)
+        for row in rows:
+            yield self.model._from_db_row(row, conn)  # type: ignore[misc]
+
+    def count(self) -> int:
+        connection = self._get_connection()
+        sql, params = self._build_sql(connection)
+        count_sql = f'SELECT COUNT(*) AS "count" FROM ({sql}) AS "_combined"'
+        rows = connection.execute(count_sql, params)
+        return rows[0]["count"]
+
+    async def acount(self) -> int:
+        conn = self._get_async_connection()
+        sql, params = self._build_sql(conn)
+        count_sql = f'SELECT COUNT(*) AS "count" FROM ({sql}) AS "_combined"'
+        rows = await conn.execute(count_sql, params)
+        return rows[0]["count"]

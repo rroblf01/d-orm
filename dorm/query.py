@@ -89,46 +89,64 @@ class SQLQuery:
         alias = table
         distinct = "DISTINCT " if self.distinct_flag else ""
 
-        # Annotations
+        # Annotations — collect SQL and params separately (appear before WHERE in SQL)
+        annotation_params: list = []
         extra_select = ""
         if self.annotations:
             parts = []
             for alias_name, agg in self.annotations.items():
                 _validate_identifier(alias_name, "annotation alias")
-                agg_sql, _ = agg.as_sql(alias)
+                agg_sql, agg_p = agg.as_sql(alias)
                 parts.append(f'{agg_sql} AS "{alias_name}"')
+                annotation_params.extend(agg_p)
             extra_select = ", " + ", ".join(parts)
 
         params: list = []
 
         # Compile WHERE first so _resolve_column can populate self.joins via FK traversal
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
+        params.extend(annotation_params)  # SELECT annotations come first in SQL
         params.extend(where_params)
 
-        # select_related: build LEFT OUTER JOINs and prefixed columns
+        # select_related: build LEFT OUTER JOINs and prefixed columns (supports nested paths)
         sr_join_clauses: list[str] = []
         sr_extra_cols = ""
         if self.select_related_fields and self.selected_fields is None:
             sr_parts: list[str] = []
-            for fname in self.select_related_fields:
-                try:
-                    field = self.model._meta.get_field(fname)
-                    if hasattr(field, "_resolve_related_model"):
+            added_aliases: set[str] = set()
+            for path_str in self.select_related_fields:
+                path = path_str.split("__")
+                current_model = self.model
+                current_table_alias = alias
+                for depth, step in enumerate(path):
+                    try:
+                        field = current_model._meta.get_field(step)
+                        if not hasattr(field, "_resolve_related_model"):
+                            break
                         rel_model = field._resolve_related_model()
-                        sr_alias = f"_sr_{fname}"
-                        pk_col = rel_model._meta.pk.column
-                        join_table = rel_model._meta.db_table
-                        on_cond = f'"{sr_alias}"."{pk_col}" = "{alias}"."{field.column}"'
-                        sr_join_clauses.append(
-                            f'LEFT OUTER JOIN "{join_table}" AS "{sr_alias}" ON {on_cond}'
-                        )
-                        for rf in rel_model._meta.fields:
-                            if rf.column:
-                                sr_parts.append(
-                                    f'"{sr_alias}"."{rf.column}" AS "_sr_{fname}_{rf.column}"'
-                                )
-                except Exception:
-                    pass
+                        step_path = "__".join(path[: depth + 1])
+                        sr_alias = f"_sr_{step_path}"
+                        if sr_alias not in added_aliases:
+                            pk_col = rel_model._meta.pk.column
+                            join_table = rel_model._meta.db_table
+                            on_cond = (
+                                f'"{sr_alias}"."{pk_col}" = '
+                                f'"{current_table_alias}"."{field.column}"'
+                            )
+                            sr_join_clauses.append(
+                                f'LEFT OUTER JOIN "{join_table}" AS "{sr_alias}" ON {on_cond}'
+                            )
+                            for rf in rel_model._meta.fields:
+                                if rf.column:
+                                    sr_parts.append(
+                                        f'"{sr_alias}"."{rf.column}" '
+                                        f'AS "_sr_{step_path}_{rf.column}"'
+                                    )
+                            added_aliases.add(sr_alias)
+                        current_model = rel_model
+                        current_table_alias = sr_alias
+                    except Exception:
+                        break
             if sr_parts:
                 sr_extra_cols = ", " + ", ".join(sr_parts)
 
@@ -311,6 +329,9 @@ class SQLQuery:
     def _resolve_column(self, field_parts: list[str]) -> str:
         model = self.model
         parts = list(field_parts)
+        # Resolve "pk" alias to the actual primary key column
+        if parts[0] == "pk" and model._meta.pk:
+            parts[0] = model._meta.pk.column
         while len(parts) > 1:
             fname = parts.pop(0)
             try:
