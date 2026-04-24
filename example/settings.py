@@ -9,4 +9,4 @@ DATABASES = {
     }
 }
 
-INSTALLED_APPS = ["example"]
+INSTALLED_APPS = ["example", "example.sales"]
