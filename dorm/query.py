@@ -12,6 +12,13 @@ if TYPE_CHECKING:
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
+def _validate_identifier(name: str, kind: str = "field") -> None:
+    if not _SAFE_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid {kind} name '{name}': only letters, digits, and underscores are allowed."
+        )
+
+
 def _compile_expr(val) -> tuple[str, list]:
     """Convert a Python value or expression (F, CombinedExpression, Value) to (sql, params)."""
     if isinstance(val, F):
@@ -71,6 +78,8 @@ class SQLQuery:
     def get_columns(self, table_alias: str | None = None) -> str:
         ta = f'"{table_alias}".' if table_alias else ""
         if self.selected_fields is not None:
+            for f in self.selected_fields:
+                _validate_identifier(f)
             return ", ".join(f'{ta}"{f}"' for f in self.selected_fields)
         concrete = [f for f in self.model._meta.fields if f.column]
         return ", ".join(f'{ta}"{f.column}"' for f in concrete)
@@ -85,6 +94,7 @@ class SQLQuery:
         if self.annotations:
             parts = []
             for alias_name, agg in self.annotations.items():
+                _validate_identifier(alias_name, "annotation alias")
                 agg_sql, _ = agg.as_sql(alias)
                 parts.append(f'{agg_sql} AS "{alias_name}"')
             extra_select = ", " + ", ".join(parts)
@@ -139,6 +149,8 @@ class SQLQuery:
 
         # GROUP BY
         if self.group_by_fields:
+            for f in self.group_by_fields:
+                _validate_identifier(f)
             gb = ", ".join(f'"{f}"' for f in self.group_by_fields)
             select += f" GROUP BY {gb}"
 
@@ -325,6 +337,7 @@ class SQLQuery:
             field = model._meta.get_field(fname)
             col_name = field.column
         except Exception:
+            _validate_identifier(fname)
             col_name = fname
 
         # Prefix with table if joins present

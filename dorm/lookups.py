@@ -5,17 +5,23 @@ from typing import Any
 
 LOOKUP_SEP = "__"
 
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE special characters so user values are treated as literals."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 # Maps lookup name → (sql_template, value_transform)
 # %s is the column reference; value_transform applied to the value before binding
 LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "exact": ("{col} = %s", lambda v: v),
     "iexact": ("LOWER({col}) = LOWER(%s)", lambda v: v),
-    "contains": ("{col} LIKE %s", lambda v: f"%{v}%"),
-    "icontains": ("LOWER({col}) LIKE LOWER(%s)", lambda v: f"%{v}%"),
-    "startswith": ("{col} LIKE %s", lambda v: f"{v}%"),
-    "istartswith": ("LOWER({col}) LIKE LOWER(%s)", lambda v: f"{v}%"),
-    "endswith": ("{col} LIKE %s", lambda v: f"%{v}"),
-    "iendswith": ("LOWER({col}) LIKE LOWER(%s)", lambda v: f"%{v}"),
+    "contains": ("{col} LIKE %s ESCAPE '\\'", lambda v: f"%{_escape_like(v)}%"),
+    "icontains": ("LOWER({col}) LIKE LOWER(%s) ESCAPE '\\'", lambda v: f"%{_escape_like(v)}%"),
+    "startswith": ("{col} LIKE %s ESCAPE '\\'", lambda v: f"{_escape_like(v)}%"),
+    "istartswith": ("LOWER({col}) LIKE LOWER(%s) ESCAPE '\\'", lambda v: f"{_escape_like(v)}%"),
+    "endswith": ("{col} LIKE %s ESCAPE '\\'", lambda v: f"%{_escape_like(v)}"),
+    "iendswith": ("LOWER({col}) LIKE LOWER(%s) ESCAPE '\\'", lambda v: f"%{_escape_like(v)}"),
     "gt": ("{col} > %s", lambda v: v),
     "gte": ("{col} >= %s", lambda v: v),
     "lt": ("{col} < %s", lambda v: v),

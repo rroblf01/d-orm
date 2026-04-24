@@ -13,7 +13,7 @@ from typing import (
 from .expressions import Q
 from .lookups import parse_lookup_key
 from .models import Model
-from .query import SQLQuery
+from .query import SQLQuery, _validate_identifier
 
 _T = TypeVar("_T", bound=Model)
 
@@ -134,6 +134,8 @@ class QuerySet(Generic[_T]):
 
     def defer(self, *fields: str) -> QuerySet[_T]:
         qs = self._clone()
+        for f in fields:
+            _validate_identifier(f)
         defer_set = set(fields)
         pk_col = self.model._meta.pk.column if self.model._meta.pk else "id"
         all_cols = [f.column for f in self.model._meta.fields if f.column]
@@ -173,9 +175,10 @@ class QuerySet(Generic[_T]):
         self, kwargs: dict[str, Any], connection: Any
     ) -> tuple[str, list[Any], list[str]]:
         table = self.model._meta.db_table
-        parts = [
-            f'{agg.as_sql(table)[0]} AS "{alias}"' for alias, agg in kwargs.items()
-        ]
+        parts = []
+        for alias, agg in kwargs.items():
+            _validate_identifier(alias, "aggregate alias")
+            parts.append(f'{agg.as_sql(table)[0]} AS "{alias}"')
         sql = f'SELECT {", ".join(parts)} FROM "{table}"'
         where_sql, where_params = self._query._compile_nodes(
             self._query.where_nodes, connection
