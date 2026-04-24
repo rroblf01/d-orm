@@ -53,8 +53,8 @@ class PostgreSQLDatabaseWrapper:
 
     def get_connection(self):
         try:
-            import psycopg  # type: ignore
-            from psycopg.rows import dict_row  # type: ignore
+            import psycopg
+            from psycopg.rows import dict_row
         except ImportError as e:
             raise ImportError(
                 "psycopg is required for PostgreSQL support. "
@@ -66,10 +66,10 @@ class PostgreSQLDatabaseWrapper:
             or self._local.conn is None
             or self._local.conn.closed
         ):
-            import psycopg  # type: ignore
-            from psycopg.rows import dict_row  # type: ignore
+            import psycopg
+            from psycopg.rows import dict_row
 
-            self._local.conn = psycopg.connect(**self._dsn, row_factory=dict_row)
+            self._local.conn = psycopg.connect(**self._dsn, row_factory=dict_row)  # type: ignore
         return self._local.conn
 
     def execute(self, sql: str, params=None) -> list:
@@ -161,8 +161,8 @@ class PostgreSQLAsyncDatabaseWrapper:
 
     async def _get_conn(self):
         try:
-            import psycopg  # type: ignore
-            from psycopg.rows import dict_row  # type: ignore
+            import psycopg
+            from psycopg.rows import dict_row
         except ImportError as e:
             raise ImportError(
                 "psycopg is required for async PostgreSQL support. "
@@ -170,11 +170,11 @@ class PostgreSQLAsyncDatabaseWrapper:
             ) from e
 
         if self._conn is None or self._conn.closed:
-            import psycopg  # type: ignore
-            from psycopg.rows import dict_row  # type: ignore
+            import psycopg
+            from psycopg.rows import dict_row
 
             self._conn = await psycopg.AsyncConnection.connect(
-                **self._dsn, row_factory=dict_row
+                **self._dsn, row_factory=dict_row  # type: ignore
             )
         return self._conn
 

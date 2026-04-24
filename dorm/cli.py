@@ -155,7 +155,7 @@ def cmd_shell(args):
     banner = "djanorm interactive shell\nModels: " + ", ".join(sorted(models.keys()))
 
     try:
-        import IPython
+        import IPython  # type: ignore
 
         IPython.embed(user_ns=local_vars, banner1=banner, using="asyncio")
         return
