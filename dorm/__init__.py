@@ -30,6 +30,7 @@ Quick start:
 """
 
 from .conf import configure, settings
+from . import transaction
 from .exceptions import (
     DatabaseError,
     DoesNotExist,
@@ -88,6 +89,7 @@ __all__ = [
     # Config
     "configure",
     "settings",
+    "transaction",
     # Base
     "Model",
     "Manager",

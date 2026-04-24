@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from contextlib import asynccontextmanager, contextmanager
 
-from ..utils import raise_migration_hint
+from ..utils import ASYNC_ATOMIC_STATE, normalize_db_exception
 
 _POSITIONAL_PLACEHOLDER = re.compile(r"\$\d+")
 
@@ -15,17 +16,18 @@ def _to_pyformat(sql: str) -> str:
 
 
 def _build_dsn(settings: dict) -> dict:
-    return {
+    dsn = {
         "host": settings.get("HOST", "localhost"),
         "port": int(settings.get("PORT", 5432)),
         "dbname": settings.get("NAME", ""),
         "user": settings.get("USER", ""),
         "password": settings.get("PASSWORD", ""),
     }
+    dsn.update(settings.get("OPTIONS", {}))
+    return dsn
 
 
 def _dsn_to_conninfo(dsn: dict) -> str:
-    """Build a conninfo string, omitting empty values."""
     try:
         from psycopg.conninfo import make_conninfo
     except ImportError as e:
@@ -33,7 +35,7 @@ def _dsn_to_conninfo(dsn: dict) -> str:
             "psycopg is required for PostgreSQL support. "
             "Install it with: pip install 'djanorm[postgresql]'"
         ) from e
-    return make_conninfo(**{k: v for k, v in dsn.items() if v})
+    return make_conninfo(**{k: v for k, v in dsn.items() if v is not None and v != ""})
 
 
 class PostgreSQLDatabaseWrapper:
@@ -46,6 +48,15 @@ class PostgreSQLDatabaseWrapper:
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
         self._pool = None
         self._pool_lock = threading.Lock()
+        self._local = threading.local()  # per-instance atomic state per thread
+
+    @property
+    def _atomic_conn(self):
+        return getattr(self._local, "atomic_conn", None)
+
+    @property
+    def _atomic_depth(self) -> int:
+        return getattr(self._local, "atomic_depth", 0)
 
     def _get_pool(self):
         if self._pool is not None:
@@ -69,39 +80,77 @@ class PostgreSQLDatabaseWrapper:
                 )
         return self._pool
 
-    def execute(self, sql: str, params=None) -> list:
+    @contextmanager
+    def atomic(self):
+        conn = self._atomic_conn
+        depth = self._atomic_depth
+
+        if conn is None:
+            # Top-level: check out a pool connection and hold it for the block.
+            with self._get_pool().connection() as c:
+                self._local.atomic_conn = c
+                self._local.atomic_depth = 1
+                try:
+                    yield
+                finally:
+                    self._local.atomic_conn = None
+                    self._local.atomic_depth = 0
+        else:
+            # Nested: use a savepoint on the already-held connection.
+            sp = f"_sp{depth}"
+            conn.execute(f"SAVEPOINT {sp}")
+            self._local.atomic_depth = depth + 1
+            try:
+                yield
+                conn.execute(f"RELEASE SAVEPOINT {sp}")
+            except Exception:
+                try:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp}")
+                except Exception:
+                    pass
+                raise
+            finally:
+                self._local.atomic_depth = depth
+
+    def _exec(self, conn, sql: str, params, *, write: bool = False, insert: bool = False):
         try:
-            with self._get_pool().connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(_to_pyformat(sql), params or [])
-                    try:
-                        return cur.fetchall()
-                    except Exception:
-                        return []
+            with conn.cursor() as cur:
+                _sql = _to_pyformat(sql) + (" RETURNING id" if insert else "")
+                cur.execute(_sql, params or [])
+                if insert:
+                    row = cur.fetchone()
+                    return row["id"] if row else None
+                if write:
+                    return cur.rowcount
+                try:
+                    return cur.fetchall()
+                except Exception:
+                    return []
         except Exception as exc:
-            raise_migration_hint(exc)
+            normalize_db_exception(exc)
             raise
+
+    def execute(self, sql: str, params=None) -> list:
+        conn = self._atomic_conn
+        if conn is not None:
+            return self._exec(conn, sql, params)
+        with self._get_pool().connection() as c:
+            return self._exec(c, sql, params)
 
     def execute_write(self, sql: str, params=None) -> int:
-        try:
-            with self._get_pool().connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(_to_pyformat(sql), params or [])
-                    return cur.rowcount
-        except Exception as exc:
-            raise_migration_hint(exc)
-            raise
+        conn = self._atomic_conn
+        if conn is not None:
+            return self._exec(conn, sql, params, write=True)
+        with self._get_pool().connection() as c:
+            return self._exec(c, sql, params, write=True)
 
     def execute_insert(self, sql: str, params=None):
-        try:
-            with self._get_pool().connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
-                    row = cur.fetchone()
-                return row["id"] if row else None
-        except Exception as exc:
-            raise_migration_hint(exc)
-            raise
+        conn = self._atomic_conn
+        if conn is not None:
+            return self._exec(conn, sql, params, insert=True)
+        with self._get_pool().connection() as c:
+            return self._exec(c, sql, params, insert=True)
 
     def execute_script(self, sql: str):
         with self._get_pool().connection() as conn:
@@ -143,14 +192,12 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        # Lock guards pool initialisation. Safe to create outside a running loop (Python 3.10+).
         self._pool_lock = asyncio.Lock()
 
     async def _get_pool(self):
         current_loop = asyncio.get_event_loop()
 
         if self._loop is not current_loop and self._pool is not None:
-            # Event loop changed — the old pool's connections belong to a closed loop.
             old_pool = self._pool
             self._pool = None
             self._loop = None
@@ -185,39 +232,76 @@ class PostgreSQLAsyncDatabaseWrapper:
                 self._loop = current_loop
         return self._pool
 
-    async def execute(self, sql: str, params=None) -> list:
+    @asynccontextmanager
+    async def aatomic(self):
+        state = ASYNC_ATOMIC_STATE.get()
+
+        if state is None or state[0] is not self:
+            # Top-level: check out a pool connection and hold it for the block.
+            pool = await self._get_pool()
+            async with pool.connection() as c:
+                token = ASYNC_ATOMIC_STATE.set((self, c, 1))
+                try:
+                    yield
+                finally:
+                    ASYNC_ATOMIC_STATE.reset(token)
+        else:
+            # Nested: use a savepoint on the already-held connection.
+            _, c, depth = state
+            sp = f"_sp{depth}"
+            await c.execute(f"SAVEPOINT {sp}")
+            token = ASYNC_ATOMIC_STATE.set((self, c, depth + 1))
+            try:
+                yield
+                await c.execute(f"RELEASE SAVEPOINT {sp}")
+            except Exception:
+                try:
+                    await c.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                    await c.execute(f"RELEASE SAVEPOINT {sp}")
+                except Exception:
+                    pass
+                raise
+            finally:
+                ASYNC_ATOMIC_STATE.reset(token)
+
+    async def _aexec(self, conn, sql: str, params, *, write: bool = False, insert: bool = False):
         try:
-            async with (await self._get_pool()).connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(_to_pyformat(sql), params or [])
-                    try:
-                        return await cur.fetchall()
-                    except Exception:
-                        return []
+            async with conn.cursor() as cur:
+                _sql = _to_pyformat(sql) + (" RETURNING id" if insert else "")
+                await cur.execute(_sql, params or [])
+                if insert:
+                    row = await cur.fetchone()
+                    return row["id"] if row else None
+                if write:
+                    return cur.rowcount
+                try:
+                    return await cur.fetchall()
+                except Exception:
+                    return []
         except Exception as exc:
-            raise_migration_hint(exc)
+            normalize_db_exception(exc)
             raise
+
+    async def execute(self, sql: str, params=None) -> list:
+        state = ASYNC_ATOMIC_STATE.get()
+        if state is not None and state[0] is self:
+            return await self._aexec(state[1], sql, params)
+        async with (await self._get_pool()).connection() as c:
+            return await self._aexec(c, sql, params)
 
     async def execute_write(self, sql: str, params=None) -> int:
-        try:
-            async with (await self._get_pool()).connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(_to_pyformat(sql), params or [])
-                    return cur.rowcount
-        except Exception as exc:
-            raise_migration_hint(exc)
-            raise
+        state = ASYNC_ATOMIC_STATE.get()
+        if state is not None and state[0] is self:
+            return await self._aexec(state[1], sql, params, write=True)
+        async with (await self._get_pool()).connection() as c:
+            return await self._aexec(c, sql, params, write=True)
 
     async def execute_insert(self, sql: str, params=None):
-        try:
-            async with (await self._get_pool()).connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
-                    row = await cur.fetchone()
-                return row["id"] if row else None
-        except Exception as exc:
-            raise_migration_hint(exc)
-            raise
+        state = ASYNC_ATOMIC_STATE.get()
+        if state is not None and state[0] is self:
+            return await self._aexec(state[1], sql, params, insert=True)
+        async with (await self._get_pool()).connection() as c:
+            return await self._aexec(c, sql, params, insert=True)
 
     async def execute_script(self, sql: str):
         async with (await self._get_pool()).connection() as conn:

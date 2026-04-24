@@ -318,28 +318,46 @@ class QuerySet(Generic[_T]):
     def get_or_create(
         self, defaults: dict[str, Any] | None = None, **kwargs: Any
     ) -> tuple[_T, bool]:
-        try:
-            return self.get(**kwargs), False
-        except self.model.DoesNotExist:
-            params = dict(kwargs)
-            if defaults:
-                params.update(defaults)
-            return self.create(**params), True
+        from .transaction import atomic
+        from .exceptions import IntegrityError
+
+        with atomic(using=self._db):
+            try:
+                return self.get(**kwargs), False
+            except self.model.DoesNotExist:
+                params = dict(kwargs)
+                if defaults:
+                    params.update(defaults)
+                try:
+                    return self.create(**params), True
+                except IntegrityError:
+                    return self.get(**kwargs), False
 
     def update_or_create(
         self, defaults: dict[str, Any] | None = None, **kwargs: Any
     ) -> tuple[_T, bool]:
+        from .transaction import atomic
+        from .exceptions import IntegrityError
+
         defaults = defaults or {}
-        try:
-            obj = self.get(**kwargs)
-            for k, v in defaults.items():
-                setattr(obj, k, v)
-            obj.save(using=self._db)
-            return obj, False
-        except self.model.DoesNotExist:
-            params = dict(kwargs)
-            params.update(defaults)
-            return self.create(**params), True
+        with atomic(using=self._db):
+            try:
+                obj = self.get(**kwargs)
+                for k, v in defaults.items():
+                    setattr(obj, k, v)
+                obj.save(using=self._db)
+                return obj, False
+            except self.model.DoesNotExist:
+                params = dict(kwargs)
+                params.update(defaults)
+                try:
+                    return self.create(**params), True
+                except IntegrityError:
+                    obj = self.get(**kwargs)
+                    for k, v in defaults.items():
+                        setattr(obj, k, v)
+                    obj.save(using=self._db)
+                    return obj, False
 
     def update(self, **kwargs: Any) -> int:
         from .expressions import CombinedExpression, F, Value
@@ -464,28 +482,46 @@ class QuerySet(Generic[_T]):
     async def aget_or_create(
         self, defaults: dict[str, Any] | None = None, **kwargs: Any
     ) -> tuple[_T, bool]:
-        try:
-            return await self.aget(**kwargs), False
-        except self.model.DoesNotExist:
-            params = dict(kwargs)
-            if defaults:
-                params.update(defaults)
-            return await self.acreate(**params), True
+        from .transaction import aatomic
+        from .exceptions import IntegrityError
+
+        async with aatomic(using=self._db):
+            try:
+                return await self.aget(**kwargs), False
+            except self.model.DoesNotExist:
+                params = dict(kwargs)
+                if defaults:
+                    params.update(defaults)
+                try:
+                    return await self.acreate(**params), True
+                except IntegrityError:
+                    return await self.aget(**kwargs), False
 
     async def aupdate_or_create(
         self, defaults: dict[str, Any] | None = None, **kwargs: Any
     ) -> tuple[_T, bool]:
+        from .transaction import aatomic
+        from .exceptions import IntegrityError
+
         defaults = defaults or {}
-        try:
-            obj = await self.aget(**kwargs)
-            for k, v in defaults.items():
-                setattr(obj, k, v)
-            await obj.asave(using=self._db)
-            return obj, False
-        except self.model.DoesNotExist:
-            params = dict(kwargs)
-            params.update(defaults)
-            return await self.acreate(**params), True
+        async with aatomic(using=self._db):
+            try:
+                obj = await self.aget(**kwargs)
+                for k, v in defaults.items():
+                    setattr(obj, k, v)
+                await obj.asave(using=self._db)
+                return obj, False
+            except self.model.DoesNotExist:
+                params = dict(kwargs)
+                params.update(defaults)
+                try:
+                    return await self.acreate(**params), True
+                except IntegrityError:
+                    obj = await self.aget(**kwargs)
+                    for k, v in defaults.items():
+                        setattr(obj, k, v)
+                    await obj.asave(using=self._db)
+                    return obj, False
 
     async def aupdate(self, **kwargs: Any) -> int:
         from .expressions import CombinedExpression, F, Value

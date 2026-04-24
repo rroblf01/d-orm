@@ -3,17 +3,18 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from contextlib import asynccontextmanager, contextmanager
 
-from ..utils import raise_migration_hint
+from ..utils import ASYNC_ATOMIC_STATE, normalize_db_exception
 
 
 class SQLiteDatabaseWrapper:
     vendor = "sqlite"
-    _local = threading.local()
 
     def __init__(self, settings: dict):
         self.settings = settings
         self.database = settings.get("NAME", ":memory:")
+        self._local = threading.local()  # per-instance to support multiple aliases
 
     def get_connection(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
@@ -24,6 +25,40 @@ class SQLiteDatabaseWrapper:
             self._local.conn = conn
         return self._local.conn
 
+    @property
+    def _atomic_depth(self) -> int:
+        return getattr(self._local, "atomic_depth", 0)
+
+    @_atomic_depth.setter
+    def _atomic_depth(self, value: int) -> None:
+        self._local.atomic_depth = value
+
+    @contextmanager
+    def atomic(self):
+        depth = self._atomic_depth
+        conn = self.get_connection()
+        if depth > 0:
+            conn.execute(f"SAVEPOINT _sp{depth}")
+        self._atomic_depth = depth + 1
+        try:
+            yield
+            if depth == 0:
+                conn.commit()
+            else:
+                conn.execute(f"RELEASE SAVEPOINT _sp{depth}")
+        except Exception:
+            if depth == 0:
+                conn.rollback()
+            else:
+                try:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT _sp{depth}")
+                    conn.execute(f"RELEASE SAVEPOINT _sp{depth}")
+                except Exception:
+                    pass
+            raise
+        finally:
+            self._atomic_depth = depth
+
     @staticmethod
     def _adapt(sql: str) -> str:
         return sql.replace("%s", "?")
@@ -33,7 +68,7 @@ class SQLiteDatabaseWrapper:
         try:
             cursor = conn.execute(self._adapt(sql), params or [])
         except Exception as exc:
-            raise_migration_hint(exc)
+            normalize_db_exception(exc)
             raise
         return cursor.fetchall()
 
@@ -42,9 +77,10 @@ class SQLiteDatabaseWrapper:
         try:
             cursor = conn.execute(self._adapt(sql), params or [])
         except Exception as exc:
-            raise_migration_hint(exc)
+            normalize_db_exception(exc)
             raise
-        conn.commit()
+        if self._atomic_depth == 0:
+            conn.commit()
         return cursor.rowcount
 
     def execute_insert(self, sql: str, params=None):
@@ -52,9 +88,10 @@ class SQLiteDatabaseWrapper:
         try:
             cursor = conn.execute(self._adapt(sql), params or [])
         except Exception as exc:
-            raise_migration_hint(exc)
+            normalize_db_exception(exc)
             raise
-        conn.commit()
+        if self._atomic_depth == 0:
+            conn.commit()
         return cursor.lastrowid
 
     def execute_script(self, sql: str):
@@ -94,9 +131,8 @@ class SQLiteAsyncDatabaseWrapper:
     def _adapt(sql: str) -> str:
         return sql.replace("%s", "?")
 
-    async def _get_conn(self):
-        import aiosqlite
-
+    async def _check_loop(self) -> None:
+        """Reset connection and lock if the running event loop has changed."""
         current_loop = asyncio.get_event_loop()
         if self._loop is not current_loop:
             if self._conn is not None:
@@ -108,6 +144,9 @@ class SQLiteAsyncDatabaseWrapper:
             self._loop = current_loop
             self._lock = asyncio.Lock()
 
+    async def _get_conn(self):
+        import aiosqlite
+
         if self._conn is None:
             self._conn = await aiosqlite.connect(self.database)
             self._conn.row_factory = aiosqlite.Row
@@ -115,37 +154,92 @@ class SQLiteAsyncDatabaseWrapper:
             await self._conn.execute("PRAGMA journal_mode = WAL")
         return self._conn
 
-    async def execute(self, sql: str, params=None) -> list:
-        async with self._lock:
+    def _in_atomic(self) -> bool:
+        state = ASYNC_ATOMIC_STATE.get()
+        return state is not None and state[0] is self
+
+    @asynccontextmanager
+    async def _operation_conn(self):
+        """Yield the connection, acquiring lock only when not inside aatomic()."""
+        if self._in_atomic():
+            yield ASYNC_ATOMIC_STATE.get()[1]  # type: ignore[index]
+        else:
+            await self._check_loop()
+            async with self._lock:
+                yield await self._get_conn()
+
+    @asynccontextmanager
+    async def aatomic(self):
+        state = ASYNC_ATOMIC_STATE.get()
+
+        if state is None or state[0] is not self:
+            # Reset before acquiring the lock so we don't replace it mid-hold.
+            await self._check_loop()
+            # Top-level: acquire lock for the entire block so other coroutines wait.
+            await self._lock.acquire()
             conn = await self._get_conn()
+            token = ASYNC_ATOMIC_STATE.set((self, conn, 1))
+            try:
+                yield
+                await conn.commit()
+            except Exception:
+                try:
+                    await conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                ASYNC_ATOMIC_STATE.reset(token)
+                self._lock.release()
+        else:
+            # Nested: use savepoint on the already-held connection.
+            _, conn, depth = state
+            sp = f"_sp{depth}"
+            await conn.execute(f"SAVEPOINT {sp}")
+            token = ASYNC_ATOMIC_STATE.set((self, conn, depth + 1))
+            try:
+                yield
+                await conn.execute(f"RELEASE SAVEPOINT {sp}")
+            except Exception:
+                try:
+                    await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
+                except Exception:
+                    pass
+                raise
+            finally:
+                ASYNC_ATOMIC_STATE.reset(token)
+
+    async def execute(self, sql: str, params=None) -> list:
+        async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])
                 rows = await cursor.fetchall()
             except Exception as exc:
-                raise_migration_hint(exc)
+                normalize_db_exception(exc)
                 raise
             return list(rows)
 
     async def execute_write(self, sql: str, params=None) -> int:
-        async with self._lock:
-            conn = await self._get_conn()
+        async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])
-                await conn.commit()
+                if not self._in_atomic():
+                    await conn.commit()
                 return cursor.rowcount
             except Exception as exc:
-                raise_migration_hint(exc)
+                normalize_db_exception(exc)
                 raise
 
     async def execute_insert(self, sql: str, params=None):
-        async with self._lock:
-            conn = await self._get_conn()
+        async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])
-                await conn.commit()
+                if not self._in_atomic():
+                    await conn.commit()
                 return cursor.lastrowid
             except Exception as exc:
-                raise_migration_hint(exc)
+                normalize_db_exception(exc)
                 raise
 
     async def execute_script(self, sql: str):

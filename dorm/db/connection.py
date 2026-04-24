@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ..exceptions import ImproperlyConfigured
 
 _sync_connections: dict[str, Any] = {}
 _async_connections: dict[str, Any] = {}
+_sync_lock = threading.Lock()
 
 
 def _get_settings(alias: str = "default") -> dict:
@@ -57,9 +59,12 @@ def _create_async_connection(alias: str, db_settings: dict):
 
 
 def get_connection(alias: str = "default"):
-    if alias not in _sync_connections:
-        db_settings = _get_settings(alias)
-        _sync_connections[alias] = _create_sync_connection(alias, db_settings)
+    if alias in _sync_connections:
+        return _sync_connections[alias]
+    with _sync_lock:
+        if alias not in _sync_connections:
+            db_settings = _get_settings(alias)
+            _sync_connections[alias] = _create_sync_connection(alias, db_settings)
     return _sync_connections[alias]
 
 
