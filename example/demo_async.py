@@ -4,6 +4,7 @@ Run after setup_db.py.
 
     uv run python example/demo_async.py
 """
+
 import asyncio
 import os
 import sys
@@ -15,11 +16,11 @@ from example.models import Author, Book, Genre, Review
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
 
-RESET   = "\033[0m"
-BOLD    = "\033[1m"
-GREEN   = "\033[32m"
-YELLOW  = "\033[33m"
-CYAN    = "\033[36m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
 MAGENTA = "\033[35m"
 
 
@@ -36,6 +37,7 @@ def item(text: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 async def main():
     print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗{RESET}")
@@ -63,7 +65,6 @@ async def main():
     except Author.DoesNotExist:
         show("DoesNotExist caught:", True)
 
-
     # ── 2. Async iteration ────────────────────────────────────────────────────
 
     section("2. Async iteration (async for)")
@@ -72,31 +73,29 @@ async def main():
     async for author in Author.objects.exclude(active=False).order_by("name"):
         item(f"{author.name}  ({author.nationality or '—'})")
 
-
     # ── 3. acount · aexists ───────────────────────────────────────────────────
 
     section("3. acount · aexists")
 
-    show("Total books:",              await Book.objects.acount())
-    show("Books with stock > 5:",     await Book.objects.filter(stock__gt=5).acount())
-    show("Does 'Cosmos' exist?",      await Book.objects.filter(title="Cosmos").aexists())
-    show("Does 'Dune' exist?",        await Book.objects.filter(title="Dune").aexists())
-
+    show("Total books:", await Book.objects.acount())
+    show("Books with stock > 5:", await Book.objects.filter(stock__gt=5).acount())
+    show("Does 'Cosmos' exist?", await Book.objects.filter(title="Cosmos").aexists())
+    show("Does 'Dune' exist?", await Book.objects.filter(title="Dune").aexists())
 
     # ── 4. afirst · alast ─────────────────────────────────────────────────────
 
     section("4. afirst · alast")
 
-    oldest   = await Book.objects.order_by("published_year").afirst()
-    newest   = await Book.objects.order_by("-published_year").afirst()
+    oldest = await Book.objects.order_by("published_year").afirst()
+    newest = await Book.objects.order_by("-published_year").afirst()
     cheapest = await Book.objects.order_by("price").afirst()
-    empty    = await Book.objects.filter(title="Unknown").afirst()
+    empty = await Book.objects.filter(title="Unknown").afirst()
 
-    show("Oldest book:",                 f"{oldest.title}  ({oldest.published_year})")
-    show("Newest book:",                 f"{newest.title}  ({newest.published_year})")
-    show("Cheapest book:",               f"{cheapest.title}  (${cheapest.price})")
-    show("afirst() on empty queryset:",  empty)
-
+    show("Oldest book:", f"{oldest.title}  ({oldest.published_year})")
+    show("Author of oldest book:", oldest.author.name)
+    show("Newest book:", f"{newest.title}  ({newest.published_year})")
+    show("Cheapest book:", f"{cheapest.title}  (${cheapest.price})")
+    show("afirst() on empty queryset:", empty)
 
     # ── 5. aupdate ────────────────────────────────────────────────────────────
 
@@ -119,29 +118,27 @@ async def main():
     pkd_book = await Book.objects.aget(isbn="9780345404473")
     show("PKD book created:", pkd_book.title)
 
-
     # ── 6. aaggregate ─────────────────────────────────────────────────────────
 
     section("6. aaggregate")
 
     stats = await Book.objects.aaggregate(
-        total      = Count("id"),
-        avg_price  = Avg("price"),
-        max_price  = Max("price"),
-        max_pages  = Max("pages"),
+        total=Count("id"),
+        avg_price=Avg("price"),
+        max_price=Max("price"),
+        max_pages=Max("pages"),
     )
-    show("Total books:",    stats["total"])
-    show("Average price:",  f"${stats['avg_price']:.2f}")
-    show("Highest price:",  f"${stats['max_price']}")
-    show("Most pages:",     stats["max_pages"])
+    show("Total books:", stats["total"])
+    show("Average price:", f"${stats['avg_price']:.2f}")
+    show("Highest price:", f"${stats['max_price']}")
+    show("Most pages:", stats["max_pages"])
 
     review_stats = await Review.objects.aaggregate(
-        total      = Count("id"),
-        avg_rating = Avg("rating"),
+        total=Count("id"),
+        avg_rating=Avg("rating"),
     )
-    show("\n  Total reviews:",  review_stats["total"])
-    show("  Average rating:",   f"{review_stats['avg_rating']:.2f} / 5")
-
+    show("\n  Total reviews:", review_stats["total"])
+    show("  Average rating:", f"{review_stats['avg_rating']:.2f} / 5")
 
     # ── 7. Q objects async ────────────────────────────────────────────────────
 
@@ -152,7 +149,6 @@ async def main():
         Q(genre_id=scifi.pk) | Q(price__lt=9)
     ).order_by("price"):
         item(f"{book.title}  →  ${book.price}")
-
 
     # ── 8. aget_or_create · aupdate_or_create ────────────────────────────────
 
@@ -176,7 +172,6 @@ async def main():
     )
     show("PKD book stock updated to 10:", book.stock)
 
-
     # ── 9. asave · adelete · arefresh_from_db ────────────────────────────────
 
     section("9. asave · adelete · arefresh_from_db")
@@ -188,15 +183,19 @@ async def main():
     show("Price after asave + arefresh:", f"${pkd_book.price}")
 
     await pkd_book.adelete()
-    show("PKD book deleted (adelete):", not await Book.objects.filter(isbn="9780345404473").aexists())
-
+    show(
+        "PKD book deleted (adelete):",
+        not await Book.objects.filter(isbn="9780345404473").aexists(),
+    )
 
     # ── 10. abulk_create · ain_bulk ──────────────────────────────────────────
 
     section("10. abulk_create · ain_bulk")
 
     temp_authors = [
-        Author(name=f"Temp Author {i}", email=f"temp{i}@example.com", birth_year=1980 + i)
+        Author(
+            name=f"Temp Author {i}", email=f"temp{i}@example.com", birth_year=1980 + i
+        )
         for i in range(4)
     ]
     await Author.objects.abulk_create(temp_authors)
@@ -209,7 +208,6 @@ async def main():
 
     deleted, _ = await Author.objects.filter(name__startswith="Temp").adelete()
     show("Temp authors deleted:", deleted)
-
 
     # ── 11. Cleanup ───────────────────────────────────────────────────────────
 

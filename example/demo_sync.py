@@ -4,6 +4,7 @@ Run after setup_db.py.
 
     uv run python example/demo_sync.py
 """
+
 import os
 import sys
 
@@ -14,12 +15,12 @@ from example.models import Author, Book, Genre, Review
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
 
-RESET   = "\033[0m"
-BOLD    = "\033[1m"
-GREEN   = "\033[32m"
-YELLOW  = "\033[33m"
-CYAN    = "\033[36m"
-BLUE    = "\033[34m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+BLUE = "\033[34m"
 
 
 def section(title: str):
@@ -45,7 +46,7 @@ print(f"{BOLD}{CYAN}╚═══════════════════
 
 section("1. Basic queries")
 
-show("Total books:",   Book.objects.count())
+show("Total books:", Book.objects.count())
 show("Total authors:", Author.objects.count())
 show("Total reviews:", Review.objects.count())
 
@@ -83,7 +84,9 @@ for a in Author.objects.filter(name__in=["Isaac Asimov", "Carl Sagan"]):
     item(a.name)
 
 print(f"\n  Books published between 1940 and 1960 (__range):")
-for b in Book.objects.filter(published_year__range=(1940, 1960)).order_by("published_year"):
+for b in Book.objects.filter(published_year__range=(1940, 1960)).order_by(
+    "published_year"
+):
     item(f"{b.title}  ({b.published_year})")
 
 show("\n  Authors with bio:", Author.objects.filter(bio__isnull=False).count())
@@ -118,33 +121,33 @@ for a in result:
 section("5. Aggregations")
 
 stats = Book.objects.aggregate(
-    total         = Count("id"),
-    avg_price     = Avg("price"),
-    max_price     = Max("price"),
-    min_price     = Min("price"),
-    total_pages   = Sum("pages"),
+    total=Count("id"),
+    avg_price=Avg("price"),
+    max_price=Max("price"),
+    min_price=Min("price"),
+    total_pages=Sum("pages"),
 )
-show("Number of books:",        stats["total"])
-show("Average price:",          f"${stats['avg_price']:.2f}")
-show("Highest price:",          f"${stats['max_price']}")
-show("Lowest price:",           f"${stats['min_price']}")
+show("Number of books:", stats["total"])
+show("Average price:", f"${stats['avg_price']:.2f}")
+show("Highest price:", f"${stats['max_price']}")
+show("Lowest price:", f"${stats['min_price']}")
 show("Total pages in catalog:", stats["total_pages"])
 
 in_stock = Book.objects.filter(stock__gt=0).aggregate(
-    total     = Count("id"),
-    avg_stock = Avg("stock"),
+    total=Count("id"),
+    avg_stock=Avg("stock"),
 )
 show("\n  Books with available stock:", in_stock["total"])
-show("  Average stock:",               f"{in_stock['avg_stock']:.1f}")
+show("  Average stock:", f"{in_stock['avg_stock']:.1f}")
 
 review_stats = Review.objects.aggregate(
-    total        = Count("id"),
-    avg_rating   = Avg("rating"),
-    top_rating   = Max("rating"),
+    total=Count("id"),
+    avg_rating=Avg("rating"),
+    top_rating=Max("rating"),
 )
-show("\n  Total reviews:",   review_stats["total"])
-show("  Average rating:",    f"{review_stats['avg_rating']:.2f} / 5")
-show("  Highest rating:",    review_stats["top_rating"])
+show("\n  Total reviews:", review_stats["total"])
+show("  Average rating:", f"{review_stats['avg_rating']:.2f} / 5")
+show("  Highest rating:", review_stats["top_rating"])
 
 
 # ── 6. values / values_list ────────────────────────────────────────────────────
@@ -177,7 +180,7 @@ show("Cheapest book:", f"{cheapest.title}  (${cheapest.price})")
 newest = Book.objects.order_by("-published_year").first()
 show("Most recent book:", f"{newest.title}  ({newest.published_year})")
 
-show("Does 'Cosmos' exist?",       Book.objects.filter(title="Cosmos").exists())
+show("Does 'Cosmos' exist?", Book.objects.filter(title="Cosmos").exists())
 show("Does 'Harry Potter' exist?", Book.objects.filter(title="Harry Potter").exists())
 
 
@@ -185,11 +188,15 @@ show("Does 'Harry Potter' exist?", Book.objects.filter(title="Harry Potter").exi
 
 section("8. F expressions (column-level operations)")
 
-before = Book.objects.filter(title="Nineteen Eighty-Four").values_list("stock", flat=True)[0]
+before = Book.objects.filter(title="Nineteen Eighty-Four").values_list(
+    "stock", flat=True
+)[0]
 show("Stock of '1984' before:", before)
 
 Book.objects.filter(title="Nineteen Eighty-Four").update(stock=F("stock") + 5)
-after = Book.objects.filter(title="Nineteen Eighty-Four").values_list("stock", flat=True)[0]
+after = Book.objects.filter(title="Nineteen Eighty-Four").values_list(
+    "stock", flat=True
+)[0]
 show("Stock of '1984' after (+5):", after)
 
 long_books = Book.objects.filter(pages__gt=300)
@@ -257,7 +264,7 @@ section("10. Slicing (pagination)")
 
 page_size = 3
 page_1 = list(Book.objects.order_by("title")[:page_size])
-page_2 = list(Book.objects.order_by("title")[page_size:page_size * 2])
+page_2 = list(Book.objects.order_by("title")[page_size : page_size * 2])
 
 print(f"\n  Page 1 (first {page_size}):")
 for b in page_1:
