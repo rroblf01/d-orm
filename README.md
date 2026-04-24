@@ -6,10 +6,12 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 
 - **Same API as Django ORM** — `filter`, `exclude`, `get`, `create`, `update`, `delete`, `Q`, `F`, aggregations, slicing...
 - **Native async** — every method has an `a*` variant: `acreate`, `aget`, `aupdate`, `adelete`...
+- **Atomic transactions** — `dorm.transaction.atomic()` / `aatomic()` with automatic savepoint nesting
 - **SQLite** (sync via `sqlite3`, async via `aiosqlite`)
-- **PostgreSQL** (sync/async via `psycopg`)
+- **PostgreSQL** (sync/async via `psycopg`, connection pool via `psycopg-pool`)
 - **Migration system** — `makemigrations` / `migrate` just like Django
 - **CLI** — `dorm` command to manage migrations and open a shell (IPython auto-detected)
+- **Thread-safe** — connections are safe to share across threads; async connections are coroutine-safe
 
 ---
 
@@ -49,7 +51,7 @@ DATABASES = {
     }
 }
 
-# For PostgreSQL, connection pool size can be tuned (optional):
+# For PostgreSQL, pool size and driver options can be tuned (optional):
 # DATABASES = {
 #     "default": {
 #         "ENGINE": "postgresql",
@@ -58,8 +60,12 @@ DATABASES = {
 #         "PASSWORD": "secret",
 #         "HOST": "localhost",
 #         "PORT": 5432,
-#         "MIN_POOL_SIZE": 1,
-#         "MAX_POOL_SIZE": 10,
+#         "MIN_POOL_SIZE": 1,   # default
+#         "MAX_POOL_SIZE": 10,  # default
+#         "OPTIONS": {
+#             "sslmode": "require",    # passed directly to psycopg
+#             "connect_timeout": 10,
+#         },
 #     }
 # }
 
@@ -108,6 +114,11 @@ dorm.configure(
             # Connection pool size (optional, defaults shown)
             "MIN_POOL_SIZE": 1,
             "MAX_POOL_SIZE": 10,
+            # Any extra key under OPTIONS is forwarded verbatim to psycopg
+            "OPTIONS": {
+                "sslmode": "require",
+                "connect_timeout": 10,
+            },
         }
     }
 )
@@ -410,6 +421,69 @@ async def main():
     result = await Author.objects.aaggregate(total=dorm.Count("id"), avg=dorm.Avg("age"))
 
 asyncio.run(main())
+```
+
+---
+
+## Transactions
+
+Use `dorm.transaction.atomic()` (sync) or `dorm.transaction.aatomic()` (async) to wrap one or more operations in a database transaction. On success the transaction is committed; on exception it is rolled back.
+
+```python
+import dorm
+
+# Sync
+with dorm.transaction.atomic():
+    author = Author.objects.create(name="Alice", age=30)
+    Book.objects.create(title="My Book", author_id=author.pk)
+
+# Async
+async with dorm.transaction.aatomic():
+    author = await Author.objects.acreate(name="Alice", age=30)
+    await Book.objects.acreate(title="My Book", author_id=author.pk)
+```
+
+### Savepoint nesting
+
+Nested calls automatically use savepoints. An inner failure rolls back only the inner block; the outer transaction can still commit.
+
+```python
+with dorm.transaction.atomic():
+    author = Author.objects.create(name="Alice", age=30)
+
+    try:
+        with dorm.transaction.atomic():      # creates SAVEPOINT
+            Book.objects.create(title="Bad Book", author_id=author.pk)
+            raise ValueError("something went wrong")
+    except ValueError:
+        pass  # inner block rolled back to savepoint; author still present
+
+# only Alice is committed, no Book
+```
+
+The same nesting behaviour works with `aatomic()`:
+
+```python
+async with dorm.transaction.aatomic():
+    author = await Author.objects.acreate(name="Alice", age=30)
+    try:
+        async with dorm.transaction.aatomic():
+            await Book.objects.acreate(title="Bad Book", author_id=author.pk)
+            raise ValueError("something went wrong")
+    except ValueError:
+        pass
+```
+
+### `get_or_create` / `update_or_create` are atomic
+
+Both methods run inside an implicit transaction and handle concurrent inserts safely: if another thread or coroutine creates the same row first, they catch the `IntegrityError` and return the existing object instead of raising.
+
+```python
+# Safe to call concurrently — will never raise IntegrityError
+author, created = Author.objects.get_or_create(
+    email="alice@example.com",
+    defaults={"name": "Alice", "age": 30},
+)
 ```
 
 ---
