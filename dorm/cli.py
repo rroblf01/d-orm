@@ -63,8 +63,8 @@ def cmd_makemigrations(args):
         mig_dir = _find_migrations_dir(app)
         loader.load(mig_dir, app)
 
-        # from_state = last known migration state
-        from_state = loader.get_migration_state(app)
+        # from_state = state described by all migration files on disk
+        from_state = loader.get_migration_state(app, all_migrations=True)
 
         # to_state = current model definitions
         to_state = ProjectState.from_apps(app_label=app)

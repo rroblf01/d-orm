@@ -40,7 +40,9 @@ class Options:
                 if not k.startswith("_"):
                     setattr(self, k, v)
         if not self.db_table:
-            self.db_table = f"{self.app_label}_{self.model_name}"
+            # Use only the last segment so "example.sales" → "sales_customer"
+            label_segment = self.app_label.rsplit(".", 1)[-1]
+            self.db_table = f"{label_segment}_{self.model_name}"
         if not self.ordering:
             self.ordering = []
 
@@ -85,10 +87,15 @@ class ModelBase(type):
         if not parents:
             return super_new(mcs, name, bases, attrs)
 
-        # Determine app_label from module
+        # Determine app_label from module.
+        # Strip ".models" suffix so that "example.sales.models" → "example.sales"
+        # and fall back to the first component for other modules.
         module = attrs.get("__module__", "")
         parts = module.split(".")
-        app_label = parts[0] if parts else "default"
+        if len(parts) > 1 and parts[-1] == "models":
+            app_label = ".".join(parts[:-1])  # e.g. "example.sales"
+        else:
+            app_label = parts[0] if parts else "default"
 
         # Extract Meta
         meta = attrs.pop("Meta", None)

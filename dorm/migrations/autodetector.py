@@ -18,17 +18,22 @@ class MigrationAutodetector:
         self.from_state = from_state
         self.to_state = to_state
 
+    @staticmethod
+    def _al(key: str) -> str:
+        """Extract app_label from a state key like 'example.sales.customer'."""
+        return key.rsplit(".", 1)[0]
+
     def changes(self, app_label: str | None = None) -> dict[str, list]:
         """Return {app_label: [operations]} dict."""
         operations: dict[str, list] = {}
 
         from_models = {
             k: v for k, v in self.from_state.models.items()
-            if app_label is None or k.startswith(f"{app_label}.")
+            if app_label is None or self._al(k) == app_label
         }
         to_models = {
             k: v for k, v in self.to_state.models.items()
-            if app_label is None or k.startswith(f"{app_label}.")
+            if app_label is None or self._al(k) == app_label
         }
 
         from_keys = set(from_models)
@@ -36,14 +41,14 @@ class MigrationAutodetector:
 
         # Deleted models
         for key in from_keys - to_keys:
-            al, model_name_lower = key.split(".", 1)
+            al = self._al(key)
             model_state = from_models[key]
             ops = operations.setdefault(al, [])
             ops.append(DeleteModel(name=model_state["name"]))
 
         # New models
         for key in to_keys - from_keys:
-            al, model_name_lower = key.split(".", 1)
+            al = self._al(key)
             model_state = to_models[key]
             fields = list(model_state["fields"].items())
             ops = operations.setdefault(al, [])
@@ -55,7 +60,7 @@ class MigrationAutodetector:
 
         # Existing models — check for field changes
         for key in from_keys & to_keys:
-            al, _ = key.split(".", 1)
+            al = self._al(key)
             from_m = from_models[key]
             to_m = to_models[key]
             ops = operations.setdefault(al, [])
