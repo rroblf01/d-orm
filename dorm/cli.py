@@ -119,13 +119,22 @@ def cmd_migrate(args):
     conn = get_connection()
     executor = MigrationExecutor(conn, verbosity=args.verbosity)
 
-    apps = args.apps if args.apps else installed_apps
+    app_label = getattr(args, "app_label", None)
+    target = getattr(args, "target", None)
+    apps = [app_label] if app_label else installed_apps
+
     for app in apps:
         mig_dir = _find_migrations_dir(app)
         if not mig_dir.exists():
             print(f"  No migrations directory for '{app}'. Run makemigrations first.")
             continue
-        executor.migrate(app, mig_dir)
+        if target:
+            try:
+                executor.migrate_to(app, mig_dir, target)
+            except ValueError as exc:
+                print(f"  Error: {exc}")
+        else:
+            executor.migrate(app, mig_dir)
 
 
 def cmd_showmigrations(args):
@@ -199,8 +208,19 @@ def main():
     mm.set_defaults(func=cmd_makemigrations)
 
     # migrate
-    mg = sub.add_parser("migrate", help="Apply pending migrations")
-    mg.add_argument("apps", nargs="*", help="App labels to migrate")
+    mg = sub.add_parser(
+        "migrate",
+        help="Apply pending migrations (or rollback when a target is given)",
+    )
+    mg.add_argument(
+        "app_label", nargs="?", default=None,
+        help="App to migrate (default: all apps)",
+    )
+    mg.add_argument(
+        "target", nargs="?", default=None,
+        help="Target migration name / number prefix / 'zero' — "
+             "applies forward or rolls back as needed",
+    )
     mg.add_argument("--verbosity", type=int, default=1)
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)

@@ -174,7 +174,7 @@ class PostgreSQLDatabaseWrapper:
             """,
             [table_name],
         )
-        return [dict(r) for r in rows]
+        return [{"name": r["column_name"], **{k: v for k, v in dict(r).items() if k != "column_name"}} for r in rows]
 
     def close(self):
         if self._pool is not None:
@@ -325,7 +325,7 @@ class PostgreSQLAsyncDatabaseWrapper:
             """,
             [table_name],
         )
-        return [dict(r) for r in rows]
+        return [{"name": r["column_name"], **{k: v for k, v in dict(r).items() if k != "column_name"}} for r in rows]
 
     async def close(self):
         if self._pool is not None:

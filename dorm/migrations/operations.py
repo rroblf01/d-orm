@@ -101,7 +101,7 @@ class AddField(Operation):
         model_state = from_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
         table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
         field = getattr(self.field, "column", None) or self.name
-        connection.execute_script(f'ALTER TABLE "{table}" DROP COLUMN IF EXISTS "{field}"')
+        connection.execute_script(f'ALTER TABLE "{table}" DROP COLUMN "{field}"')
 
     def describe(self) -> str:
         return f"Add field {self.name} to {self.model_name}"
@@ -123,7 +123,7 @@ class RemoveField(Operation):
     def database_forwards(self, app_label: str, connection, from_state, to_state):
         model_state = from_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
         table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
-        connection.execute_script(f'ALTER TABLE "{table}" DROP COLUMN IF EXISTS "{self.name}"')
+        connection.execute_script(f'ALTER TABLE "{table}" DROP COLUMN "{self.name}"')
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
         model_state = to_state.models.get(f"{app_label}.{self.model_name.lower()}", {})

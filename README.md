@@ -9,7 +9,7 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 - **Atomic transactions** — `dorm.transaction.atomic()` / `aatomic()` with automatic savepoint nesting
 - **SQLite** (sync via `sqlite3`, async via `aiosqlite`)
 - **PostgreSQL** (sync/async via `psycopg`, connection pool via `psycopg-pool`)
-- **Migration system** — `makemigrations` / `migrate` just like Django
+- **Migration system** — `makemigrations` / `migrate` / rollback, `RunSQL` / `RunPython` with reverse hooks
 - **CLI** — `dorm` command to manage migrations and open a shell (IPython auto-detected)
 - **Thread-safe** — connections are safe to share across threads; async connections are coroutine-safe
 
@@ -553,8 +553,11 @@ INSTALLED_APPS = [
 # Detect model changes and generate migration files
 dorm makemigrations
 
-# Apply pending migrations
+# Apply all pending migrations
 dorm migrate
+
+# Apply migrations for a specific app only
+dorm migrate blog
 
 # Show migration status ([ ] pending, [X] applied)
 dorm showmigrations
@@ -575,11 +578,32 @@ dorm makemigrations
 dorm migrate
 ```
 
+### Undoing migrations
+
+`dorm migrate` detects direction automatically: if the target is before the current state it rolls back, otherwise it applies forward.
+
+```bash
+# Roll back blog to migration 0002 (undoes 0003, 0004, etc.)
+dorm migrate blog 0002
+
+# Roll back a specific migration by full name
+dorm migrate blog 0002_add_email
+
+# Undo all migrations for an app
+dorm migrate blog zero
+```
+
+After a rollback the affected migrations are marked as unapplied, so `dorm migrate blog` will re-apply them later if needed.
+
 ### Custom migrations with `RunSQL` / `RunPython`
 
+Both operations accept an optional reverse that is called when the migration is rolled back.
+
+#### `RunSQL`
+
 ```python
-# myapp/migrations/0003_custom.py
-from dorm.migrations.operations import RunSQL, RunPython
+# myapp/migrations/0003_add_score.py
+from dorm.migrations.operations import RunSQL
 
 dependencies = []
 
@@ -588,11 +612,41 @@ operations = [
         sql="ALTER TABLE authors ADD COLUMN score INTEGER DEFAULT 0",
         reverse_sql="ALTER TABLE authors DROP COLUMN score",
     ),
-    RunPython(
-        code=lambda app_label, registry: print("Migration executed"),
-    ),
 ]
 ```
+
+`reverse_sql` is optional. If omitted, rolling back this migration is a no-op for that operation.
+
+#### `RunPython`
+
+`code` and `reverse_code` are plain Python functions that receive `(app_label, registry)`:
+
+- `app_label` — the app being migrated (string)
+- `registry` — dict mapping model name → model class, e.g. `registry["Author"]`
+
+```python
+# myapp/migrations/0004_seed_data.py
+from dorm.migrations.operations import RunPython
+
+def seed(app_label, registry):
+    Author = registry["Author"]
+    Author.objects.get_or_create(
+        email="admin@example.com",
+        defaults={"name": "Admin", "age": 0},
+    )
+
+def unseed(app_label, registry):
+    Author = registry["Author"]
+    Author.objects.filter(email="admin@example.com").delete()
+
+dependencies = []
+
+operations = [
+    RunPython(code=seed, reverse_code=unseed),
+]
+```
+
+`reverse_code` is optional. If omitted, rolling back this migration is a no-op for that operation.
 
 ---
 
