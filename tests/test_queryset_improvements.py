@@ -249,3 +249,54 @@ async def test_aexists_true():
 @pytest.mark.asyncio
 async def test_aexists_false():
     assert await Author.objects.filter(name="NoSuchPerson").aexists() is False
+
+
+# ── avalues / avalues_list ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_avalues_returns_dicts():
+    _make_author(name="Alice", age=30)
+    rows = await Author.objects.avalues("name", "age")
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+    assert rows[0]["age"] == 30
+
+
+@pytest.mark.asyncio
+async def test_avalues_all_fields():
+    _make_author(name="Bob")
+    rows = await Author.objects.avalues()
+    assert len(rows) == 1
+    assert "name" in rows[0]
+    assert "id" in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_avalues_with_filter():
+    _make_author(name="Alice", age=30)
+    _make_author(name="Bob", age=25)
+    rows = await Author.objects.filter(age__gte=30).avalues("name")
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_avalues_list_tuples():
+    _make_author(name="Carol", age=28)
+    rows = await Author.objects.avalues_list("name", "age")
+    assert len(rows) == 1
+    assert rows[0] == ("Carol", 28)
+
+
+@pytest.mark.asyncio
+async def test_avalues_list_flat():
+    _make_author(name="Dave")
+    _make_author(name="Eve")
+    names = await Author.objects.order_by("name").avalues_list("name", flat=True)
+    assert names == ["Dave", "Eve"]
+
+
+@pytest.mark.asyncio
+async def test_avalues_list_flat_validation():
+    with pytest.raises(ValueError, match="flat"):
+        await Author.objects.avalues_list("name", "age", flat=True)

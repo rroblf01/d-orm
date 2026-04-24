@@ -145,7 +145,11 @@ class QuerySet(Generic[_T]):
     def values(self, *fields: str) -> QuerySet[Any]:
         qs: QuerySet[Any] = QuerySet(self.model, self._db)  # type: ignore[arg-type]
         qs._query = self._query.clone()
-        qs._query.selected_fields = list(fields) if fields else None
+        qs._query.selected_fields = (
+            list(fields)
+            if fields
+            else [f.column for f in self.model._meta.fields if f.column]
+        )
         return qs
 
     def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
@@ -270,7 +274,9 @@ class QuerySet(Generic[_T]):
         if self._result_cache is None:
             self._result_cache = list(self._iterator())  # type: ignore[assignment]
 
-    def _hydrate_select_related(self, instance: _T, sr_fields: list[str], row_dict: dict) -> None:
+    def _hydrate_select_related(
+        self, instance: _T, sr_fields: list[str], row_dict: dict
+    ) -> None:
         for fname in sr_fields:
             try:
                 field = self.model._meta.get_field(fname)
@@ -278,13 +284,19 @@ class QuerySet(Generic[_T]):
                     continue
                 rel_model = field._resolve_related_model()
                 prefix = f"_sr_{fname}_"
-                rel_data = {k[len(prefix):]: v for k, v in row_dict.items() if k.startswith(prefix)}
+                rel_data = {
+                    k[len(prefix) :]: v
+                    for k, v in row_dict.items()
+                    if k.startswith(prefix)
+                }
                 if rel_data and any(v is not None for v in rel_data.values()):
                     rel_inst = rel_model.__new__(rel_model)
                     rel_inst.__dict__ = {}
                     for rf in rel_model._meta.fields:
                         if rf.column in rel_data:
-                            rel_inst.__dict__[rf.attname] = rf.from_db_value(rel_data[rf.column])
+                            rel_inst.__dict__[rf.attname] = rf.from_db_value(
+                                rel_data[rf.column]
+                            )
                     instance.__dict__[f"_cache_{fname}"] = rel_inst
                 else:
                     instance.__dict__[f"_cache_{fname}"] = None
@@ -300,11 +312,13 @@ class QuerySet(Generic[_T]):
             if not hasattr(field, "_resolve_related_model"):
                 continue
             rel_model = field._resolve_related_model()
-            pk_vals = list({
-                obj.__dict__.get(field.attname)
-                for obj in instances
-                if obj.__dict__.get(field.attname) is not None
-            })
+            pk_vals = list(
+                {
+                    obj.__dict__.get(field.attname)
+                    for obj in instances
+                    if obj.__dict__.get(field.attname) is not None
+                }
+            )
             cache_key = f"_cache_{fname}"
             if not pk_vals:
                 for inst in instances:
@@ -326,7 +340,9 @@ class QuerySet(Generic[_T]):
         sf = self._query.selected_fields
         values_mode = sf is not None and not self._query.deferred_loading
         sr_fields = self._query.select_related_fields
-        collect_for_prefetch = bool(self._query.prefetch_related_fields) and not values_mode
+        collect_for_prefetch = (
+            bool(self._query.prefetch_related_fields) and not values_mode
+        )
 
         instances: list[_T] = []
 
@@ -342,7 +358,9 @@ class QuerySet(Generic[_T]):
             instance = self.model._from_db_row(row, connection)  # type: ignore[misc]
 
             if sr_fields:
-                self._hydrate_select_related(instance, sr_fields, dict(row) if hasattr(row, "keys") else {})
+                self._hydrate_select_related(
+                    instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
+                )
 
             if collect_for_prefetch:
                 instances.append(instance)
@@ -363,8 +381,7 @@ class QuerySet(Generic[_T]):
             )
         if len(results) > 1:
             raise self.model.MultipleObjectsReturned(
-                f"get() returned more than one {self.model.__name__} — "
-                f"filter: {kwargs}"
+                f"get() returned more than one {self.model.__name__} — filter: {kwargs}"
             )
         return results[0]
 
@@ -490,7 +507,9 @@ class QuerySet(Generic[_T]):
 
         connection = self._get_connection()
         meta = self.model._meta
-        concrete_fields = [f for f in meta.fields if f.column and not isinstance(f, AutoField)]
+        concrete_fields = [
+            f for f in meta.fields if f.column and not isinstance(f, AutoField)
+        ]
         pk_col = meta.pk.column if meta.pk else "id"
 
         with atomic(using=self._db):
@@ -502,11 +521,20 @@ class QuerySet(Generic[_T]):
                     if not f.primary_key or batch[0].__dict__.get(f.attname) is not None
                 ]
                 rows_values = [
-                    [f.get_db_prep_value(obj.__dict__.get(f.attname, f.get_default())) for f in fields]
+                    [
+                        f.get_db_prep_value(
+                            obj.__dict__.get(f.attname, f.get_default())
+                        )
+                        for f in fields
+                    ]
                     for obj in batch
                 ]
-                sql, params = self._query.as_bulk_insert(fields, rows_values, connection)
-                pks = connection.execute_bulk_insert(sql, params, pk_col=pk_col, count=len(batch))
+                sql, params = self._query.as_bulk_insert(
+                    fields, rows_values, connection
+                )
+                pks = connection.execute_bulk_insert(
+                    sql, params, pk_col=pk_col, count=len(batch)
+                )
                 if meta.pk and pks:
                     for obj, pk in zip(batch, pks):
                         if obj.__dict__.get(meta.pk.attname) is None:
@@ -559,11 +587,13 @@ class QuerySet(Generic[_T]):
             if not hasattr(field, "_resolve_related_model"):
                 continue
             rel_model = field._resolve_related_model()
-            pk_vals = list({
-                obj.__dict__.get(field.attname)
-                for obj in instances
-                if obj.__dict__.get(field.attname) is not None
-            })
+            pk_vals = list(
+                {
+                    obj.__dict__.get(field.attname)
+                    for obj in instances
+                    if obj.__dict__.get(field.attname) is not None
+                }
+            )
             cache_key = f"_cache_{fname}"
             if not pk_vals:
                 for inst in instances:
@@ -584,7 +614,9 @@ class QuerySet(Generic[_T]):
         sf = self._query.selected_fields
         values_mode = sf is not None and not self._query.deferred_loading
         sr_fields = self._query.select_related_fields
-        collect_for_prefetch = bool(self._query.prefetch_related_fields) and not values_mode
+        collect_for_prefetch = (
+            bool(self._query.prefetch_related_fields) and not values_mode
+        )
 
         instances: list[_T] = []
 
@@ -600,7 +632,9 @@ class QuerySet(Generic[_T]):
             instance = self.model._from_db_row(row, conn)  # type: ignore[misc]
 
             if sr_fields:
-                self._hydrate_select_related(instance, sr_fields, dict(row) if hasattr(row, "keys") else {})
+                self._hydrate_select_related(
+                    instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
+                )
 
             if collect_for_prefetch:
                 instances.append(instance)
@@ -700,6 +734,38 @@ class QuerySet(Generic[_T]):
         model_label = f"{self.model._meta.app_label}.{self.model.__name__}"
         return count, {model_label: count}
 
+    async def avalues(self, *fields: str) -> list[dict[str, Any]]:
+        qs = self.values(*fields)
+        conn = self._get_async_connection()
+        sql, params = qs._query.as_select(conn)
+        rows = await conn.execute(sql, params)
+        sf = qs._query.selected_fields
+        assert sf is not None
+        if rows and hasattr(rows[0], "keys"):
+            return [{f: row[f] for f in sf} for row in rows]
+        return [dict(zip(sf, row)) for row in rows]
+
+    async def avalues_list(self, *fields: str, flat: bool = False) -> list[Any]:
+        if flat and len(fields) != 1:
+            raise ValueError(
+                "'flat' is not valid when values_list is called with more than one field."
+            )
+        qs = self.values_list(*fields, flat=flat)
+        conn = self._get_async_connection()
+        sql, params = qs._query.as_select(conn)
+        rows = await conn.execute(sql, params)
+        result_fields = qs._fields or [
+            f.column for f in self.model._meta.fields if f.column
+        ]
+        result: list[Any] = []
+        for row in rows:
+            if hasattr(row, "keys"):
+                values = tuple(row[f] for f in result_fields)
+            else:
+                values = tuple(row[: len(result_fields)])
+            result.append(values[0] if flat else values)
+        return result
+
     async def acount(self) -> int:
         conn = self._get_async_connection()
         sql, params = self._query.as_count(conn)
@@ -749,7 +815,9 @@ class QuerySet(Generic[_T]):
 
         conn = self._get_async_connection()
         meta = self.model._meta
-        concrete_fields = [f for f in meta.fields if f.column and not isinstance(f, AutoField)]
+        concrete_fields = [
+            f for f in meta.fields if f.column and not isinstance(f, AutoField)
+        ]
         pk_col = meta.pk.column if meta.pk else "id"
 
         async with aatomic(using=self._db):
@@ -761,11 +829,18 @@ class QuerySet(Generic[_T]):
                     if not f.primary_key or batch[0].__dict__.get(f.attname) is not None
                 ]
                 rows_values = [
-                    [f.get_db_prep_value(obj.__dict__.get(f.attname, f.get_default())) for f in fields]
+                    [
+                        f.get_db_prep_value(
+                            obj.__dict__.get(f.attname, f.get_default())
+                        )
+                        for f in fields
+                    ]
                     for obj in batch
                 ]
                 sql, params = self._query.as_bulk_insert(fields, rows_values, conn)
-                pks = await conn.execute_bulk_insert(sql, params, pk_col=pk_col, count=len(batch))
+                pks = await conn.execute_bulk_insert(
+                    sql, params, pk_col=pk_col, count=len(batch)
+                )
                 if meta.pk and pks:
                     for obj, pk in zip(batch, pks):
                         if obj.__dict__.get(meta.pk.attname) is None:

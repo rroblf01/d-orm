@@ -320,9 +320,13 @@ exists = Author.objects.filter(email="alice@example.com").exists()  # True / Fal
 ### Values and value lists
 
 ```python
-# Returns dicts
+# Returns dicts — specific fields
 rows = Author.objects.values("name", "age")
 # [{"name": "Alice", "age": 30}, ...]
+
+# No arguments → all fields as dicts
+rows = Author.objects.values()
+# [{"id": 1, "name": "Alice", "age": 30, ...}, ...]
 
 # Returns tuples
 pairs = Author.objects.values_list("name", "age")
@@ -331,6 +335,13 @@ pairs = Author.objects.values_list("name", "age")
 # flat=True — single field only (raises ValueError with more than one field)
 names = Author.objects.values_list("name", flat=True)
 # ["Alice", "Bob", ...]
+
+# Async equivalents — return a list directly
+rows  = await Author.objects.avalues("name", "age")
+names = await Author.objects.avalues_list("name", flat=True)
+
+# Also chainable with filter, order_by, etc.
+rows = await Author.objects.filter(active=True).avalues("name")
 ```
 
 ### Partial loading — `only()` and `defer()`
@@ -839,6 +850,8 @@ asyncio.run(async_demo())
 | Update or create | `objects.update_or_create(...)` | `await objects.aupdate_or_create(...)` |
 | Bulk create | `objects.bulk_create([...])` | `await objects.abulk_create([...])` |
 | Aggregate | `objects.aggregate(...)` | `await objects.aaggregate(...)` |
+| Values (dicts) | `objects.values(...)` + `for` | `await objects.avalues(...)` |
+| Values list | `objects.values_list(...)` + `for` | `await objects.avalues_list(...)` |
 | Partial load | `objects.only("f1", "f2")` | — |
 | Partial load | `objects.defer("f1", "f2")` | — |
 | Eager FK load | `objects.select_related("fk")` | — |

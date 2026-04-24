@@ -135,6 +135,12 @@ class BaseManager(Generic[_T]):
 
     # ── Async proxy methods ───────────────────────────────────────────────────
 
+    async def avalues(self, *fields: str) -> list[dict[str, Any]]:
+        return await self.get_queryset().avalues(*fields)
+
+    async def avalues_list(self, *fields: str, flat: bool = False) -> list[Any]:
+        return await self.get_queryset().avalues_list(*fields, flat=flat)
+
     async def aget(self, *args: Any, **kwargs: Any) -> _T:
         return await self.get_queryset().aget(*args, **kwargs)
 
