@@ -77,6 +77,7 @@ class PostgreSQLDatabaseWrapper:
                     max_size=self._max_size,
                     open=True,
                     kwargs={"row_factory": dict_row},
+                    check=ConnectionPool.check_connection,
                 )
         return self._pool
 
@@ -244,6 +245,7 @@ class PostgreSQLAsyncDatabaseWrapper:
                     max_size=self._max_size,
                     open=False,
                     kwargs={"row_factory": dict_row},
+                    check=AsyncConnectionPool.check_connection,
                 )
                 await pool.open()
                 self._pool = pool

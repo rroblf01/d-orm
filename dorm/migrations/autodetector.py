@@ -2,28 +2,71 @@ from __future__ import annotations
 
 from .operations import (
     AddField,
+    AddIndex,
     AlterField,
     CreateModel,
     DeleteModel,
     RemoveField,
+    RemoveIndex,
+    RenameField,
+    RenameModel,
 )
 from .state import ProjectState
 
 
 class MigrationAutodetector:
-    """Compares two ProjectState objects and generates migration operations."""
+    """Compares two ProjectState objects and generates migration operations.
 
-    def __init__(self, from_state: ProjectState, to_state: ProjectState):
+    rename_hints format::
+
+        {
+            "models": {"app_label": {"OldName": "NewName"}},
+            "fields": {"app_label.ModelName": {"old_field": "new_field"}},
+        }
+
+    When a model or field rename hint is provided the autodetector emits a
+    RenameModel / RenameField operation instead of a DeleteModel+CreateModel or
+    RemoveField+AddField pair.  Without hints the behaviour is unchanged.
+
+    A second heuristic (opt-in via ``detect_renames=True``) automatically
+    matches a deleted model to a newly-created one when all their field names
+    and types are identical – i.e. only the model name changed.  The same
+    applies to fields within the same model when exactly one field is removed
+    and one is added and both share the same db_type.
+    """
+
+    def __init__(
+        self,
+        from_state: ProjectState,
+        to_state: ProjectState,
+        rename_hints: dict | None = None,
+        detect_renames: bool = False,
+    ):
         self.from_state = from_state
         self.to_state = to_state
+        self.rename_hints = rename_hints or {}
+        self.detect_renames = detect_renames
 
     @staticmethod
     def _al(key: str) -> str:
-        """Extract app_label from a state key like 'example.sales.customer'."""
         return key.rsplit(".", 1)[0]
 
+    @staticmethod
+    def _field_signature(fields: dict) -> frozenset:
+        """Deterministic representation of a model's field set for rename detection."""
+        class _DummyConn:
+            vendor = "sqlite"
+        dc = _DummyConn()
+        sig = set()
+        for name, field in fields.items():
+            try:
+                t = field.db_type(dc) or ""
+            except Exception:
+                t = type(field).__name__
+            sig.add((name, t))
+        return frozenset(sig)
+
     def changes(self, app_label: str | None = None) -> dict[str, list]:
-        """Return {app_label: [operations]} dict."""
         operations: dict[str, list] = {}
 
         from_models = {
@@ -38,69 +81,159 @@ class MigrationAutodetector:
         from_keys = set(from_models)
         to_keys = set(to_models)
 
-        # Deleted models
-        for key in from_keys - to_keys:
-            al = self._al(key)
-            model_state = from_models[key]
-            ops = operations.setdefault(al, [])
-            ops.append(DeleteModel(name=model_state["name"]))
+        # ── Collect explicit model rename hints ──────────────────────────────
+        model_renames: dict[str, tuple[str, str]] = {}  # old_key → (old_name, new_name)
+        for al, name_map in self.rename_hints.get("models", {}).items():
+            for old_name, new_name in name_map.items():
+                old_key = f"{al}.{old_name.lower()}"
+                new_key = f"{al}.{new_name.lower()}"
+                if old_key in from_keys and new_key in to_keys:
+                    model_renames[old_key] = (old_name, new_name)
 
-        # New models
-        for key in to_keys - from_keys:
+        # ── Auto-detect model renames (heuristic) ────────────────────────────
+        if self.detect_renames:
+            deleted = from_keys - to_keys - set(model_renames)
+            created = to_keys - from_keys
+            for del_key in list(deleted):
+                del_sig = self._field_signature(from_models[del_key]["fields"])
+                matches = [
+                    new_key for new_key in created
+                    if self._field_signature(to_models[new_key]["fields"]) == del_sig
+                ]
+                if len(matches) == 1:
+                    new_key = matches[0]
+                    al = self._al(del_key)
+                    old_name = from_models[del_key]["name"]
+                    new_name = to_models[new_key]["name"]
+                    model_renames[del_key] = (old_name, new_name)
+
+        # ── Emit model-level operations ──────────────────────────────────────
+        renamed_old_keys = set(model_renames)
+        renamed_new_keys = {
+            f"{self._al(k)}.{v[1].lower()}" for k, v in model_renames.items()
+        }
+
+        # RenameModel
+        for old_key, (old_name, new_name) in model_renames.items():
+            al = self._al(old_key)
+            operations.setdefault(al, []).append(RenameModel(old_name=old_name, new_name=new_name))
+
+        # DeleteModel (skip renamed ones)
+        for key in from_keys - to_keys - renamed_old_keys:
+            al = self._al(key)
+            operations.setdefault(al, []).append(DeleteModel(name=from_models[key]["name"]))
+
+        # CreateModel (skip renamed ones)
+        for key in to_keys - from_keys - renamed_new_keys:
             al = self._al(key)
             model_state = to_models[key]
-            fields = list(model_state["fields"].items())
-            ops = operations.setdefault(al, [])
-            ops.append(CreateModel(
+            operations.setdefault(al, []).append(CreateModel(
                 name=model_state["name"],
-                fields=fields,
+                fields=list(model_state["fields"].items()),
                 options=model_state.get("options", {}),
             ))
 
-        # Existing models — check for field changes
+        # ── Field-level operations for models that exist in both states ───────
+        class _DummyConn:
+            vendor = "sqlite"
+        dc = _DummyConn()
+
+        # Build a map: new_key → from_key (accounts for renamed models)
+        key_map: dict[str, str] = {}
+        for old_key, (_, new_name) in model_renames.items():
+            new_key = f"{self._al(old_key)}.{new_name.lower()}"
+            key_map[new_key] = old_key
         for key in from_keys & to_keys:
-            al = self._al(key)
-            from_m = from_models[key]
-            to_m = to_models[key]
+            key_map[key] = key
+
+        for new_key, from_key in key_map.items():
+            if new_key not in to_models or from_key not in from_models:
+                continue
+            al = self._al(new_key)
+            from_m = from_models[from_key]
+            to_m = to_models[new_key]
             ops = operations.setdefault(al, [])
 
             from_fields = from_m["fields"]
             to_fields = to_m["fields"]
 
-            # Removed fields
-            for fname in set(from_fields) - set(to_fields):
-                ops.append(RemoveField(
-                    model_name=to_m["name"],
-                    name=fname,
-                ))
+            # ── Explicit field rename hints ──────────────────────────────────
+            field_hint_key = f"{al}.{to_m['name']}"
+            field_renames: dict[str, str] = dict(
+                self.rename_hints.get("fields", {}).get(field_hint_key, {})
+            )
 
-            # Added fields
-            for fname in set(to_fields) - set(from_fields):
-                ops.append(AddField(
-                    model_name=to_m["name"],
-                    name=fname,
-                    field=to_fields[fname],
-                ))
+            # ── Auto-detect field renames ─────────────────────────────────────
+            if self.detect_renames:
+                removed_names = set(from_fields) - set(to_fields) - set(field_renames)
+                added_names = set(to_fields) - set(from_fields) - set(field_renames.values())
+                if len(removed_names) == 1 and len(added_names) == 1:
+                    old_fname = next(iter(removed_names))
+                    new_fname = next(iter(added_names))
+                    try:
+                        old_t = from_fields[old_fname].db_type(dc) or ""
+                        new_t = to_fields[new_fname].db_type(dc) or ""
+                        if old_t == new_t:
+                            field_renames[old_fname] = new_fname
+                    except Exception:
+                        pass
 
-            # Changed fields (simplified: compare db_type string)
-            for fname in set(from_fields) & set(to_fields):
+            renamed_old_fields = set(field_renames)
+            renamed_new_fields = set(field_renames.values())
+
+            # RenameField
+            for old_fname, new_fname in field_renames.items():
+                if old_fname in from_fields and new_fname in to_fields:
+                    ops.append(RenameField(
+                        model_name=to_m["name"],
+                        old_name=old_fname,
+                        new_name=new_fname,
+                    ))
+
+            # RemoveField (skip renamed)
+            for fname in set(from_fields) - set(to_fields) - renamed_old_fields:
+                ops.append(RemoveField(model_name=to_m["name"], name=fname))
+
+            # AddField (skip renamed)
+            for fname in set(to_fields) - set(from_fields) - renamed_new_fields:
+                ops.append(AddField(model_name=to_m["name"], name=fname, field=to_fields[fname]))
+
+            # AlterField
+            for fname in set(from_fields) & set(to_fields) - renamed_old_fields:
                 old_f = from_fields[fname]
                 new_f = to_fields[fname]
-                # Compare field type via a dummy connection placeholder
-                class _DummyConn:
-                    vendor = "sqlite"
-                dc = _DummyConn()
                 try:
                     old_t = old_f.db_type(dc)
                     new_t = new_f.db_type(dc)
                     if old_t != new_t:
-                        ops.append(AlterField(
-                            model_name=to_m["name"],
-                            name=fname,
-                            field=new_f,
-                        ))
+                        ops.append(AlterField(model_name=to_m["name"], name=fname, field=new_f))
                 except Exception:
                     pass
 
-        # Remove empty app entries
+        # ── Index changes ─────────────────────────────────────────────────────
+        for new_key, from_key in key_map.items():
+            if new_key not in to_models or from_key not in from_models:
+                continue
+            al = self._al(new_key)
+            from_m = from_models[from_key]
+            to_m = to_models[new_key]
+            ops = operations.setdefault(al, [])
+
+            from_indexes = from_m.get("options", {}).get("indexes", [])
+            to_indexes = to_m.get("options", {}).get("indexes", [])
+
+            def _idx_key(idx, model_name: str) -> str:
+                return idx.get_name(model_name)
+
+            from_idx_map = {_idx_key(i, from_m["name"]): i for i in from_indexes}
+            to_idx_map = {_idx_key(i, to_m["name"]): i for i in to_indexes}
+
+            for name, idx in to_idx_map.items():
+                if name not in from_idx_map:
+                    ops.append(AddIndex(model_name=to_m["name"], index=idx))
+
+            for name, idx in from_idx_map.items():
+                if name not in to_idx_map:
+                    ops.append(RemoveIndex(model_name=from_m["name"], index=idx))
+
         return {k: v for k, v in operations.items() if v}

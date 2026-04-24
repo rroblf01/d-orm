@@ -1143,6 +1143,217 @@ asyncio.run(async_demo())
 | Difference | `qs1.difference(qs2)` | — |
 | Validate | `instance.full_clean()` | — |
 | Full clean | `instance.clean()` | — |
+| Raw SQL | `objects.raw(sql, params)` | `await objects.araw(sql, params)` |
+| Bulk delete w/ on_delete | `objects.filter(...).delete()` | `await objects.filter(...).adelete()` |
+| FK traversal order | `objects.order_by("fk__field")` | — |
+
+---
+
+## Tier 4 features
+
+### Bulk delete respects `on_delete`
+
+`QuerySet.delete()` and `QuerySet.adelete()` now enforce Python-level `on_delete`
+policies (CASCADE, PROTECT, SET_NULL, SET_DEFAULT) before executing the bulk SQL DELETE,
+identical to single-instance `instance.delete()`:
+
+```python
+# Deleting a queryset cascades to related objects
+deleted, counts = Category.objects.filter(name="old").delete()
+# counts: {"myapp.Category": 1, "myapp.Article": 5}
+
+# PROTECT prevents deletion if related objects exist
+from dorm.exceptions import ProtectedError
+try:
+    Publisher.objects.all().delete()
+except ProtectedError:
+    print("Cannot delete: protected references exist")
+```
+
+### `order_by()` with FK traversal
+
+Sort by fields on related models using double-underscore traversal — dorm automatically
+adds the required JOIN:
+
+```python
+# Sort books by their author's name
+books = Book.objects.order_by("author__name")
+
+# Descending
+books = Book.objects.order_by("-author__name")
+
+# Multi-level traversal
+books = Book.objects.order_by("author__publisher__name", "title")
+
+# Combined with filters
+books = Book.objects.filter(published=True).order_by("author__name", "-year")
+```
+
+### Field validators
+
+Attach validators to any field. They run when `full_clean()` is called:
+
+```python
+from dorm.validators import MinValueValidator, MaxValueValidator, RegexValidator, validate_email
+
+class Product(dorm.Model):
+    name = dorm.CharField(
+        max_length=200,
+        validators=[MinLengthValidator(3), MaxLengthValidator(50)],
+    )
+    price = dorm.FloatField(
+        validators=[MinValueValidator(0), MaxValueValidator(9999)],
+    )
+    sku = dorm.CharField(
+        max_length=20,
+        validators=[RegexValidator(r"^[A-Z]{2}-\d{4}$", "Invalid SKU format")],
+    )
+    email = dorm.CharField(max_length=100, validators=[validate_email])
+```
+
+Built-in validators:
+
+| Validator | Purpose |
+|---|---|
+| `MinValueValidator(n)` | Value ≥ n |
+| `MaxValueValidator(n)` | Value ≤ n |
+| `MinLengthValidator(n)` | `len(value) >= n` |
+| `MaxLengthValidator(n)` | `len(value) <= n` |
+| `RegexValidator(pattern, msg)` | Must match regex |
+| `EmailValidator()` / `validate_email` | Valid email format |
+
+Custom validators are plain callables that raise `ValidationError`:
+
+```python
+def no_spaces(value):
+    if " " in value:
+        raise dorm.ValidationError("No spaces allowed.")
+
+class Tag(dorm.Model):
+    slug = dorm.CharField(max_length=50, validators=[no_spaces])
+```
+
+### Raw SQL queries
+
+Execute arbitrary SQL and get back hydrated model instances:
+
+```python
+# Sync
+results = list(Author.objects.raw('SELECT * FROM "authors" WHERE age > %s', [25]))
+for author in results:
+    print(author.name, author.age)  # full model instances
+
+# Async
+authors = await Author.objects.araw('SELECT * FROM "authors" ORDER BY "name"')
+
+# Async iteration
+async for author in Author.objects.raw('SELECT * FROM "authors"'):
+    print(author.name)
+```
+
+The query can return any columns — unknown columns are stored as plain attributes.
+JOINs and computed columns work seamlessly:
+
+```python
+results = Author.objects.raw(
+    'SELECT a.*, COUNT(b.id) AS book_count '
+    'FROM authors a LEFT JOIN books b ON b.author_id = a.id '
+    'GROUP BY a.id'
+)
+for a in results:
+    print(a.name, a.book_count)
+```
+
+### Connection auto-reconnect
+
+Both SQLite and PostgreSQL backends now perform a health-check before executing each
+query. If the connection has been dropped (e.g. server restart, idle timeout), dorm
+transparently reconnects:
+
+- **SQLite sync/async**: executes `SELECT 1` on the cached connection; recreates it on
+  failure.
+- **PostgreSQL pool**: passes `check=ConnectionPool.check_connection` to the psycopg
+  pool, which verifies each connection when it is borrowed.
+
+No application code changes are needed. Long-running processes (workers, daemons) will
+automatically recover from transient connection failures.
+
+### Rename detection in migrations
+
+The `MigrationAutodetector` can now produce `RenameModel` and `RenameField` operations
+instead of delete+create pairs.
+
+**Explicit hints (recommended)** — safe, deterministic:
+
+```python
+from dorm.migrations.autodetector import MigrationAutodetector
+
+detector = MigrationAutodetector(
+    from_state,
+    to_state,
+    rename_hints={
+        "models": {"myapp": {"OldModelName": "NewModelName"}},
+        "fields": {"myapp.MyModel": {"old_field": "new_field"}},
+    },
+)
+changes = detector.changes("myapp")
+```
+
+**Heuristic auto-detection** (opt-in via `detect_renames=True`):
+
+- **Model rename**: detects when a deleted model and a new model share identical field
+  names and types.
+- **Field rename**: detects when exactly one field is removed and one added within the
+  same model, and both share the same `db_type`.
+
+```python
+detector = MigrationAutodetector(from_state, to_state, detect_renames=True)
+changes = detector.changes("myapp")
+```
+
+### Database indexes (`Meta.indexes`)
+
+Define indexes on models using `dorm.Index`. They are stored in model metadata and
+can be applied via migration operations:
+
+```python
+import dorm
+from dorm.indexes import Index
+
+class Article(dorm.Model):
+    title = dorm.CharField(max_length=200)
+    slug  = dorm.CharField(max_length=200)
+    published_at = dorm.DateTimeField()
+
+    class Meta:
+        indexes = [
+            Index(fields=["slug"], unique=True, name="idx_article_slug"),
+            Index(fields=["published_at"], name="idx_article_date"),
+            Index(fields=["title", "slug"]),  # auto-named: idx_article_title_slug
+        ]
+```
+
+**Migration operations:**
+
+```python
+from dorm.migrations.operations import AddIndex, RemoveIndex
+from dorm.indexes import Index
+
+class Migration:
+    operations = [
+        AddIndex(
+            model_name="Article",
+            index=Index(fields=["slug"], unique=True, name="idx_article_slug"),
+        ),
+        RemoveIndex(
+            model_name="Article",
+            index=Index(fields=["old_col"], name="idx_article_old"),
+        ),
+    ]
+```
+
+The `MigrationAutodetector` automatically detects added and removed indexes when
+comparing two `ProjectState` objects.
 
 ---
 

@@ -153,7 +153,26 @@ class SQLQuery:
         cols = self.get_columns(alias)
         select = f'SELECT {distinct}{cols}{extra_select}{sr_extra_cols} FROM "{table}"'
 
-        # WHERE-derived JOINs (populated by _resolve_column during WHERE compilation above)
+        # ORDER BY — resolve FK traversal paths (may add JOINs) before emitting JOIN clauses
+        order_by_sql = ""
+        if self.order_by_fields:
+            order_parts = []
+            for f in self.order_by_fields:
+                desc = f.startswith("-")
+                fname = f[1:] if desc else f
+                if "__" in fname:
+                    col = self._resolve_column(fname.split("__"))
+                else:
+                    _validate_identifier(fname)
+                    col = (
+                        f'"{self.model._meta.db_table}"."{fname}"'
+                        if self.joins
+                        else f'"{fname}"'
+                    )
+                order_parts.append(f"{col} {'DESC' if desc else 'ASC'}")
+            order_by_sql = " ORDER BY " + ", ".join(order_parts)
+
+        # WHERE-derived JOINs (populated by _resolve_column during WHERE/ORDER BY compilation)
         for join_type, join_table, join_alias, on_cond in self.joins:
             select += f' {join_type} JOIN "{join_table}" AS "{join_alias}" ON {on_cond}'
 
@@ -180,17 +199,8 @@ class SQLQuery:
                 params.extend(having_params)
 
         # ORDER BY
-        if self.order_by_fields:
-            order_parts = []
-            for f in self.order_by_fields:
-                fname = f[1:] if f.startswith("-") else f
-                if not _SAFE_IDENTIFIER.match(fname):
-                    raise ValueError(
-                        f"Invalid order_by field '{fname}': only letters, digits, "
-                        "and underscores are allowed."
-                    )
-                order_parts.append(f'"{fname}" {"DESC" if f.startswith("-") else "ASC"}')
-            select += " ORDER BY " + ", ".join(order_parts)
+        if order_by_sql:
+            select += order_by_sql
 
         # LIMIT / OFFSET
         if self.limit_val is not None:
@@ -321,13 +331,21 @@ class SQLQuery:
         return self._adapt_placeholders(joined, connection), params
 
     def _compile_leaf(self, field_parts: list[str], lookup: str, value, connection) -> tuple[str, list]:
-        # Resolve column reference, handling FK traversal
         col = self._resolve_column(field_parts)
+        # Extract PK from model instances (e.g. filter(author=instance))
+        if hasattr(value, "_meta") and hasattr(value, "pk"):
+            value = value.pk
+        elif isinstance(value, (list, tuple)):
+            value = [
+                v.pk if hasattr(v, "_meta") and hasattr(v, "pk") else v
+                for v in value
+            ]
         sql, params = build_lookup_sql(col, lookup, value)
         return self._adapt_placeholders(sql, connection), params
 
     def _resolve_column(self, field_parts: list[str]) -> str:
         model = self.model
+        current_alias = model._meta.db_table
         parts = list(field_parts)
         # Resolve "pk" alias to the actual primary key column
         if parts[0] == "pk" and model._meta.pk:
@@ -341,15 +359,15 @@ class SQLQuery:
             if hasattr(field, "remote_field_to"):
                 rel_model = field._resolve_related_model()
                 table = rel_model._meta.db_table
-                local_table = model._meta.db_table
-                join_alias = f"{local_table}_{fname}"
+                join_alias = f"{current_alias}_{fname}"
                 on_cond = (
                     f'"{join_alias}"."{rel_model._meta.pk.column}" = '
-                    f'"{local_table}"."{field.column}"'
+                    f'"{current_alias}"."{field.column}"'
                 )
                 if not any(j[2] == join_alias for j in self.joins):
                     self.joins.append(("INNER", table, join_alias, on_cond))
                 model = rel_model
+                current_alias = join_alias
             else:
                 break
 
@@ -361,9 +379,8 @@ class SQLQuery:
             _validate_identifier(fname)
             col_name = fname
 
-        # Prefix with table if joins present
         if self.joins:
-            return f'"{model._meta.db_table}"."{col_name}"'
+            return f'"{current_alias}"."{col_name}"'
         return f'"{col_name}"'
 
     # ── Placeholder adaptation ────────────────────────────────────────────────

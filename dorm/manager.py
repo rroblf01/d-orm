@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from .models import Model
 
 if TYPE_CHECKING:
-    from .queryset import QuerySet, ValuesListQuerySet
+    from .queryset import QuerySet, RawQuerySet, ValuesListQuerySet
 
 _T = TypeVar("_T", bound=Model)
 
@@ -186,6 +186,14 @@ class BaseManager(Generic[_T]):
 
     async def aaggregate(self, **kwargs: Any) -> dict[str, Any]:
         return await self.get_queryset().aaggregate(**kwargs)
+
+    def raw(self, sql: str, params: list[Any] | None = None) -> "RawQuerySet[_T]":
+        from .queryset import RawQuerySet
+        assert self.model is not None
+        return RawQuerySet(self.model, sql, params, using=self._db)  # type: ignore[arg-type]
+
+    async def araw(self, sql: str, params: list[Any] | None = None) -> list[_T]:
+        return list(await self.raw(sql, params)._afetch_all())
 
 
 class Manager(BaseManager[_T]):

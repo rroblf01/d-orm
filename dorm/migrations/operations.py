@@ -235,6 +235,72 @@ class RenameModel(Operation):
         return f"RenameModel(old_name={self.old_name!r}, new_name={self.new_name!r})"
 
 
+class AddIndex(Operation):
+    def __init__(self, model_name: str, index) -> None:
+        self.model_name = model_name
+        self.index = index
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.model_name.lower()}"
+        if key in state.models:
+            state.models[key].setdefault("options", {}).setdefault("indexes", []).append(self.index)
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        model_state = to_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
+        table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
+        idx_name = self.index.get_name(self.model_name)
+        unique = "UNIQUE " if self.index.unique else ""
+        cols = ", ".join(f'"{f}"' for f in self.index.fields)
+        connection.execute_script(
+            f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}" ({cols})'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        idx_name = self.index.get_name(self.model_name)
+        connection.execute_script(f'DROP INDEX IF EXISTS "{idx_name}"')
+
+    def describe(self) -> str:
+        return f"Add index {self.index!r} to {self.model_name}"
+
+    def __repr__(self) -> str:
+        return f"AddIndex(model_name={self.model_name!r}, index={self.index!r})"
+
+
+class RemoveIndex(Operation):
+    def __init__(self, model_name: str, index) -> None:
+        self.model_name = model_name
+        self.index = index
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.model_name.lower()}"
+        if key in state.models:
+            indexes = state.models[key].get("options", {}).get("indexes", [])
+            idx_name = self.index.get_name(self.model_name)
+            state.models[key]["options"]["indexes"] = [
+                i for i in indexes if i.get_name(self.model_name) != idx_name
+            ]
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        idx_name = self.index.get_name(self.model_name)
+        connection.execute_script(f'DROP INDEX IF EXISTS "{idx_name}"')
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        model_state = from_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
+        table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
+        idx_name = self.index.get_name(self.model_name)
+        unique = "UNIQUE " if self.index.unique else ""
+        cols = ", ".join(f'"{f}"' for f in self.index.fields)
+        connection.execute_script(
+            f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}" ({cols})'
+        )
+
+    def describe(self) -> str:
+        return f"Remove index {self.index!r} from {self.model_name}"
+
+    def __repr__(self) -> str:
+        return f"RemoveIndex(model_name={self.model_name!r}, index={self.index!r})"
+
+
 class RunSQL(Operation):
     def __init__(self, sql: str, reverse_sql: str = "", params=None):
         self.sql = sql

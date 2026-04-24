@@ -59,6 +59,7 @@ class Field:
         help_text: str = "",
         db_column: str | None = None,
         db_tablespace: str | None = None,
+        validators: list | None = None,
     ):
         self.verbose_name = verbose_name
         self.name = name
@@ -75,6 +76,7 @@ class Field:
         self.help_text = help_text
         self.db_column = db_column
         self.db_tablespace = db_tablespace
+        self.validators: list = list(validators) if validators else []
         self.model = None
         self.attname = None
         self.column = None
@@ -136,6 +138,9 @@ class Field:
                 raise ValidationError(
                     f"Value '{value}' is not a valid choice for '{self.name}'."
                 )
+        if value is not None:
+            for validator in self.validators:
+                validator(value)
 
     def pre_save(self, model_instance: Any, add: bool) -> Any:
         return model_instance.__dict__.get(self.attname)

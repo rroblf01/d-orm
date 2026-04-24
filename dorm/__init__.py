@@ -85,7 +85,17 @@ from .fields import (
 )
 from .models import Model
 from .manager import Manager
-from .queryset import CombinedQuerySet, QuerySet
+from .indexes import Index
+from .queryset import CombinedQuerySet, QuerySet, RawQuerySet
+from .validators import (
+    EmailValidator,
+    MaxLengthValidator,
+    MaxValueValidator,
+    MinLengthValidator,
+    MinValueValidator,
+    RegexValidator,
+    validate_email,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -105,6 +115,7 @@ __all__ = [
     "Manager",
     "QuerySet",
     "CombinedQuerySet",
+    "RawQuerySet",
     # Fields
     "AutoField",
     "BigAutoField",
@@ -164,6 +175,16 @@ __all__ = [
     "Lower",
     "Length",
     "Abs",
+    # Index
+    "Index",
+    # Validators
+    "MinValueValidator",
+    "MaxValueValidator",
+    "MinLengthValidator",
+    "MaxLengthValidator",
+    "RegexValidator",
+    "EmailValidator",
+    "validate_email",
     # Exceptions
     "DoesNotExist",
     "MultipleObjectsReturned",

@@ -646,11 +646,51 @@ class QuerySet(Generic[_T]):
         return connection.execute_write(sql, params)
 
     def delete(self) -> tuple[int, dict[str, int]]:
+        from .exceptions import ProtectedError
+        from .fields import CASCADE, DO_NOTHING, PROTECT, SET_DEFAULT, SET_NULL
+        from .related_managers import ReverseFKDescriptor
+
+        pk_attname = self.model._meta.pk.attname
+        pks = list(self.values_list(pk_attname, flat=True))
+        model_label = f"{self.model._meta.app_label}.{self.model.__name__}"
+        if not pks:
+            return 0, {model_label: 0}
+
+        total_counts: dict[str, int] = {}
+
+        for attr_val in self.model.__dict__.values():
+            if not isinstance(attr_val, ReverseFKDescriptor):
+                continue
+            fk_field = attr_val.fk_field
+            on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
+            if on_delete == DO_NOTHING:
+                continue
+
+            related_qs = QuerySet(attr_val.source_model, self._db).filter(
+                **{f"{fk_field.name}__in": pks}
+            )
+
+            if on_delete == PROTECT:
+                if related_qs.exists():
+                    raise ProtectedError(
+                        f"Cannot delete {self.model.__name__} objects because related "
+                        f"{attr_val.source_model.__name__} objects exist.",
+                        list(related_qs[:5]),
+                    )
+            elif on_delete == CASCADE:
+                sub_count, sub_detail = related_qs.delete()
+                for label, cnt in sub_detail.items():
+                    total_counts[label] = total_counts.get(label, 0) + cnt
+            elif on_delete == SET_NULL:
+                related_qs.update(**{fk_field.name: None})
+            elif on_delete == SET_DEFAULT:
+                related_qs.update(**{fk_field.name: fk_field.get_default()})
+
         connection = self._get_connection()
         sql, params = self._query.as_delete(connection)
         count = connection.execute_write(sql, params)
-        model_label = f"{self.model._meta.app_label}.{self.model.__name__}"
-        return count, {model_label: count}
+        total_counts[model_label] = total_counts.get(model_label, 0) + count
+        return sum(total_counts.values()), total_counts
 
     def bulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         if not objs:
@@ -885,11 +925,51 @@ class QuerySet(Generic[_T]):
         return await conn.execute_write(sql, params)
 
     async def adelete(self) -> tuple[int, dict[str, int]]:
+        from .exceptions import ProtectedError
+        from .fields import CASCADE, DO_NOTHING, PROTECT, SET_DEFAULT, SET_NULL
+        from .related_managers import ReverseFKDescriptor
+
+        pk_attname = self.model._meta.pk.attname
+        pks = await self.avalues_list(pk_attname, flat=True)
+        model_label = f"{self.model._meta.app_label}.{self.model.__name__}"
+        if not pks:
+            return 0, {model_label: 0}
+
+        total_counts: dict[str, int] = {}
+
+        for attr_val in self.model.__dict__.values():
+            if not isinstance(attr_val, ReverseFKDescriptor):
+                continue
+            fk_field = attr_val.fk_field
+            on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
+            if on_delete == DO_NOTHING:
+                continue
+
+            related_qs = QuerySet(attr_val.source_model, self._db).filter(
+                **{f"{fk_field.name}__in": pks}
+            )
+
+            if on_delete == PROTECT:
+                if await related_qs.aexists():
+                    raise ProtectedError(
+                        f"Cannot delete {self.model.__name__} objects because related "
+                        f"{attr_val.source_model.__name__} objects exist.",
+                        [obj async for obj in related_qs[:5]],
+                    )
+            elif on_delete == CASCADE:
+                sub_count, sub_detail = await related_qs.adelete()
+                for label, cnt in sub_detail.items():
+                    total_counts[label] = total_counts.get(label, 0) + cnt
+            elif on_delete == SET_NULL:
+                await related_qs.aupdate(**{fk_field.name: None})
+            elif on_delete == SET_DEFAULT:
+                await related_qs.aupdate(**{fk_field.name: fk_field.get_default()})
+
         conn = self._get_async_connection()
         sql, params = self._query.as_delete(conn)
         count = await conn.execute_write(sql, params)
-        model_label = f"{self.model._meta.app_label}.{self.model.__name__}"
-        return count, {model_label: count}
+        total_counts[model_label] = total_counts.get(model_label, 0) + count
+        return sum(total_counts.values()), total_counts
 
     async def avalues(self, *fields: str) -> list[dict[str, Any]]:
         qs = self.values(*fields)
@@ -1163,3 +1243,99 @@ class CombinedQuerySet(QuerySet[_T]):
         count_sql = f'SELECT COUNT(*) AS "count" FROM ({sql}) AS "_combined"'
         rows = await conn.execute(count_sql, params)
         return rows[0]["count"]
+
+
+# ── RawQuerySet ────────────────────────────────────────────────────────────────
+
+class RawQuerySet(Generic[_T]):
+    """
+    Executes a raw SQL query and hydrates the results as model instances.
+    Columns returned by the query are mapped to field attnames; unknown columns
+    are stored as plain attributes on the instance.
+    """
+
+    def __init__(
+        self,
+        model: type[_T],
+        raw_sql: str,
+        params: list[Any] | None = None,
+        using: str = "default",
+    ) -> None:
+        self.model = model
+        self.raw_sql = raw_sql
+        self.params = params or []
+        self._db = using
+        self._result_cache: list[_T] | None = None
+
+    def _get_connection(self):
+        from .db.connection import get_connection
+        return get_connection(self._db)
+
+    def _get_async_connection(self):
+        from .db.connection import get_async_connection
+        return get_async_connection(self._db)
+
+    def _adapt(self, connection) -> str:
+        from .query import SQLQuery
+        return SQLQuery(self.model)._adapt_placeholders(self.raw_sql, connection)
+
+    def _hydrate(self, row, column_names: list[str]) -> _T:
+        instance = self.model.__new__(self.model)
+        instance.__dict__["_state"] = None
+        col_to_field: dict[str, Any] = {
+            f.column: f for f in self.model._meta.fields if f.column
+        }
+        col_to_attname: dict[str, str] = {
+            f.column: f.attname for f in self.model._meta.fields if f.column
+        }
+        for i, col in enumerate(column_names):
+            val = row[col] if hasattr(row, "keys") else row[i]
+            attname = col_to_attname.get(col, col)
+            field = col_to_field.get(col)
+            instance.__dict__[attname] = field.from_db_value(val) if field else val
+        return instance
+
+    def _fetch_all(self) -> list[_T]:
+        if self._result_cache is None:
+            conn = self._get_connection()
+            sql = self._adapt(conn)
+            rows = conn.execute(sql, self.params)
+            if not rows:
+                self._result_cache = []
+                return self._result_cache
+            cols = (
+                list(rows[0].keys())
+                if hasattr(rows[0], "keys")
+                else [f.column for f in self.model._meta.fields if f.column]
+            )
+            self._result_cache = [self._hydrate(row, cols) for row in rows]
+        return self._result_cache
+
+    def __iter__(self) -> Iterator[_T]:
+        return iter(self._fetch_all())
+
+    def __len__(self) -> int:
+        return len(self._fetch_all())
+
+    def __repr__(self) -> str:
+        return f"<RawQuerySet: {self.raw_sql!r}>"
+
+    async def _afetch_all(self) -> list[_T]:
+        conn = self._get_async_connection()
+        sql = self._adapt(conn)
+        rows = await conn.execute(sql, self.params)
+        if not rows:
+            return []
+        cols = (
+            list(rows[0].keys())
+            if hasattr(rows[0], "keys")
+            else [f.column for f in self.model._meta.fields if f.column]
+        )
+        return [self._hydrate(row, cols) for row in rows]
+
+    def __aiter__(self) -> AsyncIterator[_T]:
+        return self._aiterator()
+
+    async def _aiterator(self) -> AsyncIterator[_T]:
+        for obj in await self._afetch_all():
+            yield obj

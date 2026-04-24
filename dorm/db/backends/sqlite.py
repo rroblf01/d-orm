@@ -16,14 +16,28 @@ class SQLiteDatabaseWrapper:
         self.database = settings.get("NAME", ":memory:")
         self._local = threading.local()  # per-instance to support multiple aliases
 
+    def _new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.database, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+
     def get_connection(self) -> sqlite3.Connection:
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            conn = sqlite3.connect(self.database, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+        if conn is None:
+            conn = self._new_connection()
             self._local.conn = conn
-        return self._local.conn
+        return conn
 
     @property
     def _atomic_depth(self) -> int:
@@ -158,14 +172,27 @@ class SQLiteAsyncDatabaseWrapper:
             self._loop = current_loop
             self._lock = asyncio.Lock()
 
-    async def _get_conn(self):
+    async def _new_connection(self):
         import aiosqlite
 
+        conn = await aiosqlite.connect(self.database)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+
+    async def _get_conn(self):
+        if self._conn is not None:
+            try:
+                await self._conn.execute("SELECT 1")
+            except Exception:
+                try:
+                    await self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
         if self._conn is None:
-            self._conn = await aiosqlite.connect(self.database)
-            self._conn.row_factory = aiosqlite.Row
-            await self._conn.execute("PRAGMA foreign_keys = ON")
-            await self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn = await self._new_connection()
         return self._conn
 
     def _in_atomic(self) -> bool:

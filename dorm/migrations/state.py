@@ -53,6 +53,7 @@ class ProjectState:
                 "db_table": meta.db_table,
                 "ordering": meta.ordering,
                 "unique_together": meta.unique_together,
+                "indexes": list(getattr(meta, "indexes", [])),
             }
             state.add_model(target_app, model_cls.__name__, fields, options)
         return state
