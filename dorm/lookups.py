@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 LOOKUP_SEP = "__"
 
 # Maps lookup name → (sql_template, value_transform)
 # %s is the column reference; value_transform applied to the value before binding
-LOOKUPS: dict[str, tuple[str, callable]] = {
+LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "exact": ("{col} = %s", lambda v: v),
     "iexact": ("LOWER({col}) = LOWER(%s)", lambda v: v),
     "contains": ("{col} LIKE %s", lambda v: f"%{v}%"),

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 from typing import (
-    TYPE_CHECKING,
     Any,
     AsyncIterator,
     Generic,
@@ -11,13 +10,12 @@ from typing import (
     overload,
 )
 
-from .aggregates import Aggregate
-from .exceptions import DoesNotExist, MultipleObjectsReturned
 from .expressions import Q
 from .lookups import parse_lookup_key
+from .models import Model
 from .query import SQLQuery
 
-_T = TypeVar("_T")
+_T = TypeVar("_T", bound=Model)
 
 
 class QuerySet(Generic[_T]):
@@ -28,26 +26,26 @@ class QuerySet(Generic[_T]):
 
     def __init__(self, model: type[_T], using: str = "default") -> None:
         self.model = model
-        self.using = using
+        self._db = using
         self._query = SQLQuery(model)
         self._result_cache: list[_T] | None = None
 
     # ── Cloning ───────────────────────────────────────────────────────────────
 
     def _clone(self) -> QuerySet[_T]:
-        qs: QuerySet[_T] = QuerySet(self.model, self.using)
+        qs: QuerySet[_T] = QuerySet(self.model, self._db)
         qs._query = self._query.clone()
         return qs
 
     def _get_connection(self):
         from .db.connection import get_connection
 
-        return get_connection(self.using)
+        return get_connection(self._db)
 
     async def _get_async_connection(self):
         from .db.connection import get_async_connection
 
-        return await get_async_connection(self.using)
+        return await get_async_connection(self._db)
 
     # ── Filtering ─────────────────────────────────────────────────────────────
 
@@ -122,14 +120,14 @@ class QuerySet(Generic[_T]):
         qs = self._clone()
         return qs
 
-    def values(self, *fields: str) -> QuerySet[dict[str, Any]]:
-        qs: QuerySet[dict[str, Any]] = QuerySet(self.model, self.using)  # type: ignore[assignment]
+    def values(self, *fields: str) -> QuerySet[Any]:
+        qs: QuerySet[Any] = QuerySet(self.model, self._db)  # type: ignore[arg-type]
         qs._query = self._query.clone()
         qs._query.selected_fields = list(fields) if fields else None
         return qs
 
     def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
-        qs = ValuesListQuerySet(self.model, self.using)
+        qs = ValuesListQuerySet(self.model, self._db)
         qs._query = self._query.clone()
         qs._query.selected_fields = list(fields) if fields else None
         qs._flat = flat and len(fields) == 1
@@ -198,18 +196,20 @@ class QuerySet(Generic[_T]):
 
     def using(self, alias: str) -> QuerySet[_T]:
         qs = self._clone()
-        qs.using = alias
+        qs._db = alias
         return qs
 
     # ── Sync execution ────────────────────────────────────────────────────────
 
     def __iter__(self) -> Iterator[_T]:
         self._fetch_all()
-        return iter(self._result_cache)  # type: ignore[arg-type]
+        assert self._result_cache is not None
+        return iter(self._result_cache)
 
     def __len__(self) -> int:
         self._fetch_all()
-        return len(self._result_cache)  # type: ignore[arg-type]
+        assert self._result_cache is not None
+        return len(self._result_cache)
 
     def __bool__(self) -> bool:
         self._fetch_all()
@@ -251,12 +251,12 @@ class QuerySet(Generic[_T]):
         if self._query.selected_fields is not None:
             for row in rows:
                 if hasattr(row, "keys"):
-                    yield dict(row)  # type: ignore[misc]
+                    yield dict(row)  # type: ignore
                 else:
-                    yield dict(zip(self._query.selected_fields, row))  # type: ignore[misc]
+                    yield dict(zip(self._query.selected_fields, row))  # type: ignore
         else:
             for row in rows:
-                yield self.model._from_db_row(row, connection)
+                yield self.model._from_db_row(row, connection)  # type: ignore[misc]
 
     def get(self, *args: Q, **kwargs: Any) -> _T:
         qs = self.filter(*args, **kwargs)
@@ -312,7 +312,7 @@ class QuerySet(Generic[_T]):
 
     def create(self, **kwargs: Any) -> _T:
         obj = self.model(**kwargs)
-        obj.save(using=self.using, force_insert=True)
+        obj.save(using=self._db, force_insert=True)
         return obj
 
     def get_or_create(
@@ -334,7 +334,7 @@ class QuerySet(Generic[_T]):
             obj = self.get(**kwargs)
             for k, v in defaults.items():
                 setattr(obj, k, v)
-            obj.save(using=self.using)
+            obj.save(using=self._db)
             return obj, False
         except self.model.DoesNotExist:
             params = dict(kwargs)
@@ -435,12 +435,12 @@ class QuerySet(Generic[_T]):
         if self._query.selected_fields is not None:
             for row in rows:
                 if hasattr(row, "keys"):
-                    yield dict(row)  # type: ignore[misc]
+                    yield dict(row)  # type: ignore
                 else:
-                    yield dict(zip(self._query.selected_fields, row))  # type: ignore[misc]
+                    yield dict(zip(self._query.selected_fields, row))  # type: ignore
         else:
             for row in rows:
-                yield self.model._from_db_row(row, conn)
+                yield self.model._from_db_row(row, conn)  # type: ignore[misc]
 
     async def aget(self, *args: Q, **kwargs: Any) -> _T:
         qs = self.filter(*args, **kwargs)
@@ -458,7 +458,7 @@ class QuerySet(Generic[_T]):
 
     async def acreate(self, **kwargs: Any) -> _T:
         obj = self.model(**kwargs)
-        await obj.asave(using=self.using, force_insert=True)
+        await obj.asave(using=self._db, force_insert=True)
         return obj
 
     async def aget_or_create(
@@ -480,7 +480,7 @@ class QuerySet(Generic[_T]):
             obj = await self.aget(**kwargs)
             for k, v in defaults.items():
                 setattr(obj, k, v)
-            await obj.asave(using=self.using)
+            await obj.asave(using=self._db)
             return obj, False
         except self.model.DoesNotExist:
             params = dict(kwargs)
@@ -593,8 +593,9 @@ class QuerySet(Generic[_T]):
 
     def __repr__(self) -> str:
         self._fetch_all()
-        data = self._result_cache[:21]  # type: ignore[index]
-        truncated = len(self._result_cache) > 20  # type: ignore[arg-type]
+        assert self._result_cache is not None
+        data = self._result_cache[:21]
+        truncated = len(self._result_cache) > 20
         rep = repr(data[:20])
         if truncated:
             rep = rep[:-1] + ", ...]"
@@ -606,7 +607,7 @@ class ValuesListQuerySet(QuerySet[Any]):
     _fields: list[str] = []
 
     def _clone(self) -> ValuesListQuerySet:
-        qs = ValuesListQuerySet(self.model, self.using)
+        qs = ValuesListQuerySet(self.model, self._db)
         qs._query = self._query.clone()
         qs._flat = self._flat
         qs._fields = list(self._fields)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import Any
+
 from ..exceptions import ImproperlyConfigured
 
-_sync_connections: dict[str, object] = {}
-_async_connections: dict[str, object] = {}
+_sync_connections: dict[str, Any] = {}
+_async_connections: dict[str, Any] = {}
 
 
 def _get_settings(alias: str = "default") -> dict:

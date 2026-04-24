@@ -2,7 +2,6 @@
 import tempfile
 from pathlib import Path
 
-import pytest
 
 import dorm
 from dorm.migrations.autodetector import MigrationAutodetector

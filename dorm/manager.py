@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from .models import Model
+
 if TYPE_CHECKING:
     from .queryset import QuerySet, ValuesListQuerySet
 
-_T = TypeVar("_T")
+_T = TypeVar("_T", bound=Model)
 
 
 class BaseManager(Generic[_T]):
@@ -14,7 +16,7 @@ class BaseManager(Generic[_T]):
     use_in_migrations = False
 
     def __init__(self) -> None:
-        self.model: type[_T] | None = None
+        self.model: type[Any] | None = None
         self.name: str | None = None
         self._db = "default"
         self.creation_counter = BaseManager.creation_counter
@@ -24,18 +26,19 @@ class BaseManager(Generic[_T]):
         self.model = cls
         self.name = name
         setattr(cls, name, ManagerDescriptor(self))
-        cls._meta.managers.append(self)
+        cls._meta.managers.append(self)  # type: ignore
 
     def db_manager(self, using: str) -> BaseManager[_T]:
         mgr: BaseManager[_T] = self.__class__()
-        mgr.model = self.model
+        mgr.model = self.model  # type: ignore[assignment]
         mgr.name = self.name
         mgr._db = using
         return mgr
 
     def get_queryset(self) -> QuerySet[_T]:
         from .queryset import QuerySet
-        return QuerySet(self.model, self._db)
+        assert self.model is not None
+        return QuerySet(self.model, self._db)  # type: ignore[arg-type]
 
     # ── Proxy all QuerySet methods ────────────────────────────────────────────
 
@@ -69,7 +72,7 @@ class BaseManager(Generic[_T]):
     def annotate(self, **kwargs: Any) -> QuerySet[_T]:
         return self.get_queryset().annotate(**kwargs)
 
-    def values(self, *fields: str) -> QuerySet[dict[str, Any]]:
+    def values(self, *fields: str) -> QuerySet[Any]:
         return self.get_queryset().values(*fields)
 
     def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:

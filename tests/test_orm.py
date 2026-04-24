@@ -52,7 +52,7 @@ def setup_tables():
         if field.db_type(conn):
             author_cols.append(_field_to_column_sql(field.name, field, conn))
     conn.execute_script(
-        f'CREATE TABLE IF NOT EXISTS "authors" (\n  '
+        'CREATE TABLE IF NOT EXISTS "authors" (\n  '
         + ",\n  ".join(filter(None, author_cols))
         + "\n)"
     )
@@ -62,7 +62,7 @@ def setup_tables():
         if field.db_type(conn):
             book_cols.append(_field_to_column_sql(field.name, field, conn))
     conn.execute_script(
-        f'CREATE TABLE IF NOT EXISTS "books" (\n  '
+        'CREATE TABLE IF NOT EXISTS "books" (\n  '
         + ",\n  ".join(filter(None, book_cols))
         + "\n)"
     )
@@ -121,8 +121,10 @@ def test_sync():
 
     # first / last
     first = Author.objects.order_by("age").first()
+    assert first is not None
     assert first.name == "Bob", first.name
     last = Author.objects.order_by("age").last()
+    assert last is not None
     assert last.name == "Carol", last.name
     print(f"first/last by age: {first.name} / {last.name}")
 
@@ -197,7 +199,6 @@ def test_sync():
 async def test_async():
     print("\n=== ASYNC TESTS ===")
 
-    from dorm.db.connection import reset_connections
 
     # acreate
     eve = await Author.objects.acreate(name="Eve", age=22)
@@ -219,6 +220,7 @@ async def test_async():
 
     # afirst / alast
     first = await Author.objects.order_by("age").afirst()
+    assert first is not None
     print(f"afirst() by age: {first.name}")
 
     # aupdate
@@ -236,7 +238,7 @@ async def test_async():
     # adelete
     n, _ = await Author.objects.filter(name="Frank").adelete()
     assert n == 1
-    print(f"adelete(): removed Frank")
+    print("adelete(): removed Frank")
 
     # async iteration
     names = []
@@ -264,13 +266,10 @@ async def test_async():
 def test_migrations():
     print("\n=== MIGRATION SYSTEM TEST ===")
     import tempfile
-    import os
     from pathlib import Path
     from dorm.migrations.autodetector import MigrationAutodetector
     from dorm.migrations.state import ProjectState
     from dorm.migrations.writer import write_migration
-    from dorm.migrations.executor import MigrationExecutor
-    from dorm.db.connection import get_connection
 
     with tempfile.TemporaryDirectory() as tmpdir:
         mig_dir = Path(tmpdir) / "migrations"

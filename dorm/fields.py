@@ -6,12 +6,9 @@ import ipaddress
 import json
 import re
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .exceptions import ValidationError
-
-if TYPE_CHECKING:
-    pass
 
 NOT_PROVIDED = object()
 CASCADE = "CASCADE"
@@ -36,10 +33,10 @@ class Field:
         blank: bool = False,
         null: bool = False,
         db_index: bool = False,
-        default=NOT_PROVIDED,
+        default: Any = NOT_PROVIDED,
         editable: bool = True,
         serialize: bool = True,
-        choices=None,
+        choices: Any = None,
         help_text: str = "",
         db_column: str | None = None,
         db_tablespace: str | None = None,
@@ -52,7 +49,7 @@ class Field:
         self.blank = blank
         self.null = null
         self.db_index = db_index
-        self.default = default
+        self.default: Any = default
         self.editable = editable
         self.serialize = serialize
         self.choices = choices
@@ -108,7 +105,7 @@ class Field:
     def from_db_value(self, value):
         return value
 
-    def db_type(self, connection) -> str:
+    def db_type(self, connection) -> str | None:
         raise NotImplementedError(f"{self.__class__.__name__} must implement db_type()")
 
     def validate(self, value, model_instance):
@@ -364,7 +361,7 @@ class DateTimeField(Field):
         if auto_now or auto_now_add:
             kwargs["editable"] = False
         if auto_now_add:
-            kwargs.setdefault("default", datetime.datetime.utcnow)
+            kwargs.setdefault("default", lambda: datetime.datetime.now(datetime.timezone.utc))
         super().__init__(**kwargs)
 
     def to_python(self, value):
@@ -392,8 +389,9 @@ class DateTimeField(Field):
         return "DATETIME"
 
     def pre_save(self, model_instance, add: bool):
+        assert self.attname is not None
         if self.auto_now or (self.auto_now_add and add):
-            value = datetime.datetime.utcnow()
+            value = datetime.datetime.now(datetime.timezone.utc)
             setattr(model_instance, self.attname, value)
             return value
         return (
@@ -602,7 +600,6 @@ class RelatedField(Field):
 class ForeignKey(RelatedField):
     def contribute_to_class(self, cls, name: str):
         super().contribute_to_class(cls, name)
-        related = self._resolve_related_model
         _rel_name = self.related_name or f"{cls.__name__.lower()}_set"
         # Reverse accessor is added lazily to avoid circular imports
 
@@ -634,7 +631,7 @@ class ManyToManyField(Field):
             self.verbose_name = name.replace("_", " ")
         cls._meta.add_field(self)
 
-    def db_type(self, connection) -> str:
+    def db_type(self, connection) -> str | None:
         return None  # no column; uses junction table
 
     def _resolve_related_model(self):

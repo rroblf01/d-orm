@@ -56,17 +56,17 @@ show("Total reviews:", Review.objects.count())
 section("2. filter · exclude · order_by")
 
 classics = Book.objects.filter(published_year__lt=1960).order_by("published_year")
-print(f"\n  Classics (before 1960):")
+print("\n  Classics (before 1960):")
 for b in classics:
     item(f"{b.title}  ({b.published_year})")
 
 active_authors = Author.objects.exclude(active=False).order_by("name")
-print(f"\n  Active authors:")
+print("\n  Active authors:")
 for a in active_authors:
     item(f"{a.name}  —  {a.nationality}")
 
 by_price = Book.objects.order_by("-price")[:3]
-print(f"\n  Top 3 most expensive books:")
+print("\n  Top 3 most expensive books:")
 for b in by_price:
     item(f"{b.title}  →  ${b.price}")
 
@@ -75,15 +75,15 @@ for b in by_price:
 
 section("3. Lookups")
 
-print(f"\n  Titles containing 'the' (icontains):")
+print("\n  Titles containing 'the' (icontains):")
 for b in Book.objects.filter(title__icontains="the"):
     item(b.title)
 
-print(f"\n  Authors filtered with __in:")
+print("\n  Authors filtered with __in:")
 for a in Author.objects.filter(name__in=["Isaac Asimov", "Carl Sagan"]):
     item(a.name)
 
-print(f"\n  Books published between 1940 and 1960 (__range):")
+print("\n  Books published between 1940 and 1960 (__range):")
 for b in Book.objects.filter(published_year__range=(1940, 1960)).order_by(
     "published_year"
 ):
@@ -100,7 +100,7 @@ scifi_genre = Genre.objects.get(name="Science Fiction")
 result = Book.objects.filter(
     Q(genre_id=scifi_genre.pk) | Q(published_year__lt=1945)
 ).order_by("published_year")
-print(f"\n  Science Fiction OR published before 1945:")
+print("\n  Science Fiction OR published before 1945:")
 for b in result:
     item(f"{b.title}  ({b.published_year})")
 
@@ -111,7 +111,7 @@ for b in not_orwell:
     item(b.title)
 
 result = Author.objects.filter(Q(active=True) & Q(birth_year__lte=1920))
-print(f"\n  Active authors born in 1920 or earlier:")
+print("\n  Active authors born in 1920 or earlier:")
 for a in result:
     item(f"{a.name}  ({a.birth_year})")
 
@@ -154,12 +154,12 @@ show("  Highest rating:", review_stats["top_rating"])
 
 section("6. values · values_list")
 
-print(f"\n  Authors (name + email) via values():")
+print("\n  Authors (name + email) via values():")
 for row in Author.objects.values("name", "email").order_by("name"):
     item(f"{row['name']}  <{row['email']}>")
 
 titles = list(Book.objects.values_list("title", flat=True).order_by("title"))
-print(f"\n  All titles via values_list(flat=True):")
+print("\n  All titles via values_list(flat=True):")
 for t in titles:
     item(t)
 
@@ -175,9 +175,11 @@ except Book.DoesNotExist:
     show("get():", "not found")
 
 cheapest = Book.objects.order_by("price").first()
+assert cheapest is not None
 show("Cheapest book:", f"{cheapest.title}  (${cheapest.price})")
 
 newest = Book.objects.order_by("-published_year").first()
+assert newest is not None
 show("Most recent book:", f"{newest.title}  ({newest.published_year})")
 
 show("Does 'Cosmos' exist?", Book.objects.filter(title="Cosmos").exists())

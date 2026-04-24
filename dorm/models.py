@@ -161,10 +161,10 @@ class ModelBase(type):
                         new_mgr.contribute_to_class(new_class, mgr.name)
 
         # Set up model-level DoesNotExist / MultipleObjectsReturned
-        new_class.DoesNotExist = type(
+        new_class.DoesNotExist = type(  # type: ignore
             "DoesNotExist", (DoesNotExist,), {"__module__": module}
         )
-        new_class.MultipleObjectsReturned = type(
+        new_class.MultipleObjectsReturned = type(  # type: ignore
             "MultipleObjectsReturned", (MultipleObjectsReturned,), {"__module__": module}
         )
 
@@ -180,6 +180,9 @@ class Model(metaclass=ModelBase):
 
     if TYPE_CHECKING:
         objects: ClassVar[Manager[Self]]
+        _meta: ClassVar[Options]
+        DoesNotExist: type[BaseException]
+        MultipleObjectsReturned: type[BaseException]
 
     class Meta:
         abstract = True
@@ -232,7 +235,7 @@ class Model(metaclass=ModelBase):
         fields = []
         values = []
         for field in meta.fields:
-            if isinstance(field, AutoField) and not field.attname in self.__dict__:
+            if isinstance(field, AutoField) and field.attname not in self.__dict__:
                 continue
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
@@ -252,7 +255,6 @@ class Model(metaclass=ModelBase):
 
     def _do_update(self, conn, meta, update_fields=None):
         from .query import SQLQuery
-        from .lookups import parse_lookup_key
         fields_to_update = []
         if update_fields:
             for fname in update_fields:
@@ -358,7 +360,7 @@ class Model(metaclass=ModelBase):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     @classmethod
-    def _from_db_row(cls, row, connection=None) -> "Model":
+    def _from_db_row(cls, row, connection=None) -> "Self":
         """Construct a model instance from a database row."""
         instance = cls.__new__(cls)
         instance.__dict__ = {}

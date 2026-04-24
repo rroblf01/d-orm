@@ -9,7 +9,7 @@ from pathlib import Path
 
 def _load_settings(settings_module: str):
     """Import a Python settings module and configure dorm."""
-    spec_parts = settings_module.rsplit(".", 1)
+    settings_module.rsplit(".", 1)
     module = importlib.import_module(settings_module)
     from . import configure
     databases = getattr(module, "DATABASES", {})
@@ -34,6 +34,8 @@ def _load_apps(installed_apps: list):
 def _find_migrations_dir(app_module: str) -> Path:
     try:
         mod = importlib.import_module(app_module)
+        if mod.__file__ is None:
+            raise TypeError
         base = Path(mod.__file__).parent
     except (ImportError, TypeError):
         base = Path.cwd() / app_module
@@ -49,7 +51,6 @@ def cmd_makemigrations(args):
 
     from .migrations.autodetector import MigrationAutodetector
     from .migrations.loader import MigrationLoader
-    from .migrations.recorder import MigrationRecorder
     from .migrations.state import ProjectState
     from .migrations.writer import write_migration
     from .db.connection import get_connection

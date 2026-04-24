@@ -59,10 +59,12 @@ def _autodiscover_settings() -> bool:
             continue
 
         spec = importlib.util.spec_from_file_location("_dorm_auto_settings", path)
-        if spec is None or spec.loader is None:
+        if spec is None:
+            continue
+        if spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        spec.loader.exec_module(module)
 
         # Make the settings directory importable so models can be found
         if directory not in sys.path:

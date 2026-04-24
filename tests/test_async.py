@@ -3,7 +3,7 @@ import pytest
 
 import dorm
 from dorm import Q
-from tests.models import Author, Book
+from tests.models import Author
 
 
 pytestmark = pytest.mark.asyncio
@@ -61,6 +61,7 @@ async def test_afirst():
     await Author.objects.acreate(name="Carol", age=35)
     await Author.objects.acreate(name="Bob", age=25)
     first = await Author.objects.order_by("age").afirst()
+    assert first is not None
     assert first.name == "Bob"
 
 
@@ -68,6 +69,7 @@ async def test_alast():
     await Author.objects.acreate(name="Carol", age=35)
     await Author.objects.acreate(name="Bob", age=25)
     last = await Author.objects.order_by("age").alast()
+    assert last is not None
     assert last.name == "Carol"
 
 

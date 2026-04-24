@@ -125,7 +125,7 @@ class SQLiteAsyncDatabaseWrapper:
         except Exception as exc:
             _raise_migration_hint(exc)
             raise
-        return rows
+        return list(rows)
 
     async def execute_write(self, sql: str, params=None) -> int:
         import aiosqlite

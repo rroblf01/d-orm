@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dorm import Q, Count, Avg, Max, Min
+from dorm import Q, Count, Avg, Max
 from example.models import Author, Book, Genre, Review
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ async def main():
 
     section("2. Async iteration (async for)")
 
-    print(f"\n  Active authors in alphabetical order:")
+    print("\n  Active authors in alphabetical order:")
     async for author in Author.objects.exclude(active=False).order_by("name"):
         item(f"{author.name}  ({author.nationality or '—'})")
 
@@ -91,6 +91,7 @@ async def main():
     cheapest = await Book.objects.order_by("price").afirst()
     empty = await Book.objects.filter(title="Unknown").afirst()
 
+    assert oldest is not None and newest is not None and cheapest is not None
     show("Oldest book:", f"{oldest.title}  ({oldest.published_year})")
     show("Author of oldest book:", oldest.author.name)
     show("Newest book:", f"{newest.title}  ({newest.published_year})")
@@ -144,7 +145,7 @@ async def main():
 
     section("7. Q objects in async")
 
-    print(f"\n  Science Fiction OR very cheap books (< $9):")
+    print("\n  Science Fiction OR very cheap books (< $9):")
     async for book in Book.objects.filter(
         Q(genre_id=scifi.pk) | Q(price__lt=9)
     ).order_by("price"):

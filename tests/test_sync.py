@@ -162,6 +162,7 @@ def test_first():
     Author.objects.create(name="Carol", age=35)
     Author.objects.create(name="Bob", age=25)
     first = Author.objects.order_by("age").first()
+    assert first is not None
     assert first.name == "Bob"
 
 
@@ -169,6 +170,7 @@ def test_last():
     Author.objects.create(name="Carol", age=35)
     Author.objects.create(name="Bob", age=25)
     last = Author.objects.order_by("age").last()
+    assert last is not None
     assert last.name == "Carol"
 
 

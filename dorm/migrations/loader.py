@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import os
-import sys
 from pathlib import Path
 
 from .state import ProjectState
@@ -37,8 +35,10 @@ class MigrationLoader:
             spec = importlib.util.spec_from_file_location(
                 f"{app_label}.migrations.{stem}", path
             )
-            module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-            spec.loader.exec_module(module)  # type: ignore[union-attr]
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
 
             if app_label not in self.migrations:
                 self.migrations[app_label] = []

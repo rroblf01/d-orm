@@ -6,7 +6,6 @@ from .operations import (
     CreateModel,
     DeleteModel,
     RemoveField,
-    RenameField,
 )
 from .state import ProjectState
 

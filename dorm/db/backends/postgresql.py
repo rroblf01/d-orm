@@ -45,8 +45,8 @@ class PostgreSQLDatabaseWrapper:
 
     def get_connection(self):
         try:
-            import psycopg2
-            import psycopg2.extras
+            import psycopg2  # type: ignore
+            import psycopg2.extras  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "psycopg2-binary is required for PostgreSQL support. "
@@ -60,7 +60,7 @@ class PostgreSQLDatabaseWrapper:
         return self._local.conn
 
     def _cursor(self):
-        import psycopg2.extras
+        import psycopg2.extras  # type: ignore
         conn = self.get_connection()
         return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -140,7 +140,7 @@ class PostgreSQLAsyncDatabaseWrapper:
 
     async def _get_pool(self):
         try:
-            import asyncpg
+            import asyncpg  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "asyncpg is required for async PostgreSQL support. "

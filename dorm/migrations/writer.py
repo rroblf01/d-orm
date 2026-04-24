@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-from datetime import datetime
+import datetime as _dt
 from pathlib import Path
 
 
@@ -116,7 +115,7 @@ def write_migration(
     name = f"{number:04d}_{'initial' if number == 1 else 'auto'}"
     filepath = migrations_dir / f"{name}.py"
 
-    imports = _collect_imports(operations)
+    _collect_imports(operations)
     dep_str = repr(dependencies or [])
 
     op_lines = []
@@ -131,7 +130,7 @@ def write_migration(
 
     content = f'''"""
 Auto-generated migration.
-Generated: {datetime.utcnow().isoformat()}
+Generated: {_dt.datetime.now(_dt.timezone.utc).isoformat()}
 """
 from dorm.migrations.operations import (
 {op_import}
