@@ -1,79 +1,109 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 if TYPE_CHECKING:
-    pass
+    from .queryset import QuerySet, ValuesListQuerySet
+
+_T = TypeVar("_T")
 
 
-class BaseManager:
+class BaseManager(Generic[_T]):
     auto_created = False
     creation_counter = 0
     use_in_migrations = False
 
-    def __init__(self):
-        self.model = None
-        self.name = None
+    def __init__(self) -> None:
+        self.model: type[_T] | None = None
+        self.name: str | None = None
         self._db = "default"
         self.creation_counter = BaseManager.creation_counter
         BaseManager.creation_counter += 1
 
-    def contribute_to_class(self, cls, name: str):
+    def contribute_to_class(self, cls: type, name: str) -> None:
         self.model = cls
         self.name = name
         setattr(cls, name, ManagerDescriptor(self))
         cls._meta.managers.append(self)
 
-    def db_manager(self, using: str) -> "BaseManager":
-        mgr = self.__class__()
+    def db_manager(self, using: str) -> BaseManager[_T]:
+        mgr: BaseManager[_T] = self.__class__()
         mgr.model = self.model
         mgr.name = self.name
         mgr._db = using
         return mgr
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[_T]:
         from .queryset import QuerySet
         return QuerySet(self.model, self._db)
 
     # ── Proxy all QuerySet methods ────────────────────────────────────────────
 
-    def all(self):
+    def all(self) -> QuerySet[_T]:
         return self.get_queryset().all()
 
-    def none(self):
+    def none(self) -> QuerySet[_T]:
         return self.get_queryset().none()
 
-    def filter(self, *args, **kwargs):
+    def filter(self, *args: Any, **kwargs: Any) -> QuerySet[_T]:
         return self.get_queryset().filter(*args, **kwargs)
 
-    def exclude(self, *args, **kwargs):
+    def exclude(self, *args: Any, **kwargs: Any) -> QuerySet[_T]:
         return self.get_queryset().exclude(*args, **kwargs)
 
-    def get(self, *args, **kwargs) -> Any:
+    def order_by(self, *fields: str) -> QuerySet[_T]:
+        return self.get_queryset().order_by(*fields)
+
+    def distinct(self) -> QuerySet[_T]:
+        return self.get_queryset().distinct()
+
+    def select_related(self, *fields: str) -> QuerySet[_T]:
+        return self.get_queryset().select_related(*fields)
+
+    def prefetch_related(self, *fields: str) -> QuerySet[_T]:
+        return self.get_queryset().prefetch_related(*fields)
+
+    def select_for_update(self) -> QuerySet[_T]:
+        return self.get_queryset().select_for_update()
+
+    def annotate(self, **kwargs: Any) -> QuerySet[_T]:
+        return self.get_queryset().annotate(**kwargs)
+
+    def values(self, *fields: str) -> QuerySet[dict[str, Any]]:
+        return self.get_queryset().values(*fields)
+
+    def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
+        return self.get_queryset().values_list(*fields, flat=flat)
+
+    def get(self, *args: Any, **kwargs: Any) -> _T:
         return self.get_queryset().get(*args, **kwargs)
 
-    def create(self, **kwargs) -> Any:
+    def create(self, **kwargs: Any) -> _T:
         return self.get_queryset().create(**kwargs)
 
-    def get_or_create(self, defaults=None, **kwargs) -> tuple[Any, bool]:
+    def get_or_create(
+        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+    ) -> tuple[_T, bool]:
         return self.get_queryset().get_or_create(defaults=defaults, **kwargs)
 
-    def update_or_create(self, defaults=None, **kwargs) -> tuple[Any, bool]:
+    def update_or_create(
+        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+    ) -> tuple[_T, bool]:
         return self.get_queryset().update_or_create(defaults=defaults, **kwargs)
 
-    def update(self, **kwargs) -> int:
+    def update(self, **kwargs: Any) -> int:
         return self.get_queryset().update(**kwargs)
 
-    def delete(self) -> tuple[int, dict]:
+    def delete(self) -> tuple[int, dict[str, int]]:
         return self.get_queryset().delete()
 
-    def bulk_create(self, objs: list, batch_size: int = 1000) -> list:
+    def bulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         return self.get_queryset().bulk_create(objs, batch_size)
 
-    def bulk_update(self, objs: list, fields: list[str], batch_size: int = 1000) -> int:
+    def bulk_update(self, objs: list[_T], fields: list[str], batch_size: int = 1000) -> int:
         return self.get_queryset().bulk_update(objs, fields, batch_size)
 
-    def in_bulk(self, id_list: list, field_name: str = "pk") -> dict:
+    def in_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
         return self.get_queryset().in_bulk(id_list, field_name)
 
     def count(self) -> int:
@@ -82,57 +112,37 @@ class BaseManager:
     def exists(self) -> bool:
         return self.get_queryset().exists()
 
-    def first(self) -> Any | None:
+    def first(self) -> _T | None:
         return self.get_queryset().first()
 
-    def last(self) -> Any | None:
+    def last(self) -> _T | None:
         return self.get_queryset().last()
 
-    def order_by(self, *fields: str):
-        return self.get_queryset().order_by(*fields)
-
-    def values(self, *fields: str):
-        return self.get_queryset().values(*fields)
-
-    def values_list(self, *fields: str, flat: bool = False):
-        return self.get_queryset().values_list(*fields, flat=flat)
-
-    def annotate(self, **kwargs):
-        return self.get_queryset().annotate(**kwargs)
-
-    def aggregate(self, **kwargs) -> dict:
+    def aggregate(self, **kwargs: Any) -> dict[str, Any]:
         return self.get_queryset().aggregate(**kwargs)
-
-    def distinct(self):
-        return self.get_queryset().distinct()
-
-    def select_related(self, *fields: str):
-        return self.get_queryset().select_related(*fields)
-
-    def prefetch_related(self, *fields: str):
-        return self.get_queryset().prefetch_related(*fields)
-
-    def select_for_update(self):
-        return self.get_queryset().select_for_update()
 
     # ── Async proxy methods ───────────────────────────────────────────────────
 
-    async def aget(self, *args, **kwargs) -> Any:
+    async def aget(self, *args: Any, **kwargs: Any) -> _T:
         return await self.get_queryset().aget(*args, **kwargs)
 
-    async def acreate(self, **kwargs) -> Any:
+    async def acreate(self, **kwargs: Any) -> _T:
         return await self.get_queryset().acreate(**kwargs)
 
-    async def aget_or_create(self, defaults=None, **kwargs) -> tuple[Any, bool]:
+    async def aget_or_create(
+        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+    ) -> tuple[_T, bool]:
         return await self.get_queryset().aget_or_create(defaults=defaults, **kwargs)
 
-    async def aupdate_or_create(self, defaults=None, **kwargs) -> tuple[Any, bool]:
+    async def aupdate_or_create(
+        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+    ) -> tuple[_T, bool]:
         return await self.get_queryset().aupdate_or_create(defaults=defaults, **kwargs)
 
-    async def aupdate(self, **kwargs) -> int:
+    async def aupdate(self, **kwargs: Any) -> int:
         return await self.get_queryset().aupdate(**kwargs)
 
-    async def adelete(self) -> tuple[int, dict]:
+    async def adelete(self) -> tuple[int, dict[str, int]]:
         return await self.get_queryset().adelete()
 
     async def acount(self) -> int:
@@ -141,31 +151,31 @@ class BaseManager:
     async def aexists(self) -> bool:
         return await self.get_queryset().aexists()
 
-    async def afirst(self) -> Any | None:
+    async def afirst(self) -> _T | None:
         return await self.get_queryset().afirst()
 
-    async def alast(self) -> Any | None:
+    async def alast(self) -> _T | None:
         return await self.get_queryset().alast()
 
-    async def abulk_create(self, objs: list, batch_size: int = 1000) -> list:
+    async def abulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         return await self.get_queryset().abulk_create(objs, batch_size)
 
-    async def ain_bulk(self, id_list: list, field_name: str = "pk") -> dict:
+    async def ain_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
         return await self.get_queryset().ain_bulk(id_list, field_name)
 
-    async def aaggregate(self, **kwargs) -> dict:
+    async def aaggregate(self, **kwargs: Any) -> dict[str, Any]:
         return await self.get_queryset().aaggregate(**kwargs)
 
 
-class Manager(BaseManager):
+class Manager(BaseManager[_T]):
     pass
 
 
 class ManagerDescriptor:
-    def __init__(self, manager: BaseManager):
+    def __init__(self, manager: BaseManager[Any]) -> None:
         self.manager = manager
 
-    def __get__(self, instance, cls=None):
+    def __get__(self, instance: Any, cls: type | None = None) -> BaseManager[Any]:
         if instance is not None:
             raise AttributeError("Manager isn't accessible via model instances")
         return self.manager
