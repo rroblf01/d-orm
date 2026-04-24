@@ -160,8 +160,8 @@ def test_bulk_set_null_nullifies_fk():
 
     BDCategory.objects.all().delete()
 
-    assert BDSetNullItem.objects.filter(pk=item1.pk).get().category_id is None
-    assert BDSetNullItem.objects.filter(pk=item2.pk).get().category_id is None
+    assert BDSetNullItem.objects.filter(pk=item1.pk).get().__dict__.get("category_id") is None
+    assert BDSetNullItem.objects.filter(pk=item2.pk).get().__dict__.get("category_id") is None
     assert BDCategory.objects.count() == 0
     _ = item1, item2
 
