@@ -169,14 +169,13 @@ class QuerySet(Generic[_T]):
         qs._query.annotations.update(kwargs)
         return qs
 
-    def aggregate(self, **kwargs: Any) -> dict[str, Any]:
-        connection = self._get_connection()
+    def _build_aggregate_sql(
+        self, kwargs: dict[str, Any], connection: Any
+    ) -> tuple[str, list[Any], list[str]]:
         table = self.model._meta.db_table
-        parts = []
-        for alias_name, agg in kwargs.items():
-            agg_sql, _ = agg.as_sql(table)
-            parts.append(f'{agg_sql} AS "{alias_name}"')
-
+        parts = [
+            f'{agg.as_sql(table)[0]} AS "{alias}"' for alias, agg in kwargs.items()
+        ]
         sql = f'SELECT {", ".join(parts)} FROM "{table}"'
         where_sql, where_params = self._query._compile_nodes(
             self._query.where_nodes, connection
@@ -184,39 +183,24 @@ class QuerySet(Generic[_T]):
         if where_sql:
             sql += f" WHERE {where_sql}"
         sql = self._query._adapt_placeholders(sql, connection)
+        return sql, where_params, list(kwargs.keys())
 
-        rows = connection.execute(sql, where_params)
+    def aggregate(self, **kwargs: Any) -> dict[str, Any]:
+        connection = self._get_connection()
+        sql, params, cols = self._build_aggregate_sql(kwargs, connection)
+        rows = connection.execute(sql, params)
         if rows:
             row = rows[0]
-            if hasattr(row, "keys"):
-                return dict(row)
-            cols = list(kwargs.keys())
-            return dict(zip(cols, row))
+            return dict(row) if hasattr(row, "keys") else dict(zip(cols, row))
         return {}
 
     async def aaggregate(self, **kwargs: Any) -> dict[str, Any]:
         conn = self._get_async_connection()
-        table = self.model._meta.db_table
-        parts = []
-        for alias_name, agg in kwargs.items():
-            agg_sql, _ = agg.as_sql(table)
-            parts.append(f'{agg_sql} AS "{alias_name}"')
-
-        sql = f'SELECT {", ".join(parts)} FROM "{table}"'
-        where_sql, where_params = self._query._compile_nodes(
-            self._query.where_nodes, conn
-        )
-        if where_sql:
-            sql += f" WHERE {where_sql}"
-        sql = self._query._adapt_placeholders(sql, conn)
-
-        rows = await conn.execute(sql, where_params)
+        sql, params, cols = self._build_aggregate_sql(kwargs, conn)
+        rows = await conn.execute(sql, params)
         if rows:
             row = rows[0]
-            if hasattr(row, "keys"):
-                return dict(row)
-            cols = list(kwargs.keys())
-            return dict(zip(cols, row))
+            return dict(row) if hasattr(row, "keys") else dict(zip(cols, row))
         return {}
 
     def select_for_update(self) -> QuerySet[_T]:
@@ -274,12 +258,13 @@ class QuerySet(Generic[_T]):
         if self._result_cache is None:
             self._result_cache = list(self._iterator())  # type: ignore[assignment]
 
+    @staticmethod
     def _hydrate_select_related(
-        self, instance: _T, sr_fields: list[str], row_dict: dict
+        model: type[Model], instance: _T, sr_fields: list[str], row_dict: dict
     ) -> None:
         for fname in sr_fields:
             try:
-                field = self.model._meta.get_field(fname)
+                field = model._meta.get_field(fname)
                 if not hasattr(field, "_resolve_related_model"):
                     continue
                 rel_model = field._resolve_related_model()
@@ -359,7 +344,7 @@ class QuerySet(Generic[_T]):
 
             if sr_fields:
                 self._hydrate_select_related(
-                    instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
+                    self.model, instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
                 )
 
             if collect_for_prefetch:
@@ -633,7 +618,7 @@ class QuerySet(Generic[_T]):
 
             if sr_fields:
                 self._hydrate_select_related(
-                    instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
+                    self.model, instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
                 )
 
             if collect_for_prefetch:
@@ -754,17 +739,8 @@ class QuerySet(Generic[_T]):
         conn = self._get_async_connection()
         sql, params = qs._query.as_select(conn)
         rows = await conn.execute(sql, params)
-        result_fields = qs._fields or [
-            f.column for f in self.model._meta.fields if f.column
-        ]
-        result: list[Any] = []
-        for row in rows:
-            if hasattr(row, "keys"):
-                values = tuple(row[f] for f in result_fields)
-            else:
-                values = tuple(row[: len(result_fields)])
-            result.append(values[0] if flat else values)
-        return result
+        result_fields = qs._resolve_fields()
+        return [qs._extract_row(row, result_fields) for row in rows]
 
     async def acount(self) -> int:
         conn = self._get_async_connection()
@@ -885,32 +861,29 @@ class ValuesListQuerySet(QuerySet[Any]):
         qs._fields = list(self._fields)
         return qs
 
+    def _resolve_fields(self) -> list[str]:
+        return self._fields or [f.column for f in self.model._meta.fields if f.column]
+
+    def _extract_row(self, row: Any, fields: list[str]) -> Any:
+        values = (
+            tuple(row[f] for f in fields)
+            if hasattr(row, "keys")
+            else tuple(row[: len(fields)])
+        )
+        return values[0] if self._flat else values
+
     def _iterator(self) -> Iterator[Any]:
         connection = self._get_connection()
         sql, params = self._query.as_select(connection)
         rows = connection.execute(sql, params)
-        fields = self._fields or [f.column for f in self.model._meta.fields if f.column]
+        fields = self._resolve_fields()
         for row in rows:
-            if hasattr(row, "keys"):
-                values = tuple(row[f] for f in fields)
-            else:
-                values = tuple(row[: len(fields)])
-            if self._flat:
-                yield values[0]
-            else:
-                yield values
+            yield self._extract_row(row, fields)
 
     async def _aiterator(self) -> AsyncIterator[Any]:
         conn = self._get_async_connection()
         sql, params = self._query.as_select(conn)
         rows = await conn.execute(sql, params)
-        fields = self._fields or [f.column for f in self.model._meta.fields if f.column]
+        fields = self._resolve_fields()
         for row in rows:
-            if hasattr(row, "keys"):
-                values = tuple(row[f] for f in fields)
-            else:
-                values = tuple(row[: len(fields)])
-            if self._flat:
-                yield values[0]
-            else:
-                yield values
+            yield self._extract_row(row, fields)
