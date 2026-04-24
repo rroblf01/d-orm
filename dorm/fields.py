@@ -280,7 +280,7 @@ class BooleanField(Field):
     def get_db_prep_value(self, value):
         if value is None:
             return None
-        return 1 if value else 0
+        return bool(value)
 
     def from_db_value(self, value):
         if value is None:

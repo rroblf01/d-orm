@@ -7,7 +7,7 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 - **Same API as Django ORM** — `filter`, `exclude`, `get`, `create`, `update`, `delete`, `Q`, `F`, aggregations, slicing...
 - **Native async** — every method has an `a*` variant: `acreate`, `aget`, `aupdate`, `adelete`...
 - **SQLite** (sync via `sqlite3`, async via `aiosqlite`)
-- **PostgreSQL** (sync via `psycopg2`, async via `asyncpg`)
+- **PostgreSQL** (sync/async via `psycopg`)
 - **Migration system** — `makemigrations` / `migrate` just like Django
 - **CLI** — `dorm` command to manage migrations and open a shell (IPython auto-detected)
 
@@ -570,8 +570,7 @@ asyncio.run(async_demo())
 | Package | Purpose |
 |---|---|
 | `aiosqlite` | Async SQLite (included) |
-| `psycopg2-binary` | Sync PostgreSQL (optional) |
-| `asyncpg` | Async PostgreSQL (optional) |
+| `psycopg` | Sync/Async PostgreSQL (optional) |
 
 ## License
 

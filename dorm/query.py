@@ -133,7 +133,7 @@ class SQLQuery:
 
     def as_count(self, connection) -> tuple[str, list]:
         table = self.get_table()
-        sql = f'SELECT COUNT(*) FROM "{table}"'
+        sql = f'SELECT COUNT(*) AS "count" FROM "{table}"'
         params: list = []
 
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)

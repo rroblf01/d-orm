@@ -313,8 +313,14 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
     if field.has_default() and field.default is not None:
         from ..fields import NOT_PROVIDED
         if field.default is not NOT_PROVIDED and not callable(field.default):
+            vendor = getattr(connection, "vendor", "sqlite")
             default_val = field.get_db_prep_value(field.default)
-            if isinstance(default_val, str):
+            if isinstance(field.default, bool):
+                if vendor == "sqlite":
+                    parts.append(f"DEFAULT {int(field.default)}")
+                else:
+                    parts.append("DEFAULT TRUE" if field.default else "DEFAULT FALSE")
+            elif isinstance(default_val, str):
                 parts.append(f"DEFAULT '{default_val}'")
             elif default_val is not None:
                 parts.append(f"DEFAULT {default_val}")

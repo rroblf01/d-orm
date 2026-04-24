@@ -3,6 +3,13 @@ from __future__ import annotations
 import re
 import threading
 
+_POSITIONAL_PLACEHOLDER = re.compile(r"\$\d+")
+
+
+def _to_pyformat(sql: str) -> str:
+    """Convert $1, $2, ... placeholders to %s (psycopg3 style)."""
+    return _POSITIONAL_PLACEHOLDER.sub("%s", sql)
+
 
 def _raise_migration_hint(exc: Exception) -> None:
     """Re-raise a missing-table error with a friendly migration hint."""
@@ -26,10 +33,11 @@ def _raise_migration_hint(exc: Exception) -> None:
 
 
 def _build_dsn(settings: dict) -> dict:
+    """DSN for psycopg3 (uses 'dbname')."""
     return {
         "host": settings.get("HOST", "localhost"),
         "port": int(settings.get("PORT", 5432)),
-        "database": settings.get("NAME", ""),
+        "dbname": settings.get("NAME", ""),
         "user": settings.get("USER", ""),
         "password": settings.get("PASSWORD", ""),
     }
@@ -45,65 +53,74 @@ class PostgreSQLDatabaseWrapper:
 
     def get_connection(self):
         try:
-            import psycopg2  # type: ignore
-            import psycopg2.extras  # type: ignore
+            import psycopg  # type: ignore
+            from psycopg.rows import dict_row  # type: ignore
         except ImportError as e:
             raise ImportError(
-                "psycopg2-binary is required for PostgreSQL support. "
-                "Install it with: pip install d-orm[postgresql]"
+                "psycopg is required for PostgreSQL support. "
+                "Install it with: pip install 'd-orm[postgresql]'"
             ) from e
 
-        if not hasattr(self._local, "conn") or self._local.conn is None or self._local.conn.closed:
-            conn = psycopg2.connect(**self._dsn)
-            conn.autocommit = False
-            self._local.conn = conn
+        if (
+            not hasattr(self._local, "conn")
+            or self._local.conn is None
+            or self._local.conn.closed
+        ):
+            import psycopg  # type: ignore
+            from psycopg.rows import dict_row  # type: ignore
+
+            self._local.conn = psycopg.connect(**self._dsn, row_factory=dict_row)
         return self._local.conn
 
-    def _cursor(self):
-        import psycopg2.extras  # type: ignore
-        conn = self.get_connection()
-        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
     def execute(self, sql: str, params=None) -> list:
-        cursor = self._cursor()
+        conn = self.get_connection()
         try:
-            cursor.execute(sql, params or [])
+            with conn.cursor() as cur:
+                cur.execute(_to_pyformat(sql), params or [])
+                try:
+                    return cur.fetchall()
+                except Exception:
+                    return []
         except Exception as exc:
+            conn.rollback()
             _raise_migration_hint(exc)
             raise
-        try:
-            return cursor.fetchall()
-        except Exception:
-            return []
 
     def execute_write(self, sql: str, params=None) -> int:
         conn = self.get_connection()
-        cursor = self._cursor()
         try:
-            cursor.execute(sql, params or [])
+            with conn.cursor() as cur:
+                cur.execute(_to_pyformat(sql), params or [])
+                rowcount = cur.rowcount
+            conn.commit()
+            return rowcount
         except Exception as exc:
+            conn.rollback()
             _raise_migration_hint(exc)
             raise
-        conn.commit()
-        return cursor.rowcount
 
     def execute_insert(self, sql: str, params=None):
         conn = self.get_connection()
-        cursor = self._cursor()
         try:
-            cursor.execute(sql + " RETURNING id", params or [])
+            with conn.cursor() as cur:
+                cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
+                row = cur.fetchone()
+            conn.commit()
+            return row["id"] if row else None
         except Exception as exc:
+            conn.rollback()
             _raise_migration_hint(exc)
             raise
-        conn.commit()
-        row = cursor.fetchone()
-        return row["id"] if row else None
 
     def execute_script(self, sql: str):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise exc
 
     def table_exists(self, table_name: str) -> bool:
         rows = self.execute(
@@ -125,7 +142,11 @@ class PostgreSQLDatabaseWrapper:
         return [dict(r) for r in rows]
 
     def close(self):
-        if hasattr(self._local, "conn") and self._local.conn and not self._local.conn.closed:
+        if (
+            hasattr(self._local, "conn")
+            and self._local.conn
+            and not self._local.conn.closed
+        ):
             self._local.conn.close()
             self._local.conn = None
 
@@ -136,62 +157,80 @@ class PostgreSQLAsyncDatabaseWrapper:
     def __init__(self, settings: dict):
         self.settings = settings
         self._dsn = _build_dsn(settings)
-        self._pool = None
+        self._conn = None
 
-    async def _get_pool(self):
+    async def _get_conn(self):
         try:
-            import asyncpg  # type: ignore
+            import psycopg  # type: ignore
+            from psycopg.rows import dict_row  # type: ignore
         except ImportError as e:
             raise ImportError(
-                "asyncpg is required for async PostgreSQL support. "
-                "Install it with: pip install d-orm[postgresql]"
+                "psycopg is required for async PostgreSQL support. "
+                "Install it with: pip install 'd-orm[postgresql]'"
             ) from e
 
-        if self._pool is None:
-            self._pool = await asyncpg.create_pool(**self._dsn)
-        return self._pool
+        if self._conn is None or self._conn.closed:
+            import psycopg  # type: ignore
+            from psycopg.rows import dict_row  # type: ignore
+
+            self._conn = await psycopg.AsyncConnection.connect(
+                **self._dsn, row_factory=dict_row
+            )
+        return self._conn
 
     async def execute(self, sql: str, params=None) -> list:
-        pool = await self._get_pool()
+        conn = await self._get_conn()
         try:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(sql, *(params or []))
+            async with conn.cursor() as cur:
+                await cur.execute(_to_pyformat(sql), params or [])
+                try:
+                    return await cur.fetchall()
+                except Exception:
+                    return []
         except Exception as exc:
+            await conn.rollback()
             _raise_migration_hint(exc)
             raise
-        return [dict(r) for r in rows]
 
     async def execute_write(self, sql: str, params=None) -> int:
-        pool = await self._get_pool()
+        conn = await self._get_conn()
         try:
-            async with pool.acquire() as conn:
-                result = await conn.execute(sql, *(params or []))
+            async with conn.cursor() as cur:
+                await cur.execute(_to_pyformat(sql), params or [])
+                rowcount = cur.rowcount
+            await conn.commit()
+            return rowcount
         except Exception as exc:
+            await conn.rollback()
             _raise_migration_hint(exc)
             raise
-        try:
-            return int(result.split()[-1])
-        except (ValueError, IndexError):
-            return 0
 
     async def execute_insert(self, sql: str, params=None):
-        pool = await self._get_pool()
+        conn = await self._get_conn()
         try:
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow(sql + " RETURNING id", *(params or []))
+            async with conn.cursor() as cur:
+                await cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
+                row = await cur.fetchone()
+            await conn.commit()
+            return row["id"] if row else None
         except Exception as exc:
+            await conn.rollback()
             _raise_migration_hint(exc)
             raise
-        return row["id"] if row else None
 
     async def execute_script(self, sql: str):
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(sql)
+        conn = await self._get_conn()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(sql)
+            await conn.commit()
+        except Exception as exc:
+            await conn.rollback()
+            raise exc
 
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(
-            "SELECT tablename FROM pg_tables WHERE tablename = $1",
+            "SELECT tablename FROM pg_tables WHERE tablename = %s",
             [table_name],
         )
         return bool(rows)
@@ -201,7 +240,7 @@ class PostgreSQLAsyncDatabaseWrapper:
             """
             SELECT column_name, data_type, is_nullable
             FROM information_schema.columns
-            WHERE table_name = $1
+            WHERE table_name = %s
             ORDER BY ordinal_position
             """,
             [table_name],
@@ -209,6 +248,6 @@ class PostgreSQLAsyncDatabaseWrapper:
         return [dict(r) for r in rows]
 
     async def close(self):
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
+        if self._conn and not self._conn.closed:
+            await self._conn.close()
+            self._conn = None

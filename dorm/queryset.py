@@ -300,7 +300,7 @@ class QuerySet(Generic[_T]):
         sql, params = self._query.as_count(connection)
         rows = connection.execute(sql, params)
         row = rows[0]
-        return row[0]
+        return row["count"]
 
     def exists(self) -> bool:
         qs = self._clone()
@@ -516,7 +516,7 @@ class QuerySet(Generic[_T]):
         sql, params = self._query.as_count(conn)
         rows = await conn.execute(sql, params)
         row = rows[0]
-        return row[0]
+        return row["count"]
 
     async def aexists(self) -> bool:
         qs = self._clone()
