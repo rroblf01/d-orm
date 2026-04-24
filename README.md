@@ -9,7 +9,7 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 - **SQLite** (sync via `sqlite3`, async via `aiosqlite`)
 - **PostgreSQL** (sync via `psycopg2`, async via `asyncpg`)
 - **Migration system** — `makemigrations` / `migrate` just like Django
-- **CLI** — `dorm` command to manage migrations and open a shell
+- **CLI** — `dorm` command to manage migrations and open a shell (IPython auto-detected)
 
 ---
 
@@ -366,16 +366,23 @@ asyncio.run(main())
 
 ## Migrations
 
-### App structure
+### What is an app?
+
+An **app** is a Python package (a directory with `__init__.py`) that groups related models together. Each app has its own `migrations/` folder so its schema changes are tracked independently.
 
 ```
-myapp/
-├── __init__.py
-├── models.py
-└── migrations/
+myproject/
+├── settings.py
+├── blog/                  ← one app
+│   ├── __init__.py
+│   ├── models.py
+│   └── migrations/
+│       └── __init__.py
+└── shop/                  ← another app
     ├── __init__.py
-    ├── 0001_initial.py
-    └── 0002_auto.py
+    ├── models.py
+    └── migrations/
+        └── __init__.py
 ```
 
 ### `settings.py`
@@ -388,26 +395,45 @@ DATABASES = {
     }
 }
 
-INSTALLED_APPS = ["myapp"]
+# List every app whose models should be tracked.
+# Use dotted paths for nested packages.
+INSTALLED_APPS = [
+    "blog",
+    "shop",
+    "shop.payments",   # sub-package of shop
+]
 ```
 
 ### CLI commands
 
+`--settings` is **optional**. dorm resolves the settings module in this order:
+
+1. `--settings=<module>` flag
+2. `DORM_SETTINGS` environment variable
+3. `settings` (default — looks for `settings.py` in the current directory)
+
 ```bash
 # Detect model changes and generate migration files
-dorm makemigrations --settings=settings
+dorm makemigrations
 
 # Apply pending migrations
-dorm migrate --settings=settings
+dorm migrate
 
 # Show migration status ([ ] pending, [X] applied)
-dorm showmigrations --settings=settings
+dorm showmigrations
 
-# Interactive shell with models loaded
-dorm shell --settings=settings
+# Interactive shell with all models pre-loaded
+# Uses IPython automatically if installed, otherwise falls back to the
+# standard Python shell. IPython enables top-level await, so async ORM
+# methods work directly without wrapping them in asyncio.run().
+dorm shell
 
-# Use the environment variable to avoid repeating --settings
-export DORM_SETTINGS=settings
+# Override settings explicitly when needed
+dorm makemigrations --settings=myproject.settings
+dorm migrate --settings=myproject.settings
+
+# Or export once and forget about it
+export DORM_SETTINGS=myproject.settings
 dorm makemigrations
 dorm migrate
 ```
