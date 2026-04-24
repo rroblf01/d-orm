@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from .expressions import CombinedExpression, F, Q, Value
@@ -7,6 +8,8 @@ from .lookups import build_lookup_sql, parse_lookup_key
 
 if TYPE_CHECKING:
     pass
+
+_SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def _compile_expr(val) -> tuple[str, list]:
@@ -114,10 +117,13 @@ class SQLQuery:
         if self.order_by_fields:
             order_parts = []
             for f in self.order_by_fields:
-                if f.startswith("-"):
-                    order_parts.append(f'"{f[1:]}" DESC')
-                else:
-                    order_parts.append(f'"{f}" ASC')
+                fname = f[1:] if f.startswith("-") else f
+                if not _SAFE_IDENTIFIER.match(fname):
+                    raise ValueError(
+                        f"Invalid order_by field '{fname}': only letters, digits, "
+                        "and underscores are allowed."
+                    )
+                order_parts.append(f'"{fname}" {"DESC" if f.startswith("-") else "ASC"}')
             select += " ORDER BY " + ", ".join(order_parts)
 
         # LIMIT / OFFSET

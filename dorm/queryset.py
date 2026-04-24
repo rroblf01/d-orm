@@ -264,11 +264,12 @@ class QuerySet(Generic[_T]):
         results = list(qs._iterator())
         if len(results) == 0:
             raise self.model.DoesNotExist(
-                f"{self.model.__name__} matching query does not exist."
+                f"{self.model.__name__} matching {kwargs} does not exist."
             )
         if len(results) > 1:
             raise self.model.MultipleObjectsReturned(
-                f"get() returned more than one {self.model.__name__}."
+                f"get() returned more than one {self.model.__name__} — "
+                f"filter: {kwargs}"
             )
         return results[0]
 
@@ -386,30 +387,29 @@ class QuerySet(Generic[_T]):
     def bulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         if not objs:
             return objs
+        from .transaction import atomic
+        from .fields import AutoField
+
         connection = self._get_connection()
         meta = self.model._meta
         concrete_fields = [
-            f
-            for f in meta.fields
-            if f.column
-            and not isinstance(
-                f, __import__("dorm.fields", fromlist=["AutoField"]).AutoField
-            )
+            f for f in meta.fields if f.column and not isinstance(f, AutoField)
         ]
-        for obj in objs:
-            fields = [
-                f
-                for f in concrete_fields
-                if not f.primary_key or obj.__dict__.get(f.attname) is not None
-            ]
-            values = [
-                f.get_db_prep_value(obj.__dict__.get(f.attname, f.get_default()))
-                for f in fields
-            ]
-            sql, params = self._query.as_insert(fields, values, connection)
-            pk = connection.execute_insert(sql, params)
-            if meta.pk and pk is not None:
-                obj.__dict__[meta.pk.attname] = pk
+        with atomic(using=self._db):
+            for obj in objs:
+                fields = [
+                    f
+                    for f in concrete_fields
+                    if not f.primary_key or obj.__dict__.get(f.attname) is not None
+                ]
+                values = [
+                    f.get_db_prep_value(obj.__dict__.get(f.attname, f.get_default()))
+                    for f in fields
+                ]
+                sql, params = self._query.as_insert(fields, values, connection)
+                pk = connection.execute_insert(sql, params)
+                if meta.pk and pk is not None:
+                    obj.__dict__[meta.pk.attname] = pk
         return objs
 
     def bulk_update(
@@ -417,16 +417,19 @@ class QuerySet(Generic[_T]):
     ) -> int:
         if not objs:
             return 0
+        from .transaction import atomic
+
         count = 0
-        for obj in objs:
-            update_kwargs = {}
-            for fname in fields:
-                try:
-                    field = self.model._meta.get_field(fname)
-                    update_kwargs[fname] = obj.__dict__.get(field.attname)
-                except Exception:
-                    update_kwargs[fname] = obj.__dict__.get(fname)
-            count += self.filter(pk=obj.pk).update(**update_kwargs)
+        with atomic(using=self._db):
+            for obj in objs:
+                update_kwargs = {}
+                for fname in fields:
+                    try:
+                        field = self.model._meta.get_field(fname)
+                        update_kwargs[fname] = obj.__dict__.get(field.attname)
+                    except Exception:
+                        update_kwargs[fname] = obj.__dict__.get(fname)
+                count += self.filter(pk=obj.pk).update(**update_kwargs)
         return count
 
     def in_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
@@ -466,11 +469,12 @@ class QuerySet(Generic[_T]):
         results = [obj async for obj in qs]
         if len(results) == 0:
             raise self.model.DoesNotExist(
-                f"{self.model.__name__} matching query does not exist."
+                f"{self.model.__name__} matching {kwargs} does not exist."
             )
         if len(results) > 1:
             raise self.model.MultipleObjectsReturned(
-                f"aget() returned more than one {self.model.__name__}."
+                f"aget() returned more than one {self.model.__name__} — "
+                f"filter: {kwargs}"
             )
         return results[0]
 
@@ -588,27 +592,29 @@ class QuerySet(Generic[_T]):
     async def abulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         if not objs:
             return objs
-        conn = self._get_async_connection()
+        from .transaction import aatomic
         from .fields import AutoField
 
+        conn = self._get_async_connection()
         meta = self.model._meta
         concrete_fields = [
             f for f in meta.fields if f.column and not isinstance(f, AutoField)
         ]
-        for obj in objs:
-            fields = [
-                f
-                for f in concrete_fields
-                if not f.primary_key or obj.__dict__.get(f.attname) is not None
-            ]
-            values = [
-                f.get_db_prep_value(obj.__dict__.get(f.attname, f.get_default()))
-                for f in fields
-            ]
-            sql, params = self._query.as_insert(fields, values, conn)
-            pk = await conn.execute_insert(sql, params)
-            if meta.pk and pk is not None:
-                obj.__dict__[meta.pk.attname] = pk
+        async with aatomic(using=self._db):
+            for obj in objs:
+                fields = [
+                    f
+                    for f in concrete_fields
+                    if not f.primary_key or obj.__dict__.get(f.attname) is not None
+                ]
+                values = [
+                    f.get_db_prep_value(obj.__dict__.get(f.attname, f.get_default()))
+                    for f in fields
+                ]
+                sql, params = self._query.as_insert(fields, values, conn)
+                pk = await conn.execute_insert(sql, params)
+                if meta.pk and pk is not None:
+                    obj.__dict__[meta.pk.attname] = pk
         return objs
 
     async def ain_bulk(

@@ -36,18 +36,37 @@ def raise_migration_hint(exc: Exception) -> None:
 
 
 def normalize_db_exception(exc: Exception) -> None:
-    """Convert backend IntegrityErrors to dorm.IntegrityError, then check migration hint."""
+    """Convert backend exceptions to dorm exceptions, then check migration hint."""
     import sqlite3
-    from dorm.exceptions import IntegrityError
+    from dorm.exceptions import IntegrityError, OperationalError, ProgrammingError
 
+    # ── SQLite ────────────────────────────────────────────────────────────────
     if isinstance(exc, sqlite3.IntegrityError):
         raise IntegrityError(str(exc)) from exc
+    if isinstance(exc, sqlite3.OperationalError):
+        raise_migration_hint(exc)
+        raise OperationalError(str(exc)) from exc
+    if isinstance(exc, sqlite3.ProgrammingError):
+        raise ProgrammingError(str(exc)) from exc
+    if isinstance(exc, sqlite3.DatabaseError):
+        raise_migration_hint(exc)
+        raise ProgrammingError(str(exc)) from exc
 
+    # ── PostgreSQL ────────────────────────────────────────────────────────────
     try:
         import psycopg.errors as pg_errors
+        import psycopg as psycopg_mod
 
         if isinstance(exc, pg_errors.IntegrityError):
             raise IntegrityError(str(exc)) from exc
+        if isinstance(exc, (pg_errors.SyntaxError, pg_errors.ProgrammingError)):
+            raise ProgrammingError(str(exc)) from exc
+        if isinstance(exc, psycopg_mod.OperationalError):
+            raise_migration_hint(exc)
+            raise OperationalError(str(exc)) from exc
+        if isinstance(exc, psycopg_mod.DatabaseError):
+            raise_migration_hint(exc)
+            raise ProgrammingError(str(exc)) from exc
     except ImportError:
         pass
 
