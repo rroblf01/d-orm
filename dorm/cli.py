@@ -9,8 +9,14 @@ from pathlib import Path
 
 def _load_settings(settings_module: str):
     """Import a Python settings module and configure dorm."""
-    settings_module.rsplit(".", 1)
     module = importlib.import_module(settings_module)
+    # Add the directory that contains the app packages to sys.path so that
+    # app modules (e.g. "example.models") are importable regardless of the
+    # working directory the user ran dorm from.
+    if module.__file__:
+        project_root = str(Path(module.__file__).resolve().parent.parent)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
     from . import configure
     databases = getattr(module, "DATABASES", {})
     installed_apps = getattr(module, "INSTALLED_APPS", [])
@@ -143,8 +149,18 @@ def cmd_shell(args):
     from .models import _model_registry
     import dorm
 
-    banner = "d-orm interactive shell\nModels: " + ", ".join(_model_registry.keys())
-    local_vars = {"dorm": dorm, **_model_registry}
+    models = {k: v for k, v in _model_registry.items() if "." not in k}
+    local_vars = {"dorm": dorm, **models}
+    banner = "d-orm interactive shell\nModels: " + ", ".join(sorted(models.keys()))
+
+    try:
+        import readline
+        import rlcompleter
+        readline.set_completer(rlcompleter.Completer(local_vars).complete)
+        readline.parse_and_bind("tab: complete")
+    except ImportError:
+        pass
+
     code.interact(banner=banner, local=local_vars)
 
 
