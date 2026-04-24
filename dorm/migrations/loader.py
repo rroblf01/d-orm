@@ -50,11 +50,15 @@ class MigrationLoader:
     def load_applied(self, recorder):
         self.applied = recorder.applied_migrations()
 
-    def get_migration_state(self, app_label: str) -> ProjectState:
-        """Replay all applied migrations to get the current DB state."""
+    def get_migration_state(self, app_label: str, all_migrations: bool = False) -> ProjectState:
+        """Replay migrations to build a ProjectState.
+
+        all_migrations=True replays every file on disk (for makemigrations).
+        all_migrations=False (default) replays only applied ones (for migrate).
+        """
         state = ProjectState()
         for number, name, module in self.migrations.get(app_label, []):
-            if (app_label, name) in self.applied:
+            if all_migrations or (app_label, name) in self.applied:
                 operations = getattr(module, "operations", [])
                 for op in operations:
                     op.state_forwards(app_label, state)
