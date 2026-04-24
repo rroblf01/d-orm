@@ -28,7 +28,39 @@ pip install "djanorm[postgresql]"
 
 ---
 
-## Configuration
+## Setup
+
+There are two ways to configure djanorm depending on how you use it.
+
+### Project with migrations (recommended)
+
+Create a `settings.py` next to your app packages. The `dorm` CLI reads it automatically — you never call `dorm.configure()` yourself.
+
+```python
+# settings.py
+DATABASES = {
+    "default": {
+        "ENGINE": "sqlite",   # or "postgresql"
+        "NAME": "db.sqlite3",
+    }
+}
+
+INSTALLED_APPS = ["myapp"]
+```
+
+Then run migrations and open a shell:
+
+```bash
+dorm makemigrations
+dorm migrate
+dorm shell
+```
+
+See the [Migrations](#migrations) section for the full CLI reference.
+
+### Programmatic use (scripts and libraries)
+
+If you are using djanorm in a standalone script or embedding it inside another framework — without the `dorm` CLI — call `dorm.configure()` at startup instead of using a `settings.py` file:
 
 ```python
 import dorm
@@ -39,8 +71,7 @@ dorm.configure(
             "ENGINE": "sqlite",   # or "postgresql"
             "NAME": "db.sqlite3",
         }
-    },
-    INSTALLED_APPS=["myapp"],  # directories containing your models
+    }
 )
 ```
 
