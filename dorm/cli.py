@@ -13,14 +13,19 @@ def _load_settings(settings_module: str):
     # Add the directory that contains the app packages to sys.path so that
     # app modules (e.g. "example.models") are importable regardless of the
     # working directory the user ran dorm from.
+    settings_dir: Path | None = None
     if module.__file__:
-        project_root = str(Path(module.__file__).resolve().parent.parent)
+        settings_dir = Path(module.__file__).resolve().parent
+        project_root = str(settings_dir.parent)
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
     from . import configure
+    from .conf import _discover_apps
 
     databases = getattr(module, "DATABASES", {})
     installed_apps = getattr(module, "INSTALLED_APPS", [])
+    if not installed_apps and settings_dir is not None:
+        installed_apps = _discover_apps(settings_dir)
     configure(DATABASES=databases, INSTALLED_APPS=installed_apps)
     return module
 
@@ -52,8 +57,9 @@ def _find_migrations_dir(app_module: str) -> Path:
 def cmd_makemigrations(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
-    settings = _load_settings(settings_mod)
-    installed_apps = getattr(settings, "INSTALLED_APPS", [])
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
     from .migrations.autodetector import MigrationAutodetector
@@ -102,8 +108,9 @@ def cmd_makemigrations(args):
 def cmd_migrate(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
-    settings = _load_settings(settings_mod)
-    installed_apps = getattr(settings, "INSTALLED_APPS", [])
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
     from .migrations.executor import MigrationExecutor
@@ -124,8 +131,9 @@ def cmd_migrate(args):
 def cmd_showmigrations(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
-    settings = _load_settings(settings_mod)
-    installed_apps = getattr(settings, "INSTALLED_APPS", [])
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
 
     from .migrations.executor import MigrationExecutor
     from .db.connection import get_connection
@@ -142,8 +150,9 @@ def cmd_showmigrations(args):
 def cmd_shell(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
-    settings = _load_settings(settings_mod)
-    installed_apps = getattr(settings, "INSTALLED_APPS", [])
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
     import code

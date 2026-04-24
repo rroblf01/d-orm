@@ -1,4 +1,52 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 from .exceptions import ImproperlyConfigured
+
+_AUTODISCOVER_EXCLUDE = {
+    "venv", ".venv", "env", ".env", "site-packages",
+    "__pycache__", ".git", ".hg", ".tox",
+    "dist", "build", "node_modules", "migrations",
+    ".mypy_cache", ".ruff_cache", ".pytest_cache",
+}
+
+
+def _discover_apps(root: Path) -> list[str]:
+    """Return dotted app labels for every package under *root* that has a models.py.
+
+    A valid app directory must:
+      - contain a models.py
+      - itself be a Python package (__init__.py present)
+      - have no ancestor directory (up to root) that is not a Python package
+      - not sit inside any of the excluded directory names
+    """
+    apps: list[str] = []
+    for models_file in sorted(root.rglob("models.py")):
+        pkg_dir = models_file.parent
+        try:
+            parts = pkg_dir.relative_to(root).parts
+        except ValueError:
+            continue
+
+        # Skip excluded or hidden directories
+        if any(p in _AUTODISCOVER_EXCLUDE or p.startswith(".") for p in parts):
+            continue
+
+        # Every directory in the chain must be a Python package
+        current = pkg_dir
+        valid = True
+        while current != root:
+            if not (current / "__init__.py").exists():
+                valid = False
+                break
+            current = current.parent
+        if not valid:
+            continue
+
+        apps.append(".".join(parts))
+
+    return apps
 
 
 class Settings:
@@ -72,6 +120,8 @@ def _autodiscover_settings() -> bool:
 
         databases = getattr(module, "DATABASES", {})
         installed_apps = getattr(module, "INSTALLED_APPS", [])
+        if not installed_apps:
+            installed_apps = _discover_apps(Path(directory))
         settings.configure(DATABASES=databases, INSTALLED_APPS=installed_apps)
 
         # Import app models so they are registered before any query runs

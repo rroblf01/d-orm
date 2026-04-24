@@ -50,8 +50,20 @@ DATABASES = {
         "NAME": "db.sqlite3",
     }
 }
+```
 
-# For PostgreSQL, pool size and driver options can be tuned (optional):
+That's it. dorm scans the directory of `settings.py` recursively and registers every Python package that contains a `models.py` — no `INSTALLED_APPS` needed.
+
+If you prefer explicit control (e.g. to exclude certain packages, or when app packages live outside the settings directory), you can declare them manually:
+
+```python
+# settings.py — explicit override, optional
+INSTALLED_APPS = ["blog", "shop", "shop.payments"]
+```
+
+For PostgreSQL, pool size and driver options can be tuned:
+
+```python
 # DATABASES = {
 #     "default": {
 #         "ENGINE": "postgresql",
@@ -68,8 +80,6 @@ DATABASES = {
 #         },
 #     }
 # }
-
-INSTALLED_APPS = ["myapp"]
 ```
 
 Then run migrations and open a shell:
@@ -518,9 +528,12 @@ DATABASES = {
         "NAME": "db.sqlite3",
     }
 }
+```
 
-# List every app whose models should be tracked.
-# Use dotted paths for nested packages.
+dorm automatically discovers every Python package under the `settings.py` directory that contains a `models.py`. You only need `INSTALLED_APPS` when you want to be explicit or need packages that live elsewhere:
+
+```python
+# Optional — override auto-discovery
 INSTALLED_APPS = [
     "blog",
     "shop",
