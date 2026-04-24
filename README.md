@@ -16,14 +16,18 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 ## Installation
 
 ```bash
-# With uv
-uv add djanorm
+# SQLite support
+pip install "djanorm[sqlite]"
 
-# With pip
-pip install djanorm
-
-# With PostgreSQL support
+# PostgreSQL support
 pip install "djanorm[postgresql]"
+
+# Both
+pip install "djanorm[sqlite,postgresql]"
+
+# With uv
+uv add "djanorm[sqlite]"
+uv add "djanorm[postgresql]"
 ```
 
 ---
@@ -594,10 +598,10 @@ asyncio.run(async_demo())
 
 ## Dependencies
 
-| Package | Purpose |
-|---|---|
-| `aiosqlite` | Async SQLite (included) |
-| `psycopg` | Sync/Async PostgreSQL (optional) |
+| Extra | Package | Purpose |
+|---|---|---|
+| `sqlite` | `aiosqlite` | Async SQLite |
+| `postgresql` | `psycopg[binary]` | Sync/Async PostgreSQL |
 
 ## License
 
