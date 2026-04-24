@@ -54,6 +54,17 @@ def _find_migrations_dir(app_module: str) -> Path:
     return base / "migrations"
 
 
+def _next_migration_number(mig_dir: Path) -> int:
+    existing = list(mig_dir.glob("*.py")) if mig_dir.exists() else []
+    numbers = []
+    for f in existing:
+        try:
+            numbers.append(int(f.stem.split("_")[0]))
+        except ValueError:
+            pass
+    return max(numbers, default=0) + 1
+
+
 def cmd_makemigrations(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
@@ -62,6 +73,22 @@ def cmd_makemigrations(args):
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
+    # ── Empty migration ───────────────────────────────────────────────────────
+    if args.empty:
+        if not args.apps:
+            print("Error: specify at least one app when using --empty.")
+            return
+        from .migrations.writer import write_empty_migration
+
+        for app in args.apps:
+            mig_dir = _find_migrations_dir(app)
+            next_num = _next_migration_number(mig_dir)
+            name = args.name or "custom"
+            path = write_empty_migration(app, mig_dir, next_num, name=name)
+            print(f"  Created empty migration: {path}")
+        return
+
+    # ── Auto-detect changes ───────────────────────────────────────────────────
     from .migrations.autodetector import MigrationAutodetector
     from .migrations.loader import MigrationLoader
     from .migrations.state import ProjectState
@@ -90,16 +117,7 @@ def cmd_makemigrations(args):
             print(f"  No changes detected for '{app}'.")
             continue
 
-        # Determine migration number
-        existing = list(mig_dir.glob("*.py")) if mig_dir.exists() else []
-        numbers = []
-        for f in existing:
-            try:
-                numbers.append(int(f.stem.split("_")[0]))
-            except ValueError:
-                pass
-        next_num = max(numbers, default=0) + 1
-
+        next_num = _next_migration_number(mig_dir)
         ops = changes[app]
         path = write_migration(app, mig_dir, next_num, ops)
         print(f"  Created migration: {path}")
@@ -204,6 +222,18 @@ def main():
         "makemigrations", help="Detect model changes and create migrations"
     )
     mm.add_argument("apps", nargs="*", help="App labels to process")
+    mm.add_argument(
+        "--empty",
+        action="store_true",
+        default=False,
+        help="Create a blank migration template for RunPython / RunSQL",
+    )
+    mm.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="Custom name suffix for the empty migration file (default: 'custom')",
+    )
     mm.add_argument("--settings", default=None)
     mm.set_defaults(func=cmd_makemigrations)
 

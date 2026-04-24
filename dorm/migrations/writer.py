@@ -97,6 +97,52 @@ def _collect_imports(operations) -> list[str]:
     return sorted(imports)
 
 
+def write_empty_migration(
+    app_label: str,
+    migrations_dir: Path,
+    number: int,
+    name: str = "custom",
+    dependencies: list | None = None,
+) -> Path:
+    """Write a blank migration template ready to be filled with RunPython / RunSQL."""
+    migrations_dir = Path(migrations_dir)
+    migrations_dir.mkdir(parents=True, exist_ok=True)
+
+    init = migrations_dir / "__init__.py"
+    if not init.exists():
+        init.write_text("")
+
+    filename = f"{number:04d}_{name}"
+    filepath = migrations_dir / f"{filename}.py"
+    dep_str = repr(dependencies or [])
+
+    content = f'''"""
+Empty migration — add your RunPython / RunSQL operations below.
+Generated: {_dt.datetime.now(_dt.timezone.utc).isoformat()}
+"""
+from dorm.migrations.operations import RunPython, RunSQL
+
+dependencies = {dep_str}
+
+operations = [
+    # Example — uncomment and adapt:
+    #
+    # def forward(app_label, registry):
+    #     MyModel = registry["MyModel"]
+    #     MyModel.objects.filter(...).update(...)
+    #
+    # def backward(app_label, registry):
+    #     pass  # or undo the forward logic
+    #
+    # RunPython(code=forward, reverse_code=backward),
+    # RunSQL(sql="UPDATE ...", reverse_sql="UPDATE ..."),
+]
+'''
+
+    filepath.write_text(content)
+    return filepath
+
+
 def write_migration(
     app_label: str,
     migrations_dir: Path,

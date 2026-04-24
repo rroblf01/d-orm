@@ -595,6 +595,36 @@ dorm migrate blog zero
 
 After a rollback the affected migrations are marked as unapplied, so `dorm migrate blog` will re-apply them later if needed.
 
+### Empty migrations
+
+Use `--empty` to create a blank migration file ready to be filled with `RunPython` or `RunSQL` operations:
+
+```bash
+# Creates myapp/migrations/0002_custom.py
+dorm makemigrations myapp --empty
+
+# Use --name to give it a descriptive suffix
+dorm makemigrations myapp --empty --name seed_authors
+# → myapp/migrations/0002_seed_authors.py
+```
+
+The generated file contains commented-out examples so you can start writing immediately:
+
+```python
+"""
+Empty migration — add your RunPython / RunSQL operations below.
+Generated: 2024-01-01T00:00:00+00:00
+"""
+from dorm.migrations.operations import RunPython, RunSQL
+
+dependencies = []
+
+operations = [
+    # RunPython(code=forward, reverse_code=backward),
+    # RunSQL(sql="UPDATE ...", reverse_sql="UPDATE ..."),
+]
+```
+
 ### Custom migrations with `RunSQL` / `RunPython`
 
 Both operations accept an optional reverse that is called when the migration is rolled back.
