@@ -18,6 +18,7 @@ def _load_settings(settings_module: str):
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
     from . import configure
+
     databases = getattr(module, "DATABASES", {})
     installed_apps = getattr(module, "INSTALLED_APPS", [])
     configure(DATABASES=databases, INSTALLED_APPS=installed_apps)
@@ -151,10 +152,11 @@ def cmd_shell(args):
 
     models = {k: v for k, v in _model_registry.items() if "." not in k}
     local_vars = {"dorm": dorm, **models}
-    banner = "d-orm interactive shell\nModels: " + ", ".join(sorted(models.keys()))
+    banner = "djanorm interactive shell\nModels: " + ", ".join(sorted(models.keys()))
 
     try:
         import IPython
+
         IPython.embed(user_ns=local_vars, banner1=banner, using="asyncio")
         return
     except ImportError:
@@ -163,6 +165,7 @@ def cmd_shell(args):
     try:
         import readline
         import rlcompleter
+
         readline.set_completer(rlcompleter.Completer(local_vars).complete)
         readline.parse_and_bind("tab: complete")
     except ImportError:
@@ -174,12 +177,14 @@ def cmd_shell(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="dorm",
-        description="d-orm management commands",
+        description="djanorm management commands",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # makemigrations
-    mm = sub.add_parser("makemigrations", help="Detect model changes and create migrations")
+    mm = sub.add_parser(
+        "makemigrations", help="Detect model changes and create migrations"
+    )
     mm.add_argument("apps", nargs="*", help="App labels to process")
     mm.add_argument("--settings", default=None)
     mm.set_defaults(func=cmd_makemigrations)

@@ -1,4 +1,5 @@
-"""End-to-end test of d-orm."""
+"""End-to-end test of djanorm."""
+
 import asyncio
 import os
 import tempfile
@@ -71,6 +72,7 @@ def setup_tables():
 
 # ── Sync tests ─────────────────────────────────────────────────────────────────
 
+
 def test_sync():
     print("\n=== SYNC TESTS ===")
 
@@ -99,6 +101,7 @@ def test_sync():
 
     # Q objects
     from dorm import Q
+
     q_result = Author.objects.filter(Q(age__lt=30) | Q(name="Carol"))
     names = sorted(a.name for a in q_result)
     assert names == ["Bob", "Carol"], names
@@ -187,7 +190,9 @@ def test_sync():
     print(f"__in lookup: {len(found_in)} results")
 
     # Books with FK
-    book1 = Book.objects.create(title="Python Deep Dive", author_id=alice.pk, pages=400, published=True)
+    book1 = Book.objects.create(
+        title="Python Deep Dive", author_id=alice.pk, pages=400, published=True
+    )
     book2 = Book.objects.create(title="Async Patterns", author_id=bob.pk, pages=250)
     print(f"Books created: {book1}, {book2}")
 
@@ -196,9 +201,9 @@ def test_sync():
 
 # ── Async tests ────────────────────────────────────────────────────────────────
 
+
 async def test_async():
     print("\n=== ASYNC TESTS ===")
-
 
     # acreate
     eve = await Author.objects.acreate(name="Eve", age=22)
@@ -231,7 +236,9 @@ async def test_async():
     print(f"aupdate(): Eve age now {eve_updated.age}")
 
     # aget_or_create
-    frank, created = await Author.objects.aget_or_create(name="Frank", defaults={"age": 40})
+    frank, created = await Author.objects.aget_or_create(
+        name="Frank", defaults={"age": 40}
+    )
     assert created
     print(f"aget_or_create(): created={created}")
 
@@ -263,6 +270,7 @@ async def test_async():
 
 # ── Migration system test ──────────────────────────────────────────────────────
 
+
 def test_migrations():
     print("\n=== MIGRATION SYSTEM TEST ===")
     import tempfile
@@ -277,9 +285,12 @@ def test_migrations():
         # Detect changes (empty from_state → create models)
         from_state = ProjectState()
         to_state = ProjectState()
-        to_state.add_model("myapp", "Author", {
-            f.name: f for f in Author._meta.fields
-        }, {"db_table": "authors_v2"})
+        to_state.add_model(
+            "myapp",
+            "Author",
+            {f.name: f for f in Author._meta.fields},
+            {"db_table": "authors_v2"},
+        )
 
         detector = MigrationAutodetector(from_state, to_state)
         changes = detector.changes("myapp")

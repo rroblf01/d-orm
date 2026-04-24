@@ -1,5 +1,5 @@
 """
-Synchronous operations demo for d-orm.
+Synchronous operations demo for djanorm.
 Run after setup_db.py.
 
     uv run python example/demo_sync.py
@@ -38,7 +38,7 @@ def item(text: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗{RESET}")
-print(f"{BOLD}{CYAN}║    d-orm  ·  Sync Demo               ║{RESET}")
+print(f"{BOLD}{CYAN}║    djanorm  ·  Sync Demo               ║{RESET}")
 print(f"{BOLD}{CYAN}╚══════════════════════════════════════╝{RESET}")
 
 

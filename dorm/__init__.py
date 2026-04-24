@@ -1,5 +1,5 @@
 """
-d-orm: A Django-like ORM with synchronous and asynchronous support.
+djanorm: A Django-like ORM with synchronous and asynchronous support.
 
 Quick start:
 

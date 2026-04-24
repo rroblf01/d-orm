@@ -58,7 +58,7 @@ class PostgreSQLDatabaseWrapper:
         except ImportError as e:
             raise ImportError(
                 "psycopg is required for PostgreSQL support. "
-                "Install it with: pip install 'd-orm[postgresql]'"
+                "Install it with: pip install 'djanorm[postgresql]'"
             ) from e
 
         if (
@@ -166,7 +166,7 @@ class PostgreSQLAsyncDatabaseWrapper:
         except ImportError as e:
             raise ImportError(
                 "psycopg is required for async PostgreSQL support. "
-                "Install it with: pip install 'd-orm[postgresql]'"
+                "Install it with: pip install 'djanorm[postgresql]'"
             ) from e
 
         if self._conn is None or self._conn.closed:

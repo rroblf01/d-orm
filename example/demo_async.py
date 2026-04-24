@@ -1,5 +1,5 @@
 """
-Asynchronous operations demo for d-orm.
+Asynchronous operations demo for djanorm.
 Run after setup_db.py.
 
     uv run python example/demo_async.py
@@ -41,7 +41,7 @@ def item(text: str):
 
 async def main():
     print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗{RESET}")
-    print(f"{BOLD}{CYAN}║    d-orm  ·  Async Demo              ║{RESET}")
+    print(f"{BOLD}{CYAN}║    djanorm  ·  Async Demo              ║{RESET}")
     print(f"{BOLD}{CYAN}╚══════════════════════════════════════╝{RESET}")
 
     # ── 1. acreate / aget ─────────────────────────────────────────────────────

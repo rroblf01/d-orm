@@ -1,4 +1,4 @@
-# d-orm
+# djanorm
 
 A Django-inspired ORM for Python with full **synchronous and asynchronous** support. The same API you know from Django, without depending on the full framework.
 
@@ -17,13 +17,13 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 
 ```bash
 # With uv
-uv add d-orm
+uv add djanorm
 
 # With pip
-pip install d-orm
+pip install djanorm
 
 # With PostgreSQL support
-pip install "d-orm[postgresql]"
+pip install "djanorm[postgresql]"
 ```
 
 ---
