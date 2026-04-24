@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 
@@ -158,6 +159,10 @@ class PostgreSQLAsyncDatabaseWrapper:
         self.settings = settings
         self._dsn = _build_dsn(settings)
         self._conn = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        # Lock serialises concurrent coroutines on the same connection.
+        # asyncio.Lock() is safe to instantiate outside a running loop in Python 3.10+.
+        self._lock = asyncio.Lock()
 
     async def _get_conn(self):
         try:
@@ -169,6 +174,19 @@ class PostgreSQLAsyncDatabaseWrapper:
                 "Install it with: pip install 'djanorm[postgresql]'"
             ) from e
 
+        current_loop = asyncio.get_event_loop()
+        if self._loop is not current_loop:
+            # Event loop changed (e.g. new asyncio.run() call) — previous connection
+            # is bound to a closed loop and must not be reused.
+            if self._conn is not None and not self._conn.closed:
+                try:
+                    await self._conn.close()
+                except Exception:
+                    pass
+            self._conn = None
+            self._loop = current_loop
+            self._lock = asyncio.Lock()
+
         if self._conn is None or self._conn.closed:
             import psycopg
             from psycopg.rows import dict_row
@@ -179,54 +197,58 @@ class PostgreSQLAsyncDatabaseWrapper:
         return self._conn
 
     async def execute(self, sql: str, params=None) -> list:
-        conn = await self._get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(_to_pyformat(sql), params or [])
-                try:
-                    return await cur.fetchall()
-                except Exception:
-                    return []
-        except Exception as exc:
-            await conn.rollback()
-            _raise_migration_hint(exc)
-            raise
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(_to_pyformat(sql), params or [])
+                    try:
+                        return await cur.fetchall()
+                    except Exception:
+                        return []
+            except Exception as exc:
+                await conn.rollback()
+                _raise_migration_hint(exc)
+                raise
 
     async def execute_write(self, sql: str, params=None) -> int:
-        conn = await self._get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(_to_pyformat(sql), params or [])
-                rowcount = cur.rowcount
-            await conn.commit()
-            return rowcount
-        except Exception as exc:
-            await conn.rollback()
-            _raise_migration_hint(exc)
-            raise
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(_to_pyformat(sql), params or [])
+                    rowcount = cur.rowcount
+                await conn.commit()
+                return rowcount
+            except Exception as exc:
+                await conn.rollback()
+                _raise_migration_hint(exc)
+                raise
 
     async def execute_insert(self, sql: str, params=None):
-        conn = await self._get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
-                row = await cur.fetchone()
-            await conn.commit()
-            return row["id"] if row else None
-        except Exception as exc:
-            await conn.rollback()
-            _raise_migration_hint(exc)
-            raise
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(_to_pyformat(sql) + " RETURNING id", params or [])
+                    row = await cur.fetchone()
+                await conn.commit()
+                return row["id"] if row else None
+            except Exception as exc:
+                await conn.rollback()
+                _raise_migration_hint(exc)
+                raise
 
     async def execute_script(self, sql: str):
-        conn = await self._get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(sql)
-            await conn.commit()
-        except Exception as exc:
-            await conn.rollback()
-            raise exc
+        async with self._lock:
+            conn = await self._get_conn()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql)
+                await conn.commit()
+            except Exception as exc:
+                await conn.rollback()
+                raise exc
 
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(
