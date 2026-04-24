@@ -154,6 +154,13 @@ def cmd_shell(args):
     banner = "d-orm interactive shell\nModels: " + ", ".join(sorted(models.keys()))
 
     try:
+        import IPython
+        IPython.embed(user_ns=local_vars, banner1=banner, using="asyncio")
+        return
+    except ImportError:
+        pass
+
+    try:
         import readline
         import rlcompleter
         readline.set_completer(rlcompleter.Completer(local_vars).complete)
