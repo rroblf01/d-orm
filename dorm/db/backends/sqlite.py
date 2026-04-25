@@ -206,6 +206,16 @@ class SQLiteAsyncDatabaseWrapper:
         worker = getattr(pending, "_thread", None)
         if worker is not None:
             worker.daemon = True
+        else:
+            import warnings
+            warnings.warn(
+                "aiosqlite Connection has no '_thread' attribute; the "
+                "worker thread cannot be daemonized. Forgetting to await "
+                "connection close may hang the process at exit. Pin "
+                "aiosqlite to a known-good version (>=0.22,<0.23).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         conn = await pending
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")

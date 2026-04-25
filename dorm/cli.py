@@ -10,37 +10,66 @@ from pathlib import Path
 def _load_settings(settings_module: str):
     """Import a Python settings module and configure dorm."""
     module = importlib.import_module(settings_module)
-    # Add the directory that contains the app packages to sys.path so that
-    # app modules (e.g. "example.models") are importable regardless of the
-    # working directory the user ran dorm from.
+    # Add both the directory containing settings.py *and* its parent to
+    # sys.path so apps are importable regardless of layout:
+    #   - flat/nested:  apps live next to settings.py → need settings_dir
+    #   - dotted pkg:   settings imported as "myproj.settings" → need parent
     settings_dir: Path | None = None
     if module.__file__:
         settings_dir = Path(module.__file__).resolve().parent
-        project_root = str(settings_dir.parent)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
+        for path in (str(settings_dir), str(settings_dir.parent)):
+            if path not in sys.path:
+                sys.path.insert(0, path)
     from . import configure
     from .conf import _discover_apps
 
     databases = getattr(module, "DATABASES", {})
     installed_apps = getattr(module, "INSTALLED_APPS", [])
+    autodiscovered = False
     if not installed_apps and settings_dir is not None:
         installed_apps = _discover_apps(settings_dir)
+        autodiscovered = True
+    if not installed_apps and autodiscovered:
+        print(
+            "Warning: no apps detected. Make sure each app directory has "
+            "__init__.py and models.py, or set INSTALLED_APPS in settings.py.",
+            file=sys.stderr,
+        )
     configure(DATABASES=databases, INSTALLED_APPS=installed_apps)
     return module
 
 
 def _load_apps(installed_apps: list):
-    """Import all app modules to register their models."""
+    """Import each app's models module, surfacing import errors instead of
+    silently swallowing them. A missing models.py is allowed (we fall back
+    to importing the app package); other failures are reported."""
     for app in installed_apps:
         try:
-            # Try app.models first
             importlib.import_module(f"{app}.models")
-        except ImportError:
-            try:
-                importlib.import_module(app)
-            except ImportError:
-                pass
+            continue
+        except ModuleNotFoundError as exc:
+            missing = exc.name or ""
+            if missing not in (app, f"{app}.models"):
+                # A real import error inside models.py — bubble up to user.
+                print(
+                    f"Warning: failed to import {app}.models: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+        except ImportError as exc:
+            print(
+                f"Warning: failed to import {app}.models: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        # No models.py — try the app package itself.
+        try:
+            importlib.import_module(app)
+        except ImportError as exc:
+            print(
+                f"Warning: could not import app '{app}': {exc}",
+                file=sys.stderr,
+            )
 
 
 def _find_migrations_dir(app_module: str) -> Path:
