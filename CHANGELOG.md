@@ -95,6 +95,23 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Flask), batch sizing guidance, and a "Production deployment" section
   covering logging, migration safety, pool sizing, and shutdown.
 
+### FastAPI / Pydantic interop
+- New module `dorm.contrib.pydantic`:
+  - **`DormSchema`** — `BaseModel` subclass with a Django-REST-style
+    `class Meta` that auto-fills fields from a dorm Model. ``Meta``
+    accepts ``model``, ``fields`` (or ``exclude``), and ``optional``.
+    Anything declared in the class body — overrides, extra fields,
+    ``@field_validator`` decorators — wins over the Meta-derived
+    defaults. ``from_attributes=True`` is set automatically so FastAPI
+    can use a dorm instance as a ``response_model`` directly.
+  - `schema_for(model_cls, *, name, exclude, only, optional, base)` —
+    one-line auto-generation when you don't need a class block. The
+    returned class has fields built at runtime, so type checkers see
+    it as `type[BaseModel]`. Use `DormSchema` for typing-sensitive code.
+  - M2M fields are excluded (no row-level column); FK / O2O serialize
+    as the underlying PK column type.
+- New optional extra `pydantic` (`pip install 'djanorm[pydantic]'`).
+
 ### Build / CI
 - `aiosqlite` upper-bound: `<0.23`. The daemon-thread fix relies on a
   private aiosqlite attribute that may move in future versions; bump the

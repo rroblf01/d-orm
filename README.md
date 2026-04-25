@@ -1585,7 +1585,110 @@ dorm doesn't impose a request lifecycle, so framework integration is just
 about wiring `configure()` once at startup and (for async) cleaning up
 connections on shutdown.
 
-**FastAPI / Starlette (lifespan):**
+#### FastAPI: Pydantic schemas from dorm models
+
+The recommended entry point is `DormSchema` — a `BaseModel` subclass
+with a Django-REST-style `class Meta` that auto-fills fields from a
+dorm Model. Anything you declare in the class body (overrides, extra
+fields, `@field_validator` decorators) wins over the Meta-derived
+defaults.
+
+```python
+from fastapi import FastAPI
+from pydantic import field_validator
+from dorm.contrib.pydantic import DormSchema
+from .models import User
+
+class UserOut(DormSchema):
+    class Meta:
+        model = User
+        fields = "__all__"           # default; or e.g. ("id", "name", "email")
+
+class UserCreate(DormSchema):
+    confirm_password: str             # extra field not on the dorm model
+
+    @field_validator("email")
+    @classmethod
+    def lower(cls, v: str) -> str:    # works on auto-generated fields too
+        return v.lower()
+
+    class Meta:
+        model = User
+        exclude = ("id",)             # mutually exclusive with `fields`
+        # optional = ("phone",)       # mark required cols as optional in this schema
+
+class UserPatch(DormSchema):
+    class Meta:
+        model = User
+        exclude = ("id", "created_at")
+        optional = ("name", "email")  # all-optional for PATCH bodies
+
+app = FastAPI()
+
+@app.post("/users", response_model=UserOut)
+async def create_user(payload: UserCreate) -> User:
+    return await User.objects.acreate(**payload.model_dump(exclude={"confirm_password"}))
+
+@app.get("/users/{pk}", response_model=UserOut)
+async def get_user(pk: int) -> User:
+    return await User.objects.aget(pk=pk)
+```
+
+`Meta` accepts:
+
+| key | meaning |
+|---|---|
+| `model` | dorm Model class (required) |
+| `fields` | tuple of field names to include, or `"__all__"` (default) |
+| `exclude` | tuple of field names to drop; mutually exclusive with `fields` |
+| `optional` | tuple of field names to mark optional with default `None`, even if non-null on the model — useful for PATCH bodies |
+
+Notes:
+
+- `from_attributes=True` is set automatically, so FastAPI's `response_model`
+  populates the schema directly from a dorm instance. No glue.
+- M2M fields are skipped (they don't live on the row). Add them as an
+  explicit list field if you need them.
+- FK / O2O serialize as the underlying PK column type (typically `int`).
+- Validators (`@field_validator`, `@model_validator`) work as in any
+  Pydantic model — they apply to auto-generated fields too.
+- Type checkers see every field you declare in the class body. The
+  Meta-derived ones are added at runtime (same fundamental limit as
+  Django REST's `ModelSerializer`); for full type safety, declare
+  the fields you care about explicitly.
+
+##### Quick prototype: `schema_for()` (auto-generated, no class)
+
+For one-off scripts, `schema_for()` produces a matching `BaseModel` in
+one line — no class block at all:
+
+```python
+from dorm.contrib.pydantic import schema_for
+
+UserOut    = schema_for(User)
+UserCreate = schema_for(User, exclude=("id", "created_at"))
+UserPatch  = schema_for(User, exclude=("id",), optional=("name", "email"))
+```
+
+Trade-off vs `DormSchema`: there's no class for the type checker to look
+at, so the result is typed as `type[BaseModel]` and IDE autocompletion
+on validated instances doesn't work. Prefer `DormSchema` whenever you
+care about typing.
+
+`schema_for(...)` knobs:
+
+| arg | use |
+|---|---|
+| `exclude=("id",)` | drop fields |
+| `only=("name", "email")` | keep only these fields |
+| `optional=("name",)` | mark as optional (PATCH bodies) |
+| `name="UserOut"` | override the generated class name |
+| `base=MyBase` | use a custom Pydantic `BaseModel` parent |
+
+`pydantic` is an optional extra: install with `pip install 'djanorm[pydantic]'`
+or include in your project's `dependencies`.
+
+#### FastAPI / Starlette (lifespan):
 
 ```python
 from contextlib import asynccontextmanager

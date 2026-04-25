@@ -18,6 +18,7 @@ wheels/
 
 # example
 *.db*
+*.db
 example/**/migrations/
 
 .coverage
