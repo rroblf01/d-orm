@@ -10,7 +10,6 @@ DormSchema (Django-REST-style):
 """
 
 from fastapi import FastAPI
-from pydantic import field_validator
 
 from dorm.contrib.pydantic import DormSchema
 
@@ -31,22 +30,6 @@ class CustomerOut(DormSchema):
 
 
 class CustomerCreate(DormSchema):
-    """POST body: drop the auto-PK, add an extra confirm field, and
-    normalize the email via a validator.
-
-    `email` is also declared explicitly here so static type checkers see
-    its type when we reference `payload.email` below — Meta auto-fills
-    cover the rest (name, phone) at runtime.
-    """
-
-    email: str
-    confirm_email: str
-
-    @field_validator("email", "confirm_email")
-    @classmethod
-    def lowercase(cls, v: str) -> str:
-        return v.lower()
-
     class Meta:
         model = Customer
         exclude = ("id",)
@@ -62,12 +45,9 @@ def read_root():
 
 @app.post("/customer/", response_model=CustomerOut)
 def create_customer(payload: CustomerCreate):
-    if payload.email != payload.confirm_email:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="emails do not match")
-    return Customer.objects.create(
-        **payload.model_dump(exclude={"confirm_email"}, exclude_none=True)
-    )
+    customer = Customer(**payload.model_dump())
+    customer.save()
+    return customer
 
 
 @app.get("/customer/{customer_id}", response_model=CustomerOut)
@@ -77,4 +57,4 @@ def get_customer(customer_id: int):
 
 @app.get("/customers/", response_model=list[CustomerOut])
 def list_customers():
-    return list(Customer.objects.all())
+    return Customer.objects.all()

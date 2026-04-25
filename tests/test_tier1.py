@@ -160,9 +160,11 @@ def test_signal_disconnect():
 # ── full_clean / validate_unique ──────────────────────────────────────────────
 
 def test_full_clean_raises_on_invalid_email():
-    a = Author(name="X", age=25, email="not-an-email")
+    """EmailField now validates at assignment time, so the bogus value is
+    rejected during construction — full_clean() never has a chance to
+    run on a dirty instance via the public constructor."""
     with pytest.raises(dorm.ValidationError):
-        a.full_clean()
+        Author(name="X", age=25, email="not-an-email")
 
 
 def test_full_clean_passes_on_valid_data():
@@ -203,11 +205,11 @@ def test_clean_is_hookable():
         young.full_clean()
 
 
-def test_full_clean_clean_fields_runs_before_clean():
-    """clean_fields raises for invalid email before clean() is ever reached."""
-    a = Author(name="Alice", age=25, email="not-an-email")
+def test_invalid_email_rejected_at_construction():
+    """Construction itself raises now (previously this only fired from
+    full_clean). The error message still names the offending field."""
     with pytest.raises(dorm.ValidationError, match="valid email"):
-        a.full_clean()
+        Author(name="Alice", age=25, email="not-an-email")
 
 
 # ── ManyToManyField managers ──────────────────────────────────────────────────

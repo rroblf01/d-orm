@@ -6,9 +6,15 @@ import ipaddress
 import json
 import re
 import uuid
-from typing import Any
+from typing import Any, Generic, TypeVar, overload
 
 from .exceptions import ValidationError
+
+# T_value: the Python type stored in the model instance for a given field.
+# Subclassing Field[T_value] (e.g. ``CharField(Field[str])``) lets static
+# type checkers infer ``user.name`` as ``str`` instead of ``Any`` — the
+# same trick SQLAlchemy 2.0 uses with ``Mapped[T]``.
+_T = TypeVar("_T")
 
 class _NotProvided:
     """Sentinel for fields with no default. Survives deepcopy as a singleton."""
@@ -38,7 +44,15 @@ DO_NOTHING = "NO ACTION"
 RESTRICT = "RESTRICT"
 
 
-class Field:
+class Field(Generic[_T]):
+    """Base class for all dorm fields.
+
+    The generic parameter ``_T`` is the Python type the field stores. Static
+    type checkers use it via the overloaded ``__get__`` so ``user.name``
+    (where ``name = CharField(...)``) is inferred as ``str``, not ``Any``.
+    Runtime behaviour is identical regardless of the parameter.
+    """
+
     creation_counter = 0
     auto_created = False
 
@@ -102,12 +116,19 @@ class Field:
             self.verbose_name = name.replace("_", " ")
         cls._meta.add_field(self)
 
+    @overload
+    def __get__(self, instance: None, owner: type) -> "Field[_T]": ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> _T: ...
     def __get__(self, instance, owner):
         if instance is None:
             return self
         return instance.__dict__.get(self.attname)
 
-    def __set__(self, instance, value):
+    def __set__(self, instance: object, value: _T | Any) -> None:
+        # attname is set by contribute_to_class before any instance can
+        # exist; the descriptor is unreachable while it's still None.
+        assert self.attname is not None
         instance.__dict__[self.attname] = self.to_python(value)
 
     def has_default(self) -> bool:
@@ -156,7 +177,7 @@ class Field:
         return f"<{path}: {self.name}>"
 
 
-class AutoField(Field):
+class AutoField(Field[int]):
     def __init__(self, **kwargs):
         kwargs.setdefault("primary_key", True)
         kwargs.setdefault("editable", False)
@@ -208,7 +229,7 @@ class SmallAutoField(AutoField):
         return "INTEGER"
 
 
-class IntegerField(Field):
+class IntegerField(Field[int]):
     def to_python(self, value):
         if value is None:
             return None
@@ -252,7 +273,7 @@ class PositiveSmallIntegerField(PositiveIntegerField):
         return "INTEGER"
 
 
-class FloatField(Field):
+class FloatField(Field[float]):
     def to_python(self, value):
         if value is None:
             return None
@@ -262,7 +283,7 @@ class FloatField(Field):
         return "REAL"
 
 
-class DecimalField(Field):
+class DecimalField(Field[decimal.Decimal]):
     def __init__(self, max_digits: int = 10, decimal_places: int = 2, **kwargs):
         self.max_digits = max_digits
         self.decimal_places = decimal_places
@@ -282,7 +303,7 @@ class DecimalField(Field):
         return f"NUMERIC({self.max_digits}, {self.decimal_places})"
 
 
-class CharField(Field):
+class CharField(Field[str]):
     def __init__(self, max_length: int = 255, **kwargs):
         self.max_length = max_length
         super().__init__(max_length=max_length, **kwargs)
@@ -303,7 +324,7 @@ class CharField(Field):
         return f"VARCHAR({self.max_length})"
 
 
-class TextField(Field):
+class TextField(Field[str]):
     def to_python(self, value):
         if value is None:
             return None
@@ -313,7 +334,7 @@ class TextField(Field):
         return "TEXT"
 
 
-class BooleanField(Field):
+class BooleanField(Field[bool]):
     def to_python(self, value):
         if value is None:
             return None
@@ -348,7 +369,7 @@ class NullBooleanField(BooleanField):
         super().__init__(**kwargs)
 
 
-class DateField(Field):
+class DateField(Field[datetime.date]):
     def to_python(self, value):
         if value is None:
             return None
@@ -376,7 +397,7 @@ class DateField(Field):
         return "DATE"
 
 
-class TimeField(Field):
+class TimeField(Field[datetime.time]):
     def to_python(self, value):
         if value is None:
             return None
@@ -402,7 +423,7 @@ class TimeField(Field):
         return "TIME"
 
 
-class DateTimeField(Field):
+class DateTimeField(Field[datetime.datetime]):
     def __init__(self, auto_now: bool = False, auto_now_add: bool = False, **kwargs):
         self.auto_now = auto_now
         self.auto_now_add = auto_now_add
@@ -457,6 +478,21 @@ class EmailField(CharField):
         kwargs.setdefault("max_length", 254)
         super().__init__(**kwargs)
 
+    def to_python(self, value):
+        # Validate at assignment time (``__set__`` invokes ``to_python``).
+        # That way a bogus value is rejected by ``Customer(email="x")`` /
+        # ``Customer.objects.create(email="x")`` even when the caller
+        # never invokes ``full_clean()``. Reads from the DB go through
+        # ``from_db_value`` (direct dict write) and bypass this check —
+        # so historical bad rows still load.
+        if value is None or value == "":
+            return value
+        if not isinstance(value, str) or not self.EMAIL_RE.match(value):
+            raise ValidationError(
+                {self.name or "email": f"'{value}' is not a valid email address."}
+            )
+        return value
+
     def validate(self, value, model_instance):
         super().validate(value, model_instance)
         if value and not self.EMAIL_RE.match(value):
@@ -483,7 +519,7 @@ class SlugField(CharField):
             raise ValidationError(f"'{value}' is not a valid slug.")
 
 
-class UUIDField(Field):
+class UUIDField(Field[uuid.UUID]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -513,7 +549,7 @@ class UUIDField(Field):
         return "VARCHAR(36)"
 
 
-class IPAddressField(Field):
+class IPAddressField(Field[str]):
     def to_python(self, value):
         if value is None:
             return None
@@ -529,7 +565,7 @@ class IPAddressField(Field):
         return "VARCHAR(39)"
 
 
-class GenericIPAddressField(Field):
+class GenericIPAddressField(Field[str]):
     def to_python(self, value):
         if value is None:
             return None
@@ -545,7 +581,7 @@ class GenericIPAddressField(Field):
         return "VARCHAR(39)"
 
 
-class JSONField(Field):
+class JSONField(Field[Any]):
     def to_python(self, value):
         if value is None:
             return None
@@ -572,7 +608,7 @@ class JSONField(Field):
         return "TEXT"
 
 
-class BinaryField(Field):
+class BinaryField(Field[bytes]):
     def to_python(self, value):
         if value is None:
             return None
@@ -590,7 +626,38 @@ class BinaryField(Field):
 # ── Relational fields ──────────────────────────────────────────────────────────
 
 
-class RelatedField(Field):
+class _ForeignKeyIdDescriptor:
+    """Typed read/write descriptor for the underlying ``<fk>_id`` slot.
+
+    The FK descriptor itself returns the related model instance; this one
+    exposes the raw PK so ``obj.author_id`` is statically typed as
+    ``int | None`` instead of ``Any``. Both descriptors back the same dict
+    key, so writes via either path stay in sync.
+    """
+
+    def __init__(self, attname: str) -> None:
+        self.attname = attname
+
+    @overload
+    def __get__(self, instance: None, owner: type) -> "_ForeignKeyIdDescriptor": ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> int | None: ...
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        return instance.__dict__.get(self.attname)
+
+    def __set__(self, instance: object, value: int | None) -> None:
+        instance.__dict__[self.attname] = value
+        # Invalidate the cached related instance so the next attribute
+        # access on the FK descriptor re-fetches with the new pk.
+        # FK descriptor stores its cache under ``_cache_<name>`` where
+        # ``<name> = attname[:-3]`` (we strip the trailing ``_id``).
+        if self.attname.endswith("_id"):
+            instance.__dict__.pop(f"_cache_{self.attname[:-3]}", None)
+
+
+class RelatedField(Field[Any]):
     def __init__(self, to, on_delete=CASCADE, related_name=None, **kwargs):
         self.remote_field_to = to
         self.on_delete = on_delete
@@ -614,6 +681,11 @@ class RelatedField(Field):
             self.verbose_name = name.replace("_", " ")
         cls._meta.add_field(self)
         setattr(cls, name, self)  # install FK descriptor
+        # Install a typed descriptor for the underlying ``<name>_id`` PK so
+        # static type checkers see ``obj.author_id`` as ``int | None`` rather
+        # than ``Any``. At runtime it just reads the same dict slot the FK
+        # descriptor writes to.
+        setattr(cls, self.attname, _ForeignKeyIdDescriptor(self.attname))
 
     def __get__(self, instance, owner):
         if instance is None:
@@ -683,7 +755,7 @@ class OneToOneField(RelatedField):
         super().__init__(to, on_delete, **kwargs)
 
 
-class ManyToManyField(Field):
+class ManyToManyField(Field[Any]):
     many_to_many = True
     concrete = False
 

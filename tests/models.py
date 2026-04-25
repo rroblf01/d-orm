@@ -16,6 +16,10 @@ class Author(dorm.Model):
     publisher = dorm.ForeignKey(
         Publisher, on_delete=dorm.SET_NULL, null=True, blank=True
     )
+    # Annotate the FK's underlying ``_id`` slot so static type checkers see
+    # ``author.publisher_id`` as ``int | None`` (the descriptor is installed
+    # at runtime by ForeignKey.contribute_to_class).
+    publisher_id: int | None
 
     class Meta:
         db_table = "authors"

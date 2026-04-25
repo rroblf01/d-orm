@@ -225,18 +225,26 @@ class Model(metaclass=ModelBase):
                     self.__dict__[field.attname] = None
 
         # Apply provided values
+        from .exceptions import FieldDoesNotExist
         for key, value in kwargs.items():
             try:
                 field = meta.get_field(key)
-                from .fields import RelatedField
-                if isinstance(field, RelatedField) and key == field.name:
-                    # Use FK descriptor so model instances get their PK extracted
-                    setattr(self, key, value)
-                else:
-                    self.__dict__[field.attname] = field.to_python(value)
-            except Exception:
-                # FK descriptor: key is relation name, value is instance or pk
+            except FieldDoesNotExist:
+                # Not a known model field — fall back to setattr so
+                # arbitrary attributes (e.g. from raw queryset hydration)
+                # still land on the instance.
                 setattr(self, key, value)
+                continue
+            from .fields import RelatedField
+            if isinstance(field, RelatedField) and key == field.name:
+                # Use FK descriptor so model instances get their PK extracted
+                setattr(self, key, value)
+            else:
+                # NOTE: ``field.to_python`` may raise ValidationError
+                # (e.g. EmailField rejecting an invalid address). We let
+                # that propagate — better to fail at construction than
+                # write a bogus row.
+                self.__dict__[field.attname] = field.to_python(value)
 
     @property
     def pk(self):

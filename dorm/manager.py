@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from .models import Model
 
@@ -205,11 +205,24 @@ class Manager(BaseManager[_T]):
     pass
 
 
-class ManagerDescriptor:
-    def __init__(self, manager: BaseManager[Any]) -> None:
+class ManagerDescriptor(Generic[_T]):
+    """Descriptor that exposes a Manager on the model class only.
+
+    Generic in the model type so static type checkers see
+    ``Author.objects`` as ``BaseManager[Author]`` (instead of
+    ``BaseManager[Any]``), preserving the row type through queryset
+    chains: ``Author.objects.filter(...).first()`` is typed as
+    ``Author | None``.
+    """
+
+    def __init__(self, manager: BaseManager[_T]) -> None:
         self.manager = manager
 
-    def __get__(self, instance: Any, cls: type | None = None) -> BaseManager[Any]:
+    @overload
+    def __get__(self, instance: None, cls: type[_T]) -> BaseManager[_T]: ...
+    @overload
+    def __get__(self, instance: _T, cls: type[_T]) -> "ManagerDescriptor[_T]": ...
+    def __get__(self, instance: Any, cls: type | None = None) -> Any:
         if instance is not None:
             raise AttributeError("Manager isn't accessible via model instances")
         return self.manager

@@ -4,6 +4,7 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 
 ## Features
 
+- **Type-safe** — every field is `Field[T]` (e.g. `CharField(Field[str])`), so `user.name` is statically `str` (not `Any`), and `Author.objects.filter(...).first()` is `Author | None`. Same `Mapped[T]` ergonomic SQLAlchemy 2.0 made famous, no extra annotation per field.
 - **Same API as Django ORM** — `filter`, `exclude`, `get`, `create`, `update`, `delete`, `Q`, `F`, aggregations, slicing...
 - **Native async** — every method has an `a*` variant: `acreate`, `aget`, `aupdate`, `adelete`...
 - **Atomic transactions** — `dorm.transaction.atomic()` / `aatomic()` with automatic savepoint nesting

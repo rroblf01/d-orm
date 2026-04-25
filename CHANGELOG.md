@@ -95,6 +95,26 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Flask), batch sizing guidance, and a "Production deployment" section
   covering logging, migration safety, pool sizing, and shutdown.
 
+### Type safety
+- **`Field` is now generic in the stored Python type** (`Field[str]`,
+  `Field[int]`, `Field[datetime]`, …). Each concrete subclass declares
+  its T parameter, so static type checkers (mypy / pyright / ty) see
+  ``user.name`` (where ``name = CharField(...)``) as ``str`` rather
+  than ``Any``. Same idea SQLAlchemy 2.0 used with ``Mapped[T]``.
+  Runtime is unchanged.
+- **`ManagerDescriptor` is generic in the model type**, so
+  ``Author.objects`` is statically ``BaseManager[Author]`` and the
+  whole queryset chain preserves the row type:
+  ``Author.objects.filter(...).first()`` is ``Author | None``.
+- **`_ForeignKeyIdDescriptor`** — a typed read/write descriptor is
+  installed for the underlying ``<fk>_id`` slot when a ForeignKey is
+  attached. ``obj.author_id`` is now strictly ``int | None`` instead of
+  ``Any``, and writing through it invalidates the FK's cached related
+  instance so the next ``obj.author`` re-fetches with the new pk.
+  (For full static type-safety on `_id` access, also add a class-level
+  ``author_id: int | None`` annotation — runtime descriptors aren't
+  visible to type checkers.)
+
 ### FastAPI / Pydantic interop
 - New module `dorm.contrib.pydantic`:
   - **`DormSchema`** — `BaseModel` subclass with a Django-REST-style
@@ -111,6 +131,31 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - M2M fields are excluded (no row-level column); FK / O2O serialize
     as the underlying PK column type.
 - New optional extra `pydantic` (`pip install 'djanorm[pydantic]'`).
+  No `email-validator` dependency — dorm validates the email format
+  itself (see below).
+
+### Validation
+- **`EmailField` now rejects invalid addresses on construction.**
+  Previously the regex check only ran from ``model.full_clean()``,
+  which ``save()``/``objects.create()`` do not call — so
+  ``Customer.objects.create(email="example")`` happily wrote a row
+  with a bogus value. The check moved into ``EmailField.to_python``
+  (invoked by ``__set__`` and by ``Model.__init__``), so:
+
+  ```python
+  Customer(email="example")              # ValidationError now
+  Customer.objects.create(email="example")  # ValidationError now
+  customer.email = "example"             # ValidationError now
+  ```
+
+  Reads from the database go through ``from_db_value`` (direct dict
+  write) and are *not* re-validated, so historical bad rows still
+  load.
+- **`Model.__init__` no longer swallows ValidationError.** The
+  previous ``except Exception`` around field assignment is now
+  narrowed to ``except FieldDoesNotExist``, so format errors raised
+  by ``to_python`` (EmailField etc.) propagate to the caller instead
+  of being silently dropped.
 
 ### Build / CI
 - `aiosqlite` upper-bound: `<0.23`. The daemon-thread fix relies on a

@@ -42,6 +42,10 @@ sqlite = ["aiosqlite>=0.22.1,<0.23"]
 postgresql = ["psycopg[binary,pool]>=3.3.3"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
+# Email/URL/IP format validation is done by dorm's own field code on
+# assignment (so payloads are rejected even if you don't use a Pydantic
+# schema at the boundary), so pydantic.EmailStr / HttpUrl are NOT used and
+# email-validator is not required.
 pydantic = ["pydantic>=2.0"]
 all = ["djanorm[dev,sqlite,postgresql,pydantic]"]
 
@@ -58,3 +62,8 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ty.src]
+# `example/` ships demo / FastAPI code that imports optional packages
+# (fastapi, uvicorn) that aren't part of djanorm's runtime extras. Skip it.
+exclude = ["example/**"]

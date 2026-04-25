@@ -87,8 +87,12 @@ from ..fields import (
 )
 from ..models import Model
 
-# Most-specific subclass first so isinstance() picks the right entry.
-_FIELD_TYPE_MAP: list[tuple[type, type]] = [
+# All string-like fields map to ``str`` here. Format validation
+# (email / URL / IP) is enforced by dorm's own field code at assignment
+# time, so a request body with ``{"email": "example"}`` is rejected as
+# soon as ``Customer(email="example")`` runs — no Pydantic-side validator
+# (and no email-validator dependency) needed.
+_FIELD_TYPE_MAP: list[tuple[type, Any]] = [
     (PositiveSmallIntegerField, int),
     (PositiveIntegerField, int),
     (SmallIntegerField, int),
@@ -107,7 +111,7 @@ _FIELD_TYPE_MAP: list[tuple[type, type]] = [
     (DateTimeField, datetime),
     (DateField, date),
     (TimeField, time),
-    (JSONField, Any),  # type: ignore[list-item]
+    (JSONField, Any),
     (BinaryField, bytes),
     (GenericIPAddressField, str),
     (IPAddressField, str),

@@ -102,8 +102,12 @@ def test_field_type_mapping_covers_common_types():
     assert fields["da"].annotation == (date | None)
     assert fields["ti"].annotation == (time | None)
     assert fields["u"].annotation == (UUID | None)
-    assert fields["e"].annotation == (str | None)
     assert fields["bn"].annotation == (bytes | None)
+    # EmailField / URLField / IPAddressField map to plain ``str`` in the
+    # Pydantic schema; dorm enforces the format itself at assignment time.
+    assert fields["e"].annotation == (str | None)
+    assert fields["url"].annotation == (str | None)
+    assert fields["ip"].annotation == (str | None)
 
 
 # ── exclude / only / optional knobs ───────────────────────────────────────────
@@ -452,6 +456,52 @@ def test_explicit_annotations_are_preserved_under_pep_649():
     )
     assert obj.email_check == "mixed@x.com"
     assert obj.confirm == "mixed@x.com"
+
+
+def test_email_field_rejects_invalid_at_dorm_assignment():
+    """Regression: dorm's ``EmailField.to_python`` now validates at
+    assignment time, so ``Customer(email="example")`` (and therefore
+    ``Customer.objects.create(email="example")``) raises before any row
+    is written. The Pydantic schema treats it as plain ``str`` — dorm
+    enforces the format itself, no email-validator dependency."""
+    from dorm.exceptions import ValidationError as DormValidationError
+    import dorm
+
+    class _C(dorm.Model):
+        name = dorm.CharField(max_length=100)
+        email = dorm.EmailField()
+
+        class Meta:
+            db_table = "test_email_validate"
+            app_label = "tests"
+
+    # Bogus value rejected on construction — same path Customer.objects.create() uses.
+    with pytest.raises(DormValidationError):
+        _C(name="x", email="example")
+    with pytest.raises(DormValidationError):
+        _C(name="x", email="string")
+
+    # A real address constructs fine.
+    obj = _C(name="x", email="user@example.com")
+    assert obj.email == "user@example.com"
+
+
+def test_email_field_blank_or_null_allowed_when_configured():
+    """Empty string / None must still be accepted when the field allows it
+    (otherwise blank=True / null=True would be useless)."""
+    import dorm
+
+    class _C2(dorm.Model):
+        name = dorm.CharField(max_length=100)
+        email = dorm.EmailField(null=True, blank=True)
+
+        class Meta:
+            db_table = "test_email_validate_optional"
+            app_label = "tests"
+
+    # None and "" pass through; only non-empty bogus strings raise.
+    _C2(name="x", email=None)
+    _C2(name="x", email="")
 
 
 def test_meta_subclass_can_be_subclassed_further():
