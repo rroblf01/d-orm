@@ -232,6 +232,15 @@ class QuerySet(Generic[_T]):
         assert self._result_cache is not None
         return iter(self._result_cache)
 
+    def __await__(self):
+        """Materialize the queryset asynchronously: ``rows = await qs``.
+        Lets users compose chainable methods (``values()``, ``filter()``,
+        ``order_by()``...) and consume the result with a single await,
+        instead of having to call a terminal ``avalues()``/``alist()``."""
+        async def _materialize():
+            return [item async for item in self._aiterator()]
+        return _materialize().__await__()
+
     def __len__(self) -> int:
         self._fetch_all()
         assert self._result_cache is not None
@@ -465,31 +474,40 @@ class QuerySet(Generic[_T]):
         for inst in instances:
             inst.__dict__[cache_key] = grouped.get(inst.pk, [])
 
-    def _iterator(self) -> Iterator[_T]:
-        connection = self._get_connection()
+    @staticmethod
+    def _row_to_values_dict(row: Any, fields: list[str]) -> dict[str, Any]:
+        """Shape a DB row as a {field: value} dict for values()-mode results."""
+        if hasattr(row, "keys"):
+            return dict(row)
+        return dict(zip(fields, row))
+
+    def _iter_setup(self):
+        """Resolve the query (applying default ordering) and compute iter
+        flags. Shared between :meth:`_iterator` and :meth:`_aiterator`."""
         query = self._query
         if not query.order_by_fields and self.model._meta.ordering:
             query = query.clone()
             query.order_by_fields = list(self.model._meta.ordering)
-        sql, params = query.as_select(connection)
-        rows = connection.execute(sql, params)
-
         sf = query.selected_fields
         values_mode = sf is not None and not query.deferred_loading
         sr_fields = query.select_related_fields
         collect_for_prefetch = (
             bool(query.prefetch_related_fields) and not values_mode
         )
+        return query, sf, values_mode, sr_fields, collect_for_prefetch
+
+    def _iterator(self) -> Iterator[_T]:
+        connection = self._get_connection()
+        query, sf, values_mode, sr_fields, collect_for_prefetch = self._iter_setup()
+        sql, params = query.as_select(connection)
+        rows = connection.execute(sql, params)
 
         instances: list[_T] = []
 
         for row in rows:
             if values_mode:
                 assert sf is not None
-                if hasattr(row, "keys"):
-                    yield dict(row)  # type: ignore
-                else:
-                    yield dict(zip(sf, row))  # type: ignore
+                yield self._row_to_values_dict(row, sf)  # type: ignore
                 continue
 
             instance = self.model._from_db_row(row, connection)  # type: ignore[misc]
@@ -801,29 +819,16 @@ class QuerySet(Generic[_T]):
 
     async def _aiterator(self) -> AsyncIterator[_T]:
         conn = self._get_async_connection()
-        query = self._query
-        if not query.order_by_fields and self.model._meta.ordering:
-            query = query.clone()
-            query.order_by_fields = list(self.model._meta.ordering)
+        query, sf, values_mode, sr_fields, collect_for_prefetch = self._iter_setup()
         sql, params = query.as_select(conn)
         rows = await conn.execute(sql, params)
-
-        sf = query.selected_fields
-        values_mode = sf is not None and not query.deferred_loading
-        sr_fields = query.select_related_fields
-        collect_for_prefetch = (
-            bool(query.prefetch_related_fields) and not values_mode
-        )
 
         instances: list[_T] = []
 
         for row in rows:
             if values_mode:
                 assert sf is not None
-                if hasattr(row, "keys"):
-                    yield dict(row)  # type: ignore
-                else:
-                    yield dict(zip(sf, row))  # type: ignore
+                yield self._row_to_values_dict(row, sf)  # type: ignore
                 continue
 
             instance = self.model._from_db_row(row, conn)  # type: ignore[misc]
@@ -1074,6 +1079,28 @@ class QuerySet(Generic[_T]):
                         if obj.__dict__.get(meta.pk.attname) is None:
                             obj.__dict__[meta.pk.attname] = pk
         return objs
+
+    async def abulk_update(
+        self, objs: list[_T], fields: list[str], batch_size: int = 1000
+    ) -> int:
+        """Async version of :meth:`bulk_update`. Updates the given fields on
+        each object in a single transaction, one UPDATE per row."""
+        if not objs:
+            return 0
+        from .transaction import aatomic
+
+        count = 0
+        async with aatomic(using=self._db):
+            for obj in objs:
+                update_kwargs: dict[str, Any] = {}
+                for fname in fields:
+                    try:
+                        field = self.model._meta.get_field(fname)
+                        update_kwargs[fname] = obj.__dict__.get(field.attname)
+                    except Exception:
+                        update_kwargs[fname] = obj.__dict__.get(fname)
+                count += await self.filter(pk=obj.pk).aupdate(**update_kwargs)
+        return count
 
     async def ain_bulk(
         self, id_list: list[Any], field_name: str = "pk"

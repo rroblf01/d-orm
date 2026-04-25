@@ -29,6 +29,10 @@ class SQLiteDatabaseWrapper:
         return conn
 
     def get_connection(self) -> sqlite3.Connection:
+        # Auto-reconnect: if the cached connection no longer responds to a
+        # trivial probe (process forked, file deleted, etc.), discard and
+        # reopen. Errors during the close attempt are intentionally ignored —
+        # the connection is being thrown away regardless.
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             try:
@@ -102,7 +106,11 @@ class SQLiteDatabaseWrapper:
             conn.commit()
         return cursor.rowcount
 
-    def execute_insert(self, sql: str, params=None):
+    def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
+        # pk_col is accepted for parity with the PostgreSQL backend; SQLite
+        # always returns cursor.lastrowid (which equals the PK for INTEGER
+        # PRIMARY KEY columns regardless of name).
+        del pk_col
         conn = self.get_connection()
         try:
             cursor = conn.execute(self._adapt(sql), params or [])
@@ -183,13 +191,11 @@ class SQLiteAsyncDatabaseWrapper:
 
     async def _check_loop(self) -> None:
         """Reset connection and lock if the running event loop has changed."""
-        current_loop = asyncio.get_event_loop()
+        current_loop = asyncio.get_running_loop()
         if self._loop is not current_loop:
-            if self._conn is not None:
-                try:
-                    await self._conn.close()
-                except Exception:
-                    pass
+            # Don't await close() on a connection from a dead loop — its
+            # worker thread is daemonized and will be reaped at exit. Just
+            # drop the reference so the next op opens a fresh connection.
             self._conn = None
             self._loop = current_loop
             self._lock = asyncio.Lock()
@@ -315,7 +321,9 @@ class SQLiteAsyncDatabaseWrapper:
                 normalize_db_exception(exc)
                 raise
 
-    async def execute_insert(self, sql: str, params=None):
+    async def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
+        # pk_col accepted for parity with PostgreSQL; aiosqlite uses lastrowid.
+        del pk_col
         async with self._operation_conn() as conn:
             try:
                 cursor = await conn.execute(self._adapt(sql), params or [])

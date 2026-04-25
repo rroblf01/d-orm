@@ -301,7 +301,8 @@ class Model(metaclass=ModelBase):
 
         query = SQLQuery(self.__class__)
         sql, params = query.as_insert(fields, values, conn)
-        pk = conn.execute_insert(sql, params)
+        pk_col = meta.pk.column if meta.pk else "id"
+        pk = conn.execute_insert(sql, params, pk_col=pk_col)
         if meta.pk and pk is not None:
             self.__dict__[meta.pk.attname] = pk
 
@@ -438,7 +439,8 @@ class Model(metaclass=ModelBase):
 
         query = SQLQuery(self.__class__)
         sql, params = query.as_insert(fields, values, conn)
-        pk = await conn.execute_insert(sql, params)
+        pk_col = meta.pk.column if meta.pk else "id"
+        pk = await conn.execute_insert(sql, params, pk_col=pk_col)
         if meta.pk and pk is not None:
             self.__dict__[meta.pk.attname] = pk
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -202,7 +201,6 @@ def test_daemon_warning_when_thread_attr_missing(tmp_path: Path, monkeypatch):
     import asyncio
     import warnings
 
-    import dorm
     from dorm.db.backends.sqlite import SQLiteAsyncDatabaseWrapper
 
     class FakePending:
@@ -233,8 +231,8 @@ def test_daemon_warning_when_thread_attr_missing(tmp_path: Path, monkeypatch):
         return FakePending()
 
     fake_aiosqlite = type(sys)("aiosqlite")
-    fake_aiosqlite.connect = fake_connect
-    fake_aiosqlite.Row = FakeRow
+    fake_aiosqlite.connect = fake_connect  # type: ignore
+    fake_aiosqlite.Row = FakeRow  # type: ignore
     monkeypatch.setitem(sys.modules, "aiosqlite", fake_aiosqlite)
 
     wrapper = SQLiteAsyncDatabaseWrapper({"NAME": ":memory:"})
@@ -280,3 +278,203 @@ def test_daemon_no_warning_with_real_aiosqlite(tmp_path: Path):
     ]
     assert daemon_warnings == [], \
         f"unexpected daemon warning: {[str(w.message) for w in daemon_warnings]}"
+
+
+# ── Fix #1: custom-PK-column on PostgreSQL ────────────────────────────────────
+
+
+def test_execute_insert_with_custom_pk_col():
+    """Backend-level test: execute_insert(..., pk_col=NAME) must return the
+    value from the named column. Guards against the prior bug where the PG
+    backend hardcoded `RETURNING id`."""
+    from dorm.db.connection import get_connection
+    conn = get_connection()
+
+    # Build a table with a non-default PK column name.
+    if conn.vendor == "sqlite":
+        ddl = (
+            'CREATE TABLE "test_cli_pkcol" ('
+            '"custom_pk" INTEGER PRIMARY KEY AUTOINCREMENT, '
+            '"name" VARCHAR(50) NOT NULL)'
+        )
+    else:  # postgresql
+        ddl = (
+            'CREATE TABLE "test_cli_pkcol" ('
+            '"custom_pk" SERIAL PRIMARY KEY, '
+            '"name" VARCHAR(50) NOT NULL)'
+        )
+    try:
+        conn.execute_script('DROP TABLE IF EXISTS "test_cli_pkcol"')
+    except Exception:
+        pass
+    conn.execute_script(ddl)
+
+    # The query builder emits %s for sqlite and $N for postgres. Match that.
+    insert_ph = "%s" if conn.vendor == "sqlite" else "$1"
+    select_ph = "%s" if conn.vendor == "sqlite" else "$1"
+
+    try:
+        new_pk = conn.execute_insert(
+            f'INSERT INTO "test_cli_pkcol" ("name") VALUES ({insert_ph})',
+            ["Alice"],
+            pk_col="custom_pk",
+        )
+        assert new_pk is not None
+        assert new_pk == 1
+
+        rows = conn.execute(
+            f'SELECT "name" FROM "test_cli_pkcol" WHERE "custom_pk" = {select_ph}',
+            [new_pk],
+        )
+        assert len(rows) == 1
+        # Row may be a sqlite3.Row or dict (psycopg dict_row); both indexable by "name".
+        assert rows[0]["name"] == "Alice"
+    finally:
+        conn.execute_script('DROP TABLE IF EXISTS "test_cli_pkcol"')
+
+
+# ── Fix #2: get_running_loop instead of get_event_loop ────────────────────────
+
+
+def test_no_get_event_loop_in_backends():
+    """Source code should not call deprecated asyncio.get_event_loop()."""
+    sqlite_src = (REPO_ROOT / "dorm/db/backends/sqlite.py").read_text()
+    pg_src = (REPO_ROOT / "dorm/db/backends/postgresql.py").read_text()
+    assert "get_event_loop()" not in sqlite_src, \
+        "sqlite.py still uses deprecated asyncio.get_event_loop()"
+    assert "get_event_loop()" not in pg_src, \
+        "postgresql.py still uses deprecated asyncio.get_event_loop()"
+
+
+def test_async_sqlite_no_deprecation_across_loops(tmp_path: Path):
+    """Two consecutive asyncio.run() calls must not emit a DeprecationWarning
+    for asyncio.get_event_loop()."""
+    pytest.importorskip("aiosqlite")
+    import asyncio
+    import warnings
+
+    from dorm.db.backends.sqlite import SQLiteAsyncDatabaseWrapper
+
+    db_file = tmp_path / "loops.sqlite3"
+    wrapper = SQLiteAsyncDatabaseWrapper({"NAME": str(db_file)})
+
+    async def use_it():
+        await wrapper.execute_script("CREATE TABLE IF NOT EXISTS t (x INTEGER)")
+        await wrapper.execute("SELECT 1")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        asyncio.run(use_it())
+        asyncio.run(use_it())
+
+    deps = [
+        w for w in caught
+        if issubclass(w.category, DeprecationWarning)
+        and "get_event_loop" in str(w.message)
+    ]
+    assert deps == [], f"unexpected deprecation warnings: {[str(w.message) for w in deps]}"
+
+
+# ── Fix #5: _to_pyformat skips placeholders inside string literals ────────────
+
+
+def test_to_pyformat_basic():
+    from dorm.db.backends.postgresql import _to_pyformat
+    assert _to_pyformat("SELECT * FROM t WHERE a = $1 AND b = $2") == \
+        "SELECT * FROM t WHERE a = %s AND b = %s"
+
+
+def test_to_pyformat_skips_string_literals():
+    """A literal '$1 USD' inside a string must NOT be converted."""
+    from dorm.db.backends.postgresql import _to_pyformat
+    assert _to_pyformat("SELECT '$1 USD' FROM t WHERE x = $1") == \
+        "SELECT '$1 USD' FROM t WHERE x = %s"
+
+
+def test_to_pyformat_skips_quoted_identifiers():
+    """A quoted identifier "col$1" must NOT be converted."""
+    from dorm.db.backends.postgresql import _to_pyformat
+    assert _to_pyformat('SELECT "col$1" FROM t WHERE x = $2') == \
+        'SELECT "col$1" FROM t WHERE x = %s'
+
+
+def test_to_pyformat_handles_escaped_quotes():
+    """Doubled-up quotes ('') inside a literal don't terminate the literal."""
+    from dorm.db.backends.postgresql import _to_pyformat
+    assert _to_pyformat("INSERT INTO t VALUES ('a''$1', $1)") == \
+        "INSERT INTO t VALUES ('a''$1', %s)"
+
+
+def test_to_pyformat_multidigit_placeholders():
+    from dorm.db.backends.postgresql import _to_pyformat
+    sql = "INSERT INTO t VALUES (" + ",".join(f"${i}" for i in range(1, 13)) + ")"
+    out = _to_pyformat(sql)
+    assert "%s" in out
+    assert "$" not in out
+
+
+# ── Fix #6: dorm init template includes pool tuning hints ─────────────────────
+
+
+def test_init_template_includes_pool_settings(tmp_path: Path):
+    """`dorm init` should emit pool-tuning comments for PostgreSQL."""
+    result = _run([sys.executable, "-m", "dorm", "init"], cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    body = (tmp_path / "settings.py").read_text()
+    assert "MIN_POOL_SIZE" in body
+    assert "MAX_POOL_SIZE" in body
+    assert "POOL_TIMEOUT" in body
+    assert "application_name" in body or "sslmode" in body, \
+        "OPTIONS examples for psycopg keys should appear in the template"
+
+
+def test_init_with_app_creates_files(tmp_path: Path):
+    """`dorm init --app NAME` should create NAME/__init__.py and models.py."""
+    result = _run([sys.executable, "-m", "dorm", "init", "--app", "users"], cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "settings.py").exists()
+    assert (tmp_path / "users" / "__init__.py").exists()
+    models = (tmp_path / "users" / "models.py").read_text()
+    assert "class User(dorm.Model)" in models
+
+
+def test_init_does_not_overwrite_existing_settings(tmp_path: Path):
+    """Existing settings.py must not be clobbered."""
+    (tmp_path / "settings.py").write_text("# my custom settings\n")
+    result = _run([sys.executable, "-m", "dorm", "init"], cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "settings.py").read_text() == "# my custom settings\n"
+    assert "already exists" in result.stdout.lower()
+
+
+# ── Fix #7: POOL_TIMEOUT setting is honored ───────────────────────────────────
+
+
+def test_pool_timeout_is_passed_to_pool():
+    """POOL_TIMEOUT from settings should reach ConnectionPool(timeout=...)."""
+    from dorm.db.backends.postgresql import PostgreSQLDatabaseWrapper
+
+    wrapper = PostgreSQLDatabaseWrapper({
+        "NAME": "test",
+        "USER": "test",
+        "POOL_TIMEOUT": 7.5,
+    })
+    assert wrapper._pool_timeout == 7.5
+
+
+def test_pool_timeout_default():
+    from dorm.db.backends.postgresql import PostgreSQLDatabaseWrapper
+    wrapper = PostgreSQLDatabaseWrapper({"NAME": "test", "USER": "test"})
+    assert wrapper._pool_timeout == 30.0
+
+
+# ── Fix #8: dorm help mentions `init` ─────────────────────────────────────────
+
+
+def test_help_lists_init_and_help(tmp_path: Path):
+    result = _run([sys.executable, "-m", "dorm", "help"], cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "init" in result.stdout
+    assert "help" in result.stdout
+    assert "IPython" in result.stdout, "shell help should mention IPython"
+    assert "--app" in result.stdout or "starter app" in result.stdout.lower()

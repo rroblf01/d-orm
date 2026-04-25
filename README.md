@@ -84,10 +84,14 @@ DATABASES = {
         "PASSWORD": "secret",
         "HOST": "localhost",
         "PORT": 5432,
-        "MIN_POOL_SIZE": 1,   # default
-        "MAX_POOL_SIZE": 10,  # default
+        "MIN_POOL_SIZE": 1,    # default
+        "MAX_POOL_SIZE": 10,   # default
+        "POOL_TIMEOUT": 30.0,  # seconds to wait for a free pool connection
         "OPTIONS": {
-            "sslmode": "require",    # passed directly to psycopg
+            # Keys here are passed straight to psycopg.connect() — use
+            # psycopg names (lowercase), not Django-style uppercase ones.
+            "sslmode": "require",
+            "application_name": "myapp",
             "connect_timeout": 10,
         },
     }
@@ -836,28 +840,87 @@ async def main():
     objs = [Author(name=f"User{i}", email=f"u{i}@x.com", age=20) for i in range(100)]
     await Author.objects.abulk_create(objs)
 
+    # Bulk update of multiple objects
+    for a in fetched_authors:
+        a.age += 1
+    await Author.objects.abulk_update(fetched_authors, fields=["age"])
+
     # Async aggregation
     result = await Author.objects.aaggregate(total=dorm.Count("id"), avg=dorm.Avg("age"))
 
 asyncio.run(main())
 ```
 
+### Awaiting a queryset
+
+A QuerySet is also directly awaitable. Use `values()` / `values_list()` (they
+return a chainable QuerySet) and then `await` to materialize the whole result
+in one expression:
+
+```python
+# Same chainable surface as the sync API, but consumed with a single await.
+rows = await Author.objects.values("name", "age").filter(age__gte=18).order_by("name")
+# rows is a list[dict[str, Any]]
+
+# Equivalent async-iterator form (use this for streaming):
+async for row in Author.objects.values("name", "age").filter(age__gte=18):
+    print(row)
+```
+
+`avalues()` / `avalues_list()` still exist as terminal materializers if you
+prefer a single call over the chained form.
+
+### Cancellation
+
+If an `await` inside a queryset call is cancelled (e.g. `asyncio.wait_for`
+expires), connection cleanup depends on the backend:
+
+- **PostgreSQL:** the pool's connection context manager runs on cancellation
+  and returns the connection to the pool, rolling back any in-flight
+  transaction.
+- **SQLite (aiosqlite):** the SQL statement may still complete in the worker
+  thread after cancellation; the result is discarded. The next operation
+  reuses the same connection. If you need a guaranteed rollback, wrap the
+  cancellable section in `async with dorm.transaction.aatomic(): ...`.
+
+### Mixing sync and async on the same SQLite database
+
+`get_connection()` and `get_async_connection()` return separate wrappers, so
+sync and async code on the same SQLite file open distinct underlying
+connections. This is fine in most cases, but be aware that the default
+`DELETE` journal mode acquires file-level locks, so heavy interleaving can
+serialize. If you need both sync and async with concurrency, set
+`OPTIONS={"journal_mode": "WAL"}` in `DATABASES["default"]`.
+
 ---
 
 ## Transactions
 
+`atomic()` and `aatomic()` work as **context managers** or as **decorators**.
+
 ```python
 import dorm
 
-# Sync
+# ── Context manager form ──────────────────────────────────────────────────────
+
 with dorm.transaction.atomic():
     author = Author.objects.create(name="Alice", age=30)
     Book.objects.create(title="My Book", author_id=author.pk)
 
-# Async
 async with dorm.transaction.aatomic():
     author = await Author.objects.acreate(name="Alice", age=30)
     await Book.objects.acreate(title="My Book", author_id=author.pk)
+
+# ── Decorator form ────────────────────────────────────────────────────────────
+
+@dorm.transaction.atomic
+def transfer_funds(src_id, dst_id, amount):
+    Account.objects.filter(pk=src_id).update(balance=F("balance") - amount)
+    Account.objects.filter(pk=dst_id).update(balance=F("balance") + amount)
+
+@dorm.transaction.aatomic("replica")
+async def report():
+    return await Author.objects.acount()
 ```
 
 ### Savepoint nesting
@@ -907,6 +970,13 @@ myproject/
 ### CLI commands
 
 ```bash
+# Scaffold settings.py in the current directory (both SQLite and PostgreSQL
+# blocks are generated commented out — uncomment whichever you need).
+dorm init
+
+# Same, plus an app folder with __init__.py and a starter models.py
+dorm init --app blog
+
 # Detect model changes and generate migration files
 dorm makemigrations
 
@@ -924,9 +994,14 @@ dorm shell
 
 # Override settings explicitly
 dorm makemigrations --settings=myproject.settings
+
+# Print this list any time
+dorm help
 ```
 
-`--settings` is optional. dorm resolves settings in order: `--settings` flag → `DORM_SETTINGS` env var → `settings` module in current directory.
+You can also invoke the CLI as a module: `python -m dorm <command>`.
+
+`--settings` is optional. dorm resolves settings in order: `--settings` flag → `DORM_SETTINGS` env var → `settings` module in current directory. Both the directory containing `settings.py` and its parent are added to `sys.path`, so apps work in flat layouts (`settings.py` next to `app/`) and dotted-package layouts (`myproject/settings.py` with `INSTALLED_APPS=["myproject.app"]`).
 
 ### Undoing migrations
 

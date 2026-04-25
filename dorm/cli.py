@@ -317,6 +317,17 @@ Uncomment the DATABASES block for the backend you want to use.
 #         "PASSWORD": "postgres",
 #         "HOST": "localhost",
 #         "PORT": 5432,
+#         # Connection pool tuning (defaults shown):
+#         # "MIN_POOL_SIZE": 1,
+#         # "MAX_POOL_SIZE": 10,
+#         # "POOL_TIMEOUT": 30.0,   # seconds to wait for a free connection
+#         # OPTIONS are passed straight to psycopg.connect — use psycopg keys,
+#         # not Django-style names. Examples:
+#         # "OPTIONS": {
+#         #     "sslmode": "require",
+#         #     "application_name": "myapp",
+#         #     "connect_timeout": 10,
+#         # },
 #     }
 # }
 

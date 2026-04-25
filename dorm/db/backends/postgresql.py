@@ -1,18 +1,60 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import threading
 from contextlib import asynccontextmanager, contextmanager
 
 from ..utils import ASYNC_ATOMIC_STATE, normalize_db_exception
 
-_POSITIONAL_PLACEHOLDER = re.compile(r"\$\d+")
-
-
 def _to_pyformat(sql: str) -> str:
-    """Convert $1, $2, ... placeholders to %s (psycopg3 style)."""
-    return _POSITIONAL_PLACEHOLDER.sub("%s", sql)
+    """Convert $1, $2, ... placeholders to %s (psycopg3 style), skipping
+    occurrences inside single-quoted string literals and double-quoted
+    identifiers so user-supplied data containing $N is never mangled."""
+    out: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            # Single-quoted literal — handle SQL '' escape sequence.
+            out.append(c)
+            i += 1
+            while i < n:
+                if sql[i] == "'" and i + 1 < n and sql[i + 1] == "'":
+                    out.append("''")
+                    i += 2
+                    continue
+                out.append(sql[i])
+                if sql[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == '"':
+            # Double-quoted identifier — handle "" escape.
+            out.append(c)
+            i += 1
+            while i < n:
+                if sql[i] == '"' and i + 1 < n and sql[i + 1] == '"':
+                    out.append('""')
+                    i += 2
+                    continue
+                out.append(sql[i])
+                if sql[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == "$" and i + 1 < n and sql[i + 1].isdigit():
+            j = i + 1
+            while j < n and sql[j].isdigit():
+                j += 1
+            out.append("%s")
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _build_dsn(settings: dict) -> dict:
@@ -46,6 +88,7 @@ class PostgreSQLDatabaseWrapper:
         self._dsn = _build_dsn(settings)
         self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
+        self._pool_timeout = float(settings.get("POOL_TIMEOUT", 30.0))
         self._pool = None
         self._pool_lock = threading.Lock()
         self._local = threading.local()  # per-instance atomic state per thread
@@ -76,6 +119,7 @@ class PostgreSQLDatabaseWrapper:
                     _dsn_to_conninfo(self._dsn),
                     min_size=self._min_size,
                     max_size=self._max_size,
+                    timeout=self._pool_timeout,
                     open=True,
                     kwargs={"row_factory": dict_row},
                     check=ConnectionPool.check_connection,
@@ -115,18 +159,29 @@ class PostgreSQLDatabaseWrapper:
             finally:
                 self._local.atomic_depth = depth
 
-    def _exec(self, conn, sql: str, params, *, write: bool = False, insert: bool = False):
+    def _exec(
+        self,
+        conn,
+        sql: str,
+        params,
+        *,
+        write: bool = False,
+        insert: bool = False,
+        pk_col: str = "id",
+    ):
         try:
             with conn.cursor() as cur:
-                _sql = _to_pyformat(sql) + (" RETURNING id" if insert else "")
+                _sql = _to_pyformat(sql) + (f' RETURNING "{pk_col}"' if insert else "")
                 cur.execute(_sql, params or [])
                 if insert:
                     row = cur.fetchone()
-                    return row["id"] if row else None
+                    return row[pk_col] if row else None
                 if write:
                     return cur.rowcount
                 try:
                     return cur.fetchall()
+                # cur.fetchall() raises ProgrammingError on statements that
+                # produce no result set (DDL, etc.); treat that as "no rows".
                 except Exception:
                     return []
         except Exception as exc:
@@ -166,12 +221,12 @@ class PostgreSQLDatabaseWrapper:
         with self._get_pool().connection() as c:
             return self._exec(c, sql, params, write=True)
 
-    def execute_insert(self, sql: str, params=None):
+    def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
         conn = self._choose_conn()
         if conn is not None:
-            return self._exec(conn, sql, params, insert=True)
+            return self._exec(conn, sql, params, insert=True, pk_col=pk_col)
         with self._get_pool().connection() as c:
-            return self._exec(c, sql, params, insert=True)
+            return self._exec(c, sql, params, insert=True, pk_col=pk_col)
 
     def _exec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
         try:
@@ -257,6 +312,7 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._dsn = _build_dsn(settings)
         self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
+        self._pool_timeout = float(settings.get("POOL_TIMEOUT", 30.0))
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pool_lock = asyncio.Lock()
@@ -264,17 +320,15 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._autocommit_conn = None
 
     async def _get_pool(self):
-        current_loop = asyncio.get_event_loop()
+        current_loop = asyncio.get_running_loop()
 
         if self._loop is not current_loop and self._pool is not None:
-            old_pool = self._pool
+            # Don't await close() on the old pool — its tasks/connections
+            # belong to a dead loop and awaiting them on the new loop is
+            # unreliable. Drop the reference and let GC handle sockets.
             self._pool = None
             self._loop = None
             self._pool_lock = asyncio.Lock()
-            try:
-                await old_pool.close()
-            except Exception:
-                pass
 
         if self._pool is not None:
             return self._pool
@@ -293,6 +347,7 @@ class PostgreSQLAsyncDatabaseWrapper:
                     _dsn_to_conninfo(self._dsn),
                     min_size=self._min_size,
                     max_size=self._max_size,
+                    timeout=self._pool_timeout,
                     open=False,
                     kwargs={"row_factory": dict_row},
                     check=AsyncConnectionPool.check_connection,
@@ -334,18 +389,28 @@ class PostgreSQLAsyncDatabaseWrapper:
             finally:
                 ASYNC_ATOMIC_STATE.reset(token)
 
-    async def _aexec(self, conn, sql: str, params, *, write: bool = False, insert: bool = False):
+    async def _aexec(
+        self,
+        conn,
+        sql: str,
+        params,
+        *,
+        write: bool = False,
+        insert: bool = False,
+        pk_col: str = "id",
+    ):
         try:
             async with conn.cursor() as cur:
-                _sql = _to_pyformat(sql) + (" RETURNING id" if insert else "")
+                _sql = _to_pyformat(sql) + (f' RETURNING "{pk_col}"' if insert else "")
                 await cur.execute(_sql, params or [])
                 if insert:
                     row = await cur.fetchone()
-                    return row["id"] if row else None
+                    return row[pk_col] if row else None
                 if write:
                     return cur.rowcount
                 try:
                     return await cur.fetchall()
+                # See sync _exec: DDL statements raise on fetchall().
                 except Exception:
                     return []
         except Exception as exc:
@@ -384,12 +449,12 @@ class PostgreSQLAsyncDatabaseWrapper:
         async with (await self._get_pool()).connection() as c:
             return await self._aexec(c, sql, params, write=True)
 
-    async def execute_insert(self, sql: str, params=None):
+    async def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
         conn = await self._choose_conn()
         if conn is not None:
-            return await self._aexec(conn, sql, params, insert=True)
+            return await self._aexec(conn, sql, params, insert=True, pk_col=pk_col)
         async with (await self._get_pool()).connection() as c:
-            return await self._aexec(c, sql, params, insert=True)
+            return await self._aexec(c, sql, params, insert=True, pk_col=pk_col)
 
     async def _aexec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
         try:

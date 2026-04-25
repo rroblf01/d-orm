@@ -181,6 +181,11 @@ class BaseManager(Generic[_T]):
     async def abulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
         return await self.get_queryset().abulk_create(objs, batch_size)
 
+    async def abulk_update(
+        self, objs: list[_T], fields: list[str], batch_size: int = 1000
+    ) -> int:
+        return await self.get_queryset().abulk_update(objs, fields, batch_size)
+
     async def ain_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
         return await self.get_queryset().ain_bulk(id_list, field_name)
 
