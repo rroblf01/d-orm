@@ -256,6 +256,7 @@ def _meta_apply(cls_name: str, namespace: dict, meta_cls: type) -> None:
     meta_fields = getattr(meta_cls, "fields", "__all__")
     meta_exclude = tuple(getattr(meta_cls, "exclude", ()))
     meta_optional = tuple(getattr(meta_cls, "optional", ()))
+    meta_nested = dict(getattr(meta_cls, "nested", {}) or {})
 
     if meta_fields != "__all__" and meta_exclude:
         raise TypeError(
@@ -267,9 +268,13 @@ def _meta_apply(cls_name: str, namespace: dict, meta_cls: type) -> None:
     # in __annotations__ — affects field ordering in generated JSON Schema.
     annotations = dict(user_annotations)
 
+    fields_by_name = {f.name: f for f in model_cls._meta.fields}
+
     for f in model_cls._meta.fields:
-        # Skip non-column fields (M2M, computed, etc.).
-        if not f.column or isinstance(f, ManyToManyField):
+        # Skip non-column fields (M2M, computed, etc.). M2M can still be
+        # opted into nested serialization via Meta.nested.
+        is_m2m = isinstance(f, ManyToManyField)
+        if not f.column and not is_m2m:
             continue
         if meta_fields != "__all__" and f.name not in meta_fields:
             continue
@@ -278,6 +283,27 @@ def _meta_apply(cls_name: str, namespace: dict, meta_cls: type) -> None:
         # User declared this field explicitly — respect it.
         if f.name in user_annotations:
             continue
+        if is_m2m and f.name not in meta_nested:
+            # M2M fields are skipped by default; user must opt in via nested.
+            continue
+
+        # Nested relation? Use the configured sub-schema instead of the bare
+        # PK / int — useful for FastAPI response models with ``publisher: PublisherOut``.
+        if f.name in meta_nested:
+            sub_schema = meta_nested[f.name]
+            from ..fields import ForeignKey, OneToOneField
+
+            if isinstance(f, ManyToManyField):
+                annotations[f.name] = list[sub_schema]
+                namespace.setdefault(f.name, [])
+                continue
+            if isinstance(f, (ForeignKey, OneToOneField)):
+                annotations[f.name] = sub_schema | None if f.null else sub_schema
+                if f.null:
+                    namespace.setdefault(f.name, None)
+                continue
+            # Non-relational field listed in nested — fall through to the
+            # normal scalar handling.
 
         py_type = _field_to_type(f)
         is_optional = (
@@ -291,6 +317,15 @@ def _meta_apply(cls_name: str, namespace: dict, meta_cls: type) -> None:
             namespace.setdefault(f.name, None)
         else:
             annotations[f.name] = py_type
+
+    # Detect typos / extras in Meta.nested early so the user knows.
+    for nested_name in meta_nested:
+        if nested_name not in fields_by_name:
+            raise TypeError(
+                f"{cls_name}.Meta.nested references unknown field {nested_name!r}; "
+                f"valid fields: {sorted(fields_by_name)}"
+            )
+
     namespace["__annotations__"] = annotations
     # Drop the lazy annotate function so Pydantic uses our merged dict
     # instead of re-evaluating user-only annotations from PEP 649.
@@ -360,6 +395,19 @@ class DormSchema(BaseModel, metaclass=DormSchemaMeta):
                 model = User
                 exclude = ("id", "created_at")
                 optional = ("phone",)        # nullable in this schema only
+
+    Nested relations: pass ``Meta.nested`` mapping a relation field name
+    to the sub-schema you want serialized. FK / O2O become the sub-schema
+    (``Type | None`` if nullable); M2M becomes ``list[SubSchema]``::
+
+        class PublisherOut(DormSchema):
+            class Meta:
+                model = Publisher
+
+        class AuthorOut(DormSchema):
+            class Meta:
+                model = Author
+                nested = {"publisher": PublisherOut}    # author.publisher → PublisherOut | None
     """
 
     model_config = ConfigDict(

@@ -46,7 +46,7 @@ class Signal:
 
     # ── Dispatch ─────────────────────────────────────────────────────────────
 
-    def send(self, sender: type, **kwargs: Any) -> list[tuple[Callable, Any]]:
+    def send(self, sender: Any, **kwargs: Any) -> list[tuple[Callable, Any]]:
         responses: list[tuple[Callable, Any]] = []
         live: list[tuple[Any, Any, type | None, bool]] = []
         for uid, ref, filt_sender, is_weak in self._receivers:
@@ -75,3 +75,14 @@ pre_save = Signal()
 post_save = Signal()
 pre_delete = Signal()
 post_delete = Signal()
+
+# Query observability — fired around every SQL statement so users can
+# wire metrics, distributed tracing (OpenTelemetry, Datadog), or custom
+# diagnostics. Receivers should be cheap; heavy work belongs elsewhere.
+#
+# pre_query  receivers: ``def recv(sender=<vendor str>, sql, params): ...``
+# post_query receivers: ``def recv(sender=<vendor str>, sql, params, elapsed_ms, error): ...``
+#
+# ``error`` is the raised exception (or None if the statement succeeded).
+pre_query = Signal()
+post_query = Signal()

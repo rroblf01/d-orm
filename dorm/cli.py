@@ -259,6 +259,64 @@ def cmd_showmigrations(args):
         executor.show_migrations(app, mig_dir)
 
 
+def cmd_dbcheck(args):
+    """Compare each model's column set with what's currently in the
+    database and print drift. Useful when the schema was edited by hand
+    or when migrations have been mis-applied. Exit code 0 when in sync,
+    1 when any drift is found."""
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
+    _load_apps(installed_apps)
+
+    from .db.connection import get_connection
+    from .models import _model_registry
+
+    conn = get_connection()
+
+    apps_to_check = args.apps if args.apps else installed_apps
+    drift_found = False
+
+    for app in apps_to_check:
+        models = [
+            m for label, m in _model_registry.items()
+            if "." not in label and m._meta.app_label == app and not m._meta.abstract
+        ]
+        if not models:
+            continue
+        print(f"App '{app}':")
+        for model in models:
+            table = model._meta.db_table
+            if not conn.table_exists(table):
+                drift_found = True
+                print(f"  ✗ {model.__name__}: table {table!r} missing")
+                continue
+
+            db_columns = {c["name"] for c in conn.get_table_columns(table)}
+            model_columns = {f.column for f in model._meta.fields if f.column}
+
+            missing = model_columns - db_columns      # in model, not in DB
+            extra = db_columns - model_columns        # in DB, not in model
+
+            if not missing and not extra:
+                print(f"  ✓ {model.__name__} ({table})")
+                continue
+
+            drift_found = True
+            print(f"  ✗ {model.__name__} ({table}):")
+            for c in sorted(missing):
+                print(f"      missing in DB: {c}")
+            for c in sorted(extra):
+                print(f"      missing in model: {c}")
+
+    if drift_found:
+        print("\nDrift detected. Run 'dorm makemigrations' / 'dorm migrate' to reconcile.")
+        sys.exit(1)
+    print("\nAll checked models match the database schema.")
+
+
 def cmd_shell(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
@@ -468,6 +526,20 @@ def main():
     )
     sh.add_argument("--settings", default=None)
     sh.set_defaults(func=cmd_shell)
+
+    # dbcheck
+    dc = sub.add_parser(
+        "dbcheck",
+        help="Compare each model's columns against the live database schema "
+             "and print drift (missing columns, hand-edited tables, etc.). "
+             "Exits non-zero when drift is found — useful as a pre-deploy gate.",
+    )
+    dc.add_argument(
+        "apps", nargs="*",
+        help="App labels to check (default: all)",
+    )
+    dc.add_argument("--settings", default=None)
+    dc.set_defaults(func=cmd_dbcheck)
 
     # init
     ini = sub.add_parser(

@@ -95,6 +95,44 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Flask), batch sizing guidance, and a "Production deployment" section
   covering logging, migration safety, pool sizing, and shutdown.
 
+### Production hardening
+- **Transient-error retry.** PostgreSQL execute paths automatically retry
+  ``OperationalError`` / ``InterfaceError`` (network blips, server
+  restart, RDS failover) up to ``DORM_RETRY_ATTEMPTS`` (default 3) with
+  exponential backoff (``DORM_RETRY_BACKOFF`` seconds, default 0.1s).
+  Retries are disabled while inside a transaction so committed work is
+  never re-applied. SQLite retries on "database is locked" too. Helpers
+  ``with_transient_retry`` / ``awith_transient_retry`` are exposed in
+  ``dorm.db.utils`` for user-driven retry of arbitrary code.
+- **Query observability hooks.** New ``dorm.pre_query`` and
+  ``dorm.post_query`` ``Signal`` instances fire around every SQL
+  statement. ``post_query`` receivers also see ``elapsed_ms`` and
+  ``error`` (or ``None``), which is enough to wire OpenTelemetry,
+  Datadog, Prometheus, or any custom metric / tracing backend without
+  patching dorm internals.
+- **Lifecycle INFO logs.** Pool open and close events log at INFO on
+  ``dorm.db.lifecycle.postgresql`` (db, host, pool sizes, timeout,
+  check flag). Per-query DEBUG and slow-query WARNING channels are
+  unchanged.
+
+### Pydantic / FastAPI
+- **Nested relations in ``DormSchema``.** ``Meta.nested`` now accepts a
+  mapping ``{field_name: SubSchema}``: ForeignKey / OneToOne fields
+  serialize as the sub-schema (``Type | None`` if nullable),
+  ManyToManyField serializes as ``list[SubSchema]``. Lets a FastAPI
+  ``response_model`` deliver embedded objects directly, no manual
+  validators needed.
+
+### CLI
+- **``dorm dbcheck``.** Compares each model's column set with the live
+  database schema and prints drift (missing tables, columns missing in
+  the DB, columns missing in the model). Exits non-zero when drift is
+  found, so it doubles as a pre-deploy gate.
+
+### Versioning
+- README adds a *Versioning and deprecation policy* section: SemVer
+  scope, deprecation cycle, stable / unstable surfaces.
+
 ### Type safety
 - **`Field` is now generic in the stored Python type** (`Field[str]`,
   `Field[int]`, `Field[datetime]`, …). Each concrete subclass declares

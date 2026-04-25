@@ -997,6 +997,10 @@ dorm migrate blog
 # Show migration status ([ ] pending, [X] applied)
 dorm showmigrations
 
+# Compare each model's columns with what's actually in the DB and exit
+# non-zero on drift — handy as a pre-deploy gate.
+dorm dbcheck
+
 # Interactive shell (IPython if available — top-level await works out of the box)
 dorm shell
 
@@ -1019,6 +1023,27 @@ dorm migrate blog 0002
 
 # Undo all migrations for an app
 dorm migrate blog zero
+```
+
+### Detecting schema drift
+
+`dorm dbcheck` compares each model's column set with what's currently in
+the database and prints any drift — missing tables, columns missing in
+the DB (model added a field that wasn't migrated) or in the model
+(column edited by hand on the server). Exits non-zero when drift is
+found, so it's a useful pre-deploy gate:
+
+```bash
+dorm dbcheck                  # check every app
+dorm dbcheck blog shop        # check specific apps
+```
+
+```
+App 'blog':
+  ✓ Author (authors)
+  ✗ Post (posts):
+      missing in DB: published_at
+Drift detected. Run 'dorm makemigrations' / 'dorm migrate' to reconcile.
 ```
 
 ### Concurrent migrations and rolling deploys
@@ -1543,7 +1568,9 @@ A short checklist for running djanorm in production.
 ### Logging
 
 Every SQL statement is logged at `DEBUG` on a per-vendor logger. Slow queries
-(default ≥ 500 ms) are also emitted at `WARNING`.
+(default ≥ 500 ms) are emitted at `WARNING`. Pool open/close events go to
+`INFO` on `dorm.db.lifecycle.<vendor>` so ops can trace boot/shutdown
+without per-query noise.
 
 ```python
 import logging
@@ -1551,10 +1578,56 @@ import logging
 logging.getLogger("dorm.db.backends.postgresql").setLevel(logging.DEBUG)
 # Or just enable warnings (slow queries) without per-statement noise:
 logging.getLogger("dorm.db").setLevel(logging.WARNING)
+# Boot / shutdown only:
+logging.getLogger("dorm.db.lifecycle").setLevel(logging.INFO)
 ```
 
 Tune the slow-query threshold with the `DORM_SLOW_QUERY_MS` environment
 variable (default `500`).
+
+### Query observability hooks
+
+`dorm.pre_query` and `dorm.post_query` are dispatch-style signals fired
+around every SQL statement, so you can wire metrics / tracing without
+touching dorm internals:
+
+```python
+import dorm
+
+def trace(sender, sql, params, elapsed_ms, error):
+    # sender is the vendor string ("postgresql", "sqlite").
+    if error is not None:
+        my_metrics.incr(f"dorm.query.error.{sender}")
+    else:
+        my_metrics.timing(f"dorm.query.elapsed.{sender}", elapsed_ms)
+
+dorm.post_query.connect(trace, weak=False)
+```
+
+Receivers must be cheap — they run inline on every query.
+
+### Transient-error retry
+
+PostgreSQL execute paths automatically retry on `OperationalError` /
+`InterfaceError` (network blip, server restart, RDS failover) up to
+`DORM_RETRY_ATTEMPTS` times (default 3) with exponential backoff
+starting at `DORM_RETRY_BACKOFF` seconds (default 0.1). Retries are
+disabled while inside a transaction so committed state is never
+re-applied.
+
+```bash
+export DORM_RETRY_ATTEMPTS=5    # more aggressive recovery
+export DORM_RETRY_BACKOFF=0.25
+```
+
+For arbitrary user code that touches the DB, use the helpers directly:
+
+```python
+from dorm.db.utils import with_transient_retry, awith_transient_retry
+
+result = with_transient_retry(lambda: my_complex_query())
+result = await awith_transient_retry(lambda: my_async_query())
+```
 
 ### Migration safety under rolling deploys
 
@@ -1643,6 +1716,35 @@ async def get_user(pk: int) -> User:
 | `fields` | tuple of field names to include, or `"__all__"` (default) |
 | `exclude` | tuple of field names to drop; mutually exclusive with `fields` |
 | `optional` | tuple of field names to mark optional with default `None`, even if non-null on the model — useful for PATCH bodies |
+| `nested` | dict mapping FK / O2O / M2M field names to a sub-`DormSchema`; serializes the embedded object instead of the bare PK |
+
+##### Embedded relations
+
+Use `Meta.nested` to serialize related rows inline (a typical FastAPI
+response pattern):
+
+```python
+class PublisherOut(DormSchema):
+    class Meta:
+        model = Publisher
+
+class TagOut(DormSchema):
+    class Meta:
+        model = Tag
+
+class AuthorOut(DormSchema):
+    class Meta:
+        model = Author
+        nested = {"publisher": PublisherOut}     # ForeignKey → PublisherOut | None
+
+class ArticleOut(DormSchema):
+    class Meta:
+        model = Article
+        nested = {"tags": TagOut}                 # ManyToManyField → list[TagOut]
+```
+
+Forward FK / OneToOne fields that are nullable yield ``Type | None``;
+M2M always yields ``list[Type]`` (even if empty).
 
 Notes:
 
@@ -1757,6 +1859,41 @@ as shown above. Otherwise dorm relies on:
 - aiosqlite worker threads being marked daemon (so the interpreter can
   exit even if you forget to close).
 - An `atexit` hook that closes sync connections.
+
+---
+
+## Versioning and deprecation policy
+
+djanorm follows [Semantic Versioning 2.0](https://semver.org/spec/v2.0.0.html):
+``MAJOR.MINOR.PATCH``.
+
+- **MAJOR** — breaking changes to the public API documented in this README.
+  Removal of a field type, a backwards-incompatible change to model
+  declarations, dropping support for a Python or DB version, or any rename
+  that breaks `import dorm` symbols all qualify.
+- **MINOR** — new features, performance improvements, and additions to the
+  public API. Existing code keeps working.
+- **PATCH** — bug fixes and internal refactors that don't touch the
+  documented surface.
+
+**Deprecation cycle.** Anything we plan to remove gets marked with a
+``DeprecationWarning`` in a MINOR release and stays around for at least
+**one full MINOR cycle** before disappearing in the next MAJOR. The
+[CHANGELOG](CHANGELOG.md) flags every deprecation under a ``Deprecated``
+heading so users can audit before upgrading.
+
+**Stability scopes.**
+
+| Scope | Stability |
+|---|---|
+| Top-level ``dorm.*`` exports listed in ``__all__`` | Stable — full SemVer guarantee |
+| ``dorm.transaction``, ``dorm.signals``, ``dorm.contrib.pydantic`` | Stable |
+| Model meta API (``Model._meta``) | Stable |
+| ``dorm.db.connection`` (``get_connection``, ``get_async_connection``, ``close_all_async``) | Stable |
+| ``dorm.db.backends.*`` internal cursor/pool plumbing | **Unstable** — refactor freely between minors |
+| Names prefixed with ``_`` anywhere | Private — change without notice |
+
+If you're pinning, ``djanorm>=X.0,<X+1.0`` is safe within a major.
 
 ---
 

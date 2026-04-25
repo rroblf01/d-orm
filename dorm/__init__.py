@@ -31,7 +31,15 @@ Quick start:
 
 from .conf import configure, settings
 from . import signals, transaction
-from .signals import Signal, post_delete, post_save, pre_delete, pre_save
+from .signals import (
+    Signal,
+    post_delete,
+    post_query,
+    post_save,
+    pre_delete,
+    pre_query,
+    pre_save,
+)
 from .exceptions import (
     DatabaseError,
     DoesNotExist,
@@ -121,6 +129,8 @@ __all__ = [
     "post_save",
     "pre_delete",
     "post_delete",
+    "pre_query",
+    "post_query",
     # Base
     "Model",
     "Manager",

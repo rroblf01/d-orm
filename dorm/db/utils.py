@@ -39,14 +39,134 @@ def _slow_query_ms() -> float:
         return 500.0
 
 
+# ── Transient-error retry ─────────────────────────────────────────────────────
+# DBs occasionally drop connections (network blip, server restart, RDS
+# failover). Retrying *outside* a transaction is safe and recovers
+# transparently. Retrying *inside* a transaction is NOT safe — committed
+# state would be re-applied. Backends pass ``in_transaction=True`` to skip
+# retry when atomic_depth > 0.
+
+_TRANSIENT_RETRY_ATTEMPTS = int(os.environ.get("DORM_RETRY_ATTEMPTS", "3"))
+_TRANSIENT_RETRY_BACKOFF = float(os.environ.get("DORM_RETRY_BACKOFF", "0.1"))
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Detect connection-level errors worth retrying. Programming errors,
+    integrity errors, etc. are NOT transient and must propagate."""
+    import sqlite3
+
+    if isinstance(exc, sqlite3.OperationalError):
+        msg = str(exc).lower()
+        # SQLite "database is locked" is transient under contention.
+        return "locked" in msg or "busy" in msg
+    try:
+        import psycopg
+        # psycopg.OperationalError covers connection_failure, admin_shutdown,
+        # crash_shutdown, cannot_connect_now, idle_in_transaction_timeout.
+        # InterfaceError fires when the connection is unusable.
+        if isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError)):
+            return True
+    except ImportError:
+        pass
+    return False
+
+
+def with_transient_retry(
+    func,
+    *,
+    in_transaction: bool = False,
+    attempts: int | None = None,
+    backoff: float | None = None,
+):
+    """Run ``func()`` with simple exponential-backoff retry on transient
+    DB errors. Skips retries while inside a transaction (would re-apply
+    already-committed work)."""
+    n = attempts if attempts is not None else _TRANSIENT_RETRY_ATTEMPTS
+    bo = backoff if backoff is not None else _TRANSIENT_RETRY_BACKOFF
+    if in_transaction or n <= 1:
+        return func()
+
+    log = logging.getLogger("dorm.db")
+    last_exc: BaseException | None = None
+    for attempt in range(1, n + 1):
+        try:
+            return func()
+        except Exception as exc:
+            if not _is_transient(exc) or attempt >= n:
+                raise
+            last_exc = exc
+            sleep_for = bo * (2 ** (attempt - 1))
+            log.warning(
+                "Transient DB error (attempt %d/%d, retrying in %.2fs): %s",
+                attempt,
+                n,
+                sleep_for,
+                exc,
+            )
+            time.sleep(sleep_for)
+    # Unreachable, but keeps type checkers happy.
+    if last_exc is not None:
+        raise last_exc
+
+
+async def awith_transient_retry(
+    coro_factory,
+    *,
+    in_transaction: bool = False,
+    attempts: int | None = None,
+    backoff: float | None = None,
+):
+    """Async counterpart of :func:`with_transient_retry`. ``coro_factory``
+    is a 0-arg callable that returns a fresh coroutine on each retry —
+    coroutines can only be awaited once."""
+    import asyncio
+
+    n = attempts if attempts is not None else _TRANSIENT_RETRY_ATTEMPTS
+    bo = backoff if backoff is not None else _TRANSIENT_RETRY_BACKOFF
+    if in_transaction or n <= 1:
+        return await coro_factory()
+
+    log = logging.getLogger("dorm.db")
+    last_exc: BaseException | None = None
+    for attempt in range(1, n + 1):
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            if not _is_transient(exc) or attempt >= n:
+                raise
+            last_exc = exc
+            sleep_for = bo * (2 ** (attempt - 1))
+            log.warning(
+                "Transient DB error (attempt %d/%d, retrying in %.2fs): %s",
+                attempt,
+                n,
+                sleep_for,
+                exc,
+            )
+            await asyncio.sleep(sleep_for)
+    if last_exc is not None:
+        raise last_exc
+
+
 @contextmanager
 def log_query(vendor: str, sql: str, params=None):
-    """Time a SQL statement, emitting DEBUG for every query and WARNING when
-    the elapsed time exceeds DORM_SLOW_QUERY_MS. The logger name is
-    ``dorm.db.backends.<vendor>`` so users can filter per backend."""
+    """Time a SQL statement and dispatch query observability signals.
+
+    Emits DEBUG for every query, WARNING above ``DORM_SLOW_QUERY_MS``,
+    and fires ``dorm.signals.pre_query`` / ``post_query`` so user code can
+    wire metrics or tracing.
+    """
+    # Lazy import to avoid the circular dorm.signals → dorm.db at startup.
+    from ..signals import pre_query, post_query
+
+    pre_query.send(sender=vendor, sql=sql, params=params)
     start = time.perf_counter()
+    error: BaseException | None = None
     try:
         yield
+    except BaseException as exc:
+        error = exc
+        raise
     finally:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         log = logging.getLogger(f"dorm.db.backends.{vendor}")
@@ -57,6 +177,13 @@ def log_query(vendor: str, sql: str, params=None):
             log.warning(
                 "slow query (%.2fms ≥ %.0fms): %s", elapsed_ms, threshold, sql
             )
+        post_query.send(
+            sender=vendor,
+            sql=sql,
+            params=params,
+            elapsed_ms=elapsed_ms,
+            error=error,
+        )
 
 
 def raise_migration_hint(exc: Exception) -> None:

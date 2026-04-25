@@ -353,9 +353,23 @@ class RunPython(Operation):
 
 
 def _field_to_column_sql(fname: str, field, connection) -> str:
-    from ..fields import AutoField, BigAutoField, SmallAutoField
+    from ..fields import AutoField, BigAutoField, ForeignKey, OneToOneField, SmallAutoField
 
-    col = getattr(field, "column", fname) or fname
+    # Field instances re-created from a migration file haven't gone through
+    # ``contribute_to_class``, so ``field.column`` is None. Reproduce the
+    # naming rules here:
+    #   - FK / O2O: ``<name>_id`` (or db_column override)
+    #   - everything else: ``<name>`` (or db_column override)
+    col = getattr(field, "column", None)
+    if not col:
+        db_column = getattr(field, "db_column", None)
+        if db_column:
+            col = db_column
+        elif isinstance(field, (ForeignKey, OneToOneField)):
+            col = f"{fname}_id"
+        else:
+            col = fname
+
     db_t = field.db_type(connection)
     if db_t is None:
         return ""  # M2M field, skip

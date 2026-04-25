@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
-from ..utils import ASYNC_ATOMIC_STATE, log_query, normalize_db_exception
+from ..utils import (
+    ASYNC_ATOMIC_STATE,
+    awith_transient_retry,
+    log_query,
+    normalize_db_exception,
+    with_transient_retry,
+)
+
+# Lifecycle (pool open/close, autocommit toggle, etc.) at INFO so ops can
+# trace boot / shutdown without DEBUG-level per-query noise.
+_lifecycle = logging.getLogger("dorm.db.lifecycle.postgresql")
 
 def _to_pyformat(sql: str) -> str:
     """Convert $1, $2, ... placeholders to %s (psycopg3 style), skipping
@@ -133,6 +144,15 @@ class PostgreSQLDatabaseWrapper:
                     _dsn_to_conninfo(self._dsn),
                     **pool_kwargs,
                 )
+                _lifecycle.info(
+                    "sync pool opened: db=%s host=%s min=%d max=%d timeout=%.1fs check=%s",
+                    self._dsn.get("dbname"),
+                    self._dsn.get("host"),
+                    self._min_size,
+                    self._max_size,
+                    self._pool_timeout,
+                    self._pool_check,
+                )
         return self._pool
 
     @contextmanager
@@ -218,25 +238,40 @@ class PostgreSQLDatabaseWrapper:
         return None
 
     def execute(self, sql: str, params=None) -> list:
-        conn = self._choose_conn()
-        if conn is not None:
-            return self._exec(conn, sql, params)
-        with self._get_pool().connection() as c:
-            return self._exec(c, sql, params)
+        in_tx = self._atomic_conn is not None
+
+        def _do() -> list:
+            conn = self._choose_conn()
+            if conn is not None:
+                return self._exec(conn, sql, params)
+            with self._get_pool().connection() as c:
+                return self._exec(c, sql, params)
+
+        return with_transient_retry(_do, in_transaction=in_tx)
 
     def execute_write(self, sql: str, params=None) -> int:
-        conn = self._choose_conn()
-        if conn is not None:
-            return self._exec(conn, sql, params, write=True)
-        with self._get_pool().connection() as c:
-            return self._exec(c, sql, params, write=True)
+        in_tx = self._atomic_conn is not None
+
+        def _do() -> int:
+            conn = self._choose_conn()
+            if conn is not None:
+                return self._exec(conn, sql, params, write=True)
+            with self._get_pool().connection() as c:
+                return self._exec(c, sql, params, write=True)
+
+        return with_transient_retry(_do, in_transaction=in_tx)
 
     def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
-        conn = self._choose_conn()
-        if conn is not None:
-            return self._exec(conn, sql, params, insert=True, pk_col=pk_col)
-        with self._get_pool().connection() as c:
-            return self._exec(c, sql, params, insert=True, pk_col=pk_col)
+        in_tx = self._atomic_conn is not None
+
+        def _do():
+            conn = self._choose_conn()
+            if conn is not None:
+                return self._exec(conn, sql, params, insert=True, pk_col=pk_col)
+            with self._get_pool().connection() as c:
+                return self._exec(c, sql, params, insert=True, pk_col=pk_col)
+
+        return with_transient_retry(_do, in_transaction=in_tx)
 
     def _exec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
         with log_query("postgresql", sql, params):
@@ -251,11 +286,16 @@ class PostgreSQLDatabaseWrapper:
                 raise
 
     def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
-        conn = self._choose_conn()
-        if conn is not None:
-            return self._exec_bulk(conn, sql, params, pk_col)
-        with self._get_pool().connection() as c:
-            return self._exec_bulk(c, sql, params, pk_col)
+        in_tx = self._atomic_conn is not None
+
+        def _do() -> list[int]:
+            conn = self._choose_conn()
+            if conn is not None:
+                return self._exec_bulk(conn, sql, params, pk_col)
+            with self._get_pool().connection() as c:
+                return self._exec_bulk(c, sql, params, pk_col)
+
+        return with_transient_retry(_do, in_transaction=in_tx)
 
     def execute_script(self, sql: str):
         with self._get_pool().connection() as conn:
@@ -313,6 +353,7 @@ class PostgreSQLDatabaseWrapper:
         if self._pool is not None:
             self._pool.close()
             self._pool = None
+            _lifecycle.info("sync pool closed: db=%s", self._dsn.get("dbname"))
 
 
 class PostgreSQLAsyncDatabaseWrapper:
@@ -371,6 +412,15 @@ class PostgreSQLAsyncDatabaseWrapper:
                 await pool.open()
                 self._pool = pool
                 self._loop = current_loop
+                _lifecycle.info(
+                    "async pool opened: db=%s host=%s min=%d max=%d timeout=%.1fs check=%s",
+                    self._dsn.get("dbname"),
+                    self._dsn.get("host"),
+                    self._min_size,
+                    self._max_size,
+                    self._pool_timeout,
+                    self._pool_check,
+                )
         return self._pool
 
     @asynccontextmanager
@@ -452,26 +502,39 @@ class PostgreSQLAsyncDatabaseWrapper:
             return await self._get_autocommit_conn()
         return None
 
+    def _in_async_atomic(self) -> bool:
+        state = ASYNC_ATOMIC_STATE.get()
+        return state is not None and state[0] is self
+
     async def execute(self, sql: str, params=None) -> list:
-        conn = await self._choose_conn()
-        if conn is not None:
-            return await self._aexec(conn, sql, params)
-        async with (await self._get_pool()).connection() as c:
-            return await self._aexec(c, sql, params)
+        async def _do():
+            conn = await self._choose_conn()
+            if conn is not None:
+                return await self._aexec(conn, sql, params)
+            async with (await self._get_pool()).connection() as c:
+                return await self._aexec(c, sql, params)
+
+        return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
 
     async def execute_write(self, sql: str, params=None) -> int:
-        conn = await self._choose_conn()
-        if conn is not None:
-            return await self._aexec(conn, sql, params, write=True)
-        async with (await self._get_pool()).connection() as c:
-            return await self._aexec(c, sql, params, write=True)
+        async def _do():
+            conn = await self._choose_conn()
+            if conn is not None:
+                return await self._aexec(conn, sql, params, write=True)
+            async with (await self._get_pool()).connection() as c:
+                return await self._aexec(c, sql, params, write=True)
+
+        return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
 
     async def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
-        conn = await self._choose_conn()
-        if conn is not None:
-            return await self._aexec(conn, sql, params, insert=True, pk_col=pk_col)
-        async with (await self._get_pool()).connection() as c:
-            return await self._aexec(c, sql, params, insert=True, pk_col=pk_col)
+        async def _do():
+            conn = await self._choose_conn()
+            if conn is not None:
+                return await self._aexec(conn, sql, params, insert=True, pk_col=pk_col)
+            async with (await self._get_pool()).connection() as c:
+                return await self._aexec(c, sql, params, insert=True, pk_col=pk_col)
+
+        return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
 
     async def _aexec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
         with log_query("postgresql", sql, params):
@@ -486,11 +549,14 @@ class PostgreSQLAsyncDatabaseWrapper:
                 raise
 
     async def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
-        conn = await self._choose_conn()
-        if conn is not None:
-            return await self._aexec_bulk(conn, sql, params, pk_col)
-        async with (await self._get_pool()).connection() as c:
-            return await self._aexec_bulk(c, sql, params, pk_col)
+        async def _do():
+            conn = await self._choose_conn()
+            if conn is not None:
+                return await self._aexec_bulk(conn, sql, params, pk_col)
+            async with (await self._get_pool()).connection() as c:
+                return await self._aexec_bulk(c, sql, params, pk_col)
+
+        return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
 
     async def execute_script(self, sql: str):
         async with (await self._get_pool()).connection() as conn:
@@ -543,3 +609,4 @@ class PostgreSQLAsyncDatabaseWrapper:
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
+            _lifecycle.info("async pool closed: db=%s", self._dsn.get("dbname"))
