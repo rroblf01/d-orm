@@ -32,6 +32,7 @@ dev = [
     "ty>=0.0.32",
     "ruff>=0.15.11",
     "testcontainers[postgres]>=4.14.2",
+    "pytest-xdist>=3.8.0"
 ]
 sqlite = ["aiosqlite>=0.22.1"]
 postgresql = ["psycopg[binary,pool]>=3.3.3"]

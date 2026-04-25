@@ -21,7 +21,7 @@ jobs:
         run: uv sync --extra=all
 
       - name: Run tests
-        run: uv run pytest --tb=short -q
+        run: uv run pytest -n 4 --tb=short -q
 
   # ── Build source distribution and wheel ───────────────────────────────────
   build:
