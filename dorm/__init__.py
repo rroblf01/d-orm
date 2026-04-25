@@ -68,6 +68,7 @@ from .functions import (
     When,
 )
 from .fields import (
+    ArrayField,
     AutoField,
     BigAutoField,
     BigIntegerField,
@@ -166,6 +167,7 @@ __all__ = [
     "GenericIPAddressField",
     "JSONField",
     "BinaryField",
+    "ArrayField",
     "ForeignKey",
     "OneToOneField",
     "ManyToManyField",

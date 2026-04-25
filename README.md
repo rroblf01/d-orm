@@ -1633,6 +1633,44 @@ dorm.post_query.connect(trace, weak=False)
 
 Receivers must be cheap — they run inline on every query.
 
+#### OpenTelemetry integration
+
+Distributed tracing for every dorm query in ~15 lines — no monkey-patching:
+
+```python
+from opentelemetry import trace
+import dorm
+
+tracer = trace.get_tracer("dorm.db")
+
+def _span_for_query(sender, sql, params):
+    span = tracer.start_span(f"db.{sender}.query")
+    span.set_attribute("db.system", sender)
+    span.set_attribute("db.statement", sql)
+    # Stash the span on a contextvar so post_query can close it.
+    _active_spans.set(span)
+
+def _close_span(sender, sql, params, elapsed_ms, error):
+    span = _active_spans.get(None)
+    if span is None:
+        return
+    span.set_attribute("db.duration_ms", elapsed_ms)
+    if error is not None:
+        span.record_exception(error)
+        span.set_status(trace.Status(trace.StatusCode.ERROR))
+    span.end()
+
+import contextvars
+_active_spans: contextvars.ContextVar = contextvars.ContextVar("dorm_otel_span")
+
+dorm.pre_query.connect(_span_for_query, weak=False)
+dorm.post_query.connect(_close_span, weak=False)
+```
+
+Every query becomes a `db.postgresql.query` (or `db.sqlite.query`)
+span attached to the current trace context — visible in Jaeger,
+Honeycomb, Datadog, anywhere with an OTel exporter.
+
 ### Transient-error retry
 
 PostgreSQL execute paths automatically retry on `OperationalError` /
@@ -1679,6 +1717,84 @@ to avoid cold-start latency on the first request.
 
 If you've eliminated stale-connection bugs and want to shave per-query
 latency, set `POOL_CHECK=False` to skip the per-checkout `SELECT 1` probe.
+
+### Secrets management
+
+Don't put database passwords in source control. The `DATABASES` dict
+accepts plain values, so any secrets backend that materializes them
+into Python at startup works. Three patterns from least to most
+operational:
+
+**1. Environment variables** (good for local dev, basic deploys):
+
+```python
+import os
+import dorm
+
+dorm.configure(
+    DATABASES={
+        "default": {
+            "ENGINE": "postgresql",
+            "NAME": os.environ["DB_NAME"],
+            "USER": os.environ["DB_USER"],
+            "PASSWORD": os.environ["DB_PASSWORD"],
+            "HOST": os.environ.get("DB_HOST", "localhost"),
+            "PORT": int(os.environ.get("DB_PORT", "5432")),
+        }
+    },
+)
+```
+
+**2. `pydantic-settings`** (typed, validated, supports `.env` files):
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+import dorm
+
+class DBConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="DB_", env_file=".env")
+    name: str
+    user: str
+    password: str
+    host: str = "localhost"
+    port: int = 5432
+
+cfg = DBConfig()  # fails fast if a required var is missing
+dorm.configure(
+    DATABASES={"default": {
+        "ENGINE": "postgresql",
+        **cfg.model_dump(),
+        "NAME": cfg.name,
+    }},
+)
+```
+
+**3. AWS Secrets Manager / HashiCorp Vault** (production):
+
+```python
+import boto3, json
+import dorm
+
+secret = json.loads(
+    boto3.client("secretsmanager")
+    .get_secret_value(SecretId="prod/dorm/db")["SecretString"]
+)
+
+dorm.configure(
+    DATABASES={"default": {
+        "ENGINE": "postgresql",
+        "NAME": secret["dbname"],
+        "USER": secret["username"],
+        "PASSWORD": secret["password"],
+        "HOST": secret["host"],
+        "PORT": secret["port"],
+        "OPTIONS": {"sslmode": "require"},  # always TLS in prod
+    }},
+)
+```
+
+The SSL line is the easy one to forget — without it the connection
+travels in cleartext within the VPC.
 
 ### Health check endpoint
 

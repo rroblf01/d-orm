@@ -16,6 +16,63 @@ _DORM_MIGRATION_LOCK_ID = 0x646F726D  # "dorm" as ASCII hex
 _log = logging.getLogger("dorm.migrations")
 
 
+class _DryRunConnection:
+    """Drop-in replacement for the real connection that *captures* SQL
+    instead of executing it. Used by ``dorm migrate --dry-run`` so SREs
+    can review the exact statements before unleashing them on prod."""
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+        self.captured: list[tuple[str, list]] = []
+        # Mirror these attributes so migration operations that introspect
+        # the wrapper continue to work.
+        self.vendor = getattr(real_conn, "vendor", "sqlite")
+        self.settings = getattr(real_conn, "settings", {})
+
+    def _record(self, sql: str, params=None) -> None:
+        self.captured.append((sql, list(params or [])))
+
+    # ── Reads pass through to the real connection (we still need real
+    #    table_exists / column lookups for autodetectors etc.) ──────────────
+    def execute(self, sql, params=None):
+        # Treat reads as pass-through; mutating SQL goes through the
+        # capturing methods below.
+        sql_upper = sql.lstrip().upper()
+        if sql_upper.startswith(("SELECT", "WITH", "PRAGMA", "EXPLAIN")):
+            return self._real.execute(sql, params)
+        self._record(sql, params)
+        return []
+
+    def execute_script(self, sql):
+        self._record(sql)
+
+    def execute_write(self, sql, params=None) -> int:
+        self._record(sql, params)
+        return 0
+
+    def execute_insert(self, sql, params=None, pk_col: str = "id"):
+        self._record(sql, params)
+        return None
+
+    def execute_bulk_insert(self, sql, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
+        self._record(sql, params)
+        return []
+
+    def table_exists(self, name: str) -> bool:
+        return self._real.table_exists(name)
+
+    def get_table_columns(self, name: str) -> list[dict]:
+        return self._real.get_table_columns(name)
+
+    def atomic(self):
+        return self._real.atomic()
+
+    def __getattr__(self, name):
+        # Anything we didn't override (e.g. `_atomic_conn`, `_get_pool`) goes
+        # straight to the real wrapper.
+        return getattr(self._real, name)
+
+
 @contextmanager
 def _migration_lock(connection):
     """Acquire a cross-process lock for the duration of a migration run.
@@ -70,8 +127,20 @@ class MigrationExecutor:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def migrate(self, app_label: str, migrations_dir: str | Path) -> None:
-        """Apply all pending migrations for *app_label*."""
+    def migrate(
+        self,
+        app_label: str,
+        migrations_dir: str | Path,
+        dry_run: bool = False,
+    ) -> list[tuple[str, list]] | None:
+        """Apply all pending migrations for *app_label*.
+
+        When ``dry_run=True``, no SQL hits the database — instead the
+        wrapper captures every statement an operation would have
+        executed and returns the list. The migration recorder is **not**
+        updated, so subsequent runs see the same set of pending
+        migrations. Useful as a pre-deploy review step.
+        """
         migrations_dir = Path(migrations_dir)
         with _migration_lock(self.connection):
             self.loader.load(migrations_dir, app_label)
@@ -81,7 +150,9 @@ class MigrationExecutor:
             # Auto-mark squashed migrations as applied when all their replaces are done
             self._sync_squashed(app_label, all_migs)
             applied = self._applied_names(app_label)
-            self._apply_forward(app_label, all_migs, applied)
+            return self._apply_forward(
+                app_label, all_migs, applied, dry_run=dry_run
+            )
 
     def rollback(self, app_label: str, migrations_dir: str | Path, target: str) -> None:
         """Roll back applied migrations until *target* is the latest applied.
@@ -181,7 +252,8 @@ class MigrationExecutor:
         all_migs: list,
         applied: set[str],
         target_num: int | None = None,
-    ) -> None:
+        dry_run: bool = False,
+    ) -> list[tuple[str, list]] | None:
         unapplied = [
             (num, name, mod) for num, name, mod in all_migs
             if name not in applied and (target_num is None or num <= target_num)
@@ -189,24 +261,42 @@ class MigrationExecutor:
         if not unapplied:
             if self.verbosity:
                 print(f"  No migrations to apply for '{app_label}'.")
-            return
+            return [] if dry_run else None
 
         from_state = self.loader.get_migration_state(app_label)
-        for number, name, module in unapplied:
-            if self.verbosity:
-                print(f"  Applying {app_label}.{name}...", end=" ")
+        # In dry-run mode, swap the executor's connection for a capturing
+        # proxy. Pass-through reads still hit the real DB; writes are
+        # recorded.
+        original_conn = self.connection
+        capture_conn = _DryRunConnection(self.connection) if dry_run else None
+        if capture_conn is not None:
+            self.connection = capture_conn
 
-            to_state = from_state.clone()
-            for op in getattr(module, "operations", []):
-                op.state_forwards(app_label, to_state)
-                op.database_forwards(app_label, self.connection, from_state, to_state)
-                from_state = to_state.clone()
+        try:
+            for number, name, module in unapplied:
+                if self.verbosity:
+                    label = "Would apply" if dry_run else "Applying"
+                    print(f"  {label} {app_label}.{name}...", end=" ")
 
-            self.recorder.record_applied(app_label, name)
-            for rep_app, rep_name in getattr(module, "replaces", []):
-                self.recorder.record_applied(rep_app, rep_name)
-            if self.verbosity:
-                print("OK")
+                to_state = from_state.clone()
+                for op in getattr(module, "operations", []):
+                    op.state_forwards(app_label, to_state)
+                    op.database_forwards(app_label, self.connection, from_state, to_state)
+                    from_state = to_state.clone()
+
+                if not dry_run:
+                    self.recorder.record_applied(app_label, name)
+                    for rep_app, rep_name in getattr(module, "replaces", []):
+                        self.recorder.record_applied(rep_app, rep_name)
+                if self.verbosity:
+                    print("OK")
+        finally:
+            if capture_conn is not None:
+                self.connection = original_conn
+
+        if dry_run and capture_conn is not None:
+            return capture_conn.captured
+        return None
 
     def _rollback_to(
         self,

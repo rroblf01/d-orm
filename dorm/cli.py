@@ -224,6 +224,7 @@ def cmd_migrate(args):
 
     app_label = getattr(args, "app_label", None)
     target = getattr(args, "target", None)
+    dry_run = getattr(args, "dry_run", False)
     apps = [app_label] if app_label else installed_apps
 
     for app in apps:
@@ -232,12 +233,23 @@ def cmd_migrate(args):
             print(f"  No migrations directory for '{app}'. Run makemigrations first.")
             continue
         if target:
+            if dry_run:
+                print("  Error: --dry-run is not supported with a target.")
+                sys.exit(1)
             try:
                 executor.migrate_to(app, mig_dir, target)
             except ValueError as exc:
                 print(f"  Error: {exc}")
         else:
-            executor.migrate(app, mig_dir)
+            captured = executor.migrate(app, mig_dir, dry_run=dry_run)
+            if dry_run and captured:
+                print(f"\n--- SQL that would run for '{app}' ---")
+                for sql, params in captured:
+                    sql_print = sql.strip()
+                    print(f"\n{sql_print};")
+                    if params:
+                        print(f"  -- params: {params!r}")
+                print()
 
 
 def cmd_showmigrations(args):
@@ -257,6 +269,65 @@ def cmd_showmigrations(args):
     for app in apps:
         mig_dir = _find_migrations_dir(app)
         executor.show_migrations(app, mig_dir)
+
+
+def cmd_sql(args):
+    """Print the ``CREATE TABLE`` DDL for one or more models. Resolves
+    each name as either a bare class name (``User``) or an
+    app-qualified name (``users.User``). Useful for copying schema to
+    ops, diffing against production, or generating fixture seeds."""
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
+    _load_apps(installed_apps)
+
+    from .db.connection import get_connection
+    from .migrations.operations import _field_to_column_sql
+    from .models import _model_registry
+
+    conn = get_connection()
+
+    if args.all:
+        targets = [
+            (label, model)
+            for label, model in _model_registry.items()
+            if "." not in label and not model._meta.abstract
+        ]
+    else:
+        if not args.names:
+            print("Error: pass model names or --all.")
+            sys.exit(1)
+        targets = []
+        for name in args.names:
+            # Match by class name OR by app.ClassName
+            matches = [
+                (label, m) for label, m in _model_registry.items()
+                if "." not in label and not m._meta.abstract
+                and (m.__name__ == name or label == name)
+            ]
+            if not matches:
+                print(f"Error: model {name!r} not found in INSTALLED_APPS.")
+                sys.exit(1)
+            targets.extend(matches)
+
+    for label, model in targets:
+        table = model._meta.db_table
+        cols = [
+            _field_to_column_sql(f.name, f, conn)
+            for f in model._meta.fields
+            if f.db_type(conn)
+        ]
+        cols = [c for c in cols if c]
+        ddl = (
+            f'-- {model.__name__} ({label})\n'
+            f'CREATE TABLE "{table}" (\n  '
+            + ",\n  ".join(cols)
+            + "\n);"
+        )
+        print(ddl)
+        print()
 
 
 def cmd_dbcheck(args):
@@ -491,6 +562,15 @@ def main():
              "applies forward or rolls back as needed",
     )
     mg.add_argument("--verbosity", type=int, default=1)
+    mg.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print the SQL that would be executed without touching the "
+             "database. The migration recorder is NOT updated, so the "
+             "next run still sees the same set of pending migrations. "
+             "Recommended as a pre-deploy review step.",
+    )
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)
 
@@ -526,6 +606,23 @@ def main():
     )
     sh.add_argument("--settings", default=None)
     sh.set_defaults(func=cmd_shell)
+
+    # sql — dump CREATE TABLE for given models
+    sq2 = sub.add_parser(
+        "sql",
+        help="Print the CREATE TABLE DDL for one or more models. "
+             "Useful for sharing schema with DBAs or seeding fixtures.",
+    )
+    sq2.add_argument(
+        "names", nargs="*",
+        help="Model names — bare (``User``) or app-qualified (``users.User``).",
+    )
+    sq2.add_argument(
+        "--all", action="store_true", default=False,
+        help="Dump every model in INSTALLED_APPS.",
+    )
+    sq2.add_argument("--settings", default=None)
+    sq2.set_defaults(func=cmd_sql)
 
     # dbcheck
     dc = sub.add_parser(

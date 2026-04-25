@@ -95,6 +95,51 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Flask), batch sizing guidance, and a "Production deployment" section
   covering logging, migration safety, pool sizing, and shutdown.
 
+### Operational tooling
+- **`dorm migrate --dry-run`** prints the exact SQL that would run
+  without touching the database. Recorder is not updated, so the
+  next plain ``migrate`` re-detects the same pending migrations.
+  Pre-deploy review gate for SREs / DBAs.
+- **`QuerySet.explain(analyze=True)` / `aexplain()`.** Returns the
+  database's query plan as a string — ``EXPLAIN (ANALYZE, BUFFERS)``
+  on PG, ``EXPLAIN QUERY PLAN`` on SQLite. Diagnose slow production
+  queries without leaving Python.
+- **`dorm sql <Model>`** (or ``--all``) prints the ``CREATE TABLE`` DDL
+  for one or more models. Useful for sharing schema with DBAs or for
+  diffing against production by hand.
+
+### New field types
+- **``ArrayField(base_field)``** for native PostgreSQL array columns.
+  Accepts list / tuple / iterator inputs; ``db_type`` raises
+  ``NotImplementedError`` on SQLite so the limitation surfaces at
+  migrate time rather than at first query.
+
+### New lookups
+- ``array_contains`` (``@>``), ``array_overlap`` (``&&``),
+  ``json_has_key`` (``?``), ``json_has_any`` (``?|``),
+  ``json_has_all`` (``?&``) — vendor-specific membership / key
+  checks for PG arrays and JSONB columns. The pre-existing
+  ``__contains`` lookup stays string-LIKE for back-compat; reach
+  for the explicit array/json names when the column type demands it.
+
+### Build / CI
+- **Coverage gate** in CI: ``--cov-fail-under=73`` so accidental
+  drops break the build. Raise the threshold whenever you add tests.
+- **Dependabot config** (``.github/dependabot.yml``): weekly grouped
+  PRs for pip + GitHub Actions versions.
+- **`docs` extra + GitHub Pages workflow** (``mkdocs-material`` +
+  ``mkdocstrings``) — `mkdocs serve` for local preview, automatic
+  deploy to `gh-pages` on every push to ``main``.
+
+### Docs
+- **API reference site** (``docs/index.md``, ``docs/api/*.md``,
+  ``mkdocs.yml``) auto-generates from package docstrings.
+- **`docs/migration-from-django.md`** — cheat sheet for users
+  porting code from Django ORM to dorm.
+- **README sections**: Secrets management (env vars / pydantic-settings
+  / AWS Secrets Manager), OpenTelemetry integration snippet for the
+  query observability hooks.
+
 ### Production deployment helpers
 - **Health check.** ``dorm.health_check(alias)`` and
   ``dorm.ahealth_check(alias)`` run ``SELECT 1`` against the configured

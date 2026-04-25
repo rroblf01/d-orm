@@ -47,7 +47,14 @@ postgresql = ["psycopg[binary,pool]>=3.3.3"]
 # schema at the boundary), so pydantic.EmailStr / HttpUrl are NOT used and
 # email-validator is not required.
 pydantic = ["pydantic>=2.0"]
-all = ["djanorm[dev,sqlite,postgresql,pydantic]"]
+# Build the API reference site at https://rroblf01.github.io/d-orm/
+# locally: ``uv run mkdocs serve``
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+]
+all = ["djanorm[dev,sqlite,postgresql,pydantic,docs]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"

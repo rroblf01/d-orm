@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Python runtime + dev dependencies pinned in pyproject.toml.
+  # Dependabot picks up the [project.optional-dependencies] groups
+  # automatically; PRs are grouped per-week to keep noise low.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+
+  # GitHub Actions versions (uses: actions/checkout@vN, etc.). Pin
+  # bumps land alongside ecosystem-wide security advisories.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ci"

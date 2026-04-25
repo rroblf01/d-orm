@@ -40,6 +40,15 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "minute": ("STRFTIME('%M', {col}) = %s", lambda v: str(v).zfill(2)),
     "second": ("STRFTIME('%S', {col}) = %s", lambda v: str(v).zfill(2)),
     "week_day": ("STRFTIME('%w', {col}) = %s", lambda v: str(v)),
+    # ── PG array / JSON lookups ───────────────────────────────────────────
+    # These generate native PG operators and will fail on SQLite — call out
+    # vendor-specific code explicitly with these names instead of relying
+    # on the generic ``__contains`` (which is LIKE-based, wrong for arrays).
+    "array_contains": ("{col} @> %s", lambda v: v),    # ARRAY, JSONB
+    "array_overlap": ("{col} && %s", lambda v: v),     # ARRAY only
+    "json_has_key": ("{col} ? %s", lambda v: v),       # JSONB
+    "json_has_any": ("{col} ?| %s", lambda v: v),      # JSONB, list of keys
+    "json_has_all": ("{col} ?& %s", lambda v: v),      # JSONB, list of keys
 }
 
 VALID_LOOKUPS = set(LOOKUPS.keys())

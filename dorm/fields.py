@@ -608,6 +608,54 @@ class JSONField(Field[Any]):
         return "TEXT"
 
 
+class ArrayField(Field[list]):
+    """PostgreSQL native array column.
+
+    Stores a homogeneous list of values whose element type is given by
+    *base_field*. SQLite doesn't have arrays — this field raises
+    ``NotImplementedError`` at ``db_type`` time on SQLite so you find
+    out at migrate, not at query.
+
+    Example::
+
+        class Article(dorm.Model):
+            tags = dorm.ArrayField(dorm.CharField(max_length=50), null=True)
+
+    Usage::
+
+        Article.objects.create(tags=["python", "orm"])
+        # Filter for membership (PG ``ANY`` operator) — use ``__contains``:
+        Article.objects.filter(tags__contains=["python"])
+    """
+
+    def __init__(self, base_field: "Field", **kwargs: Any) -> None:
+        self.base_field = base_field
+        super().__init__(**kwargs)
+
+    def db_type(self, connection) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                "ArrayField is only supported on PostgreSQL. Use a separate "
+                "M2M / JSONField on SQLite."
+            )
+        inner = self.base_field.db_type(connection)
+        return f"{inner}[]"
+
+    def to_python(self, value):
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [self.base_field.to_python(v) for v in value]
+        # Allow tuples / generators on assignment for ergonomic use.
+        return [self.base_field.to_python(v) for v in list(value)]
+
+    def get_db_prep_value(self, value):
+        if value is None:
+            return None
+        return [self.base_field.get_db_prep_value(v) for v in value]
+
+
 class BinaryField(Field[bytes]):
     def to_python(self, value):
         if value is None:

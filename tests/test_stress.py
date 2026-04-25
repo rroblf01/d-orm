@@ -15,7 +15,6 @@ import time
 
 import pytest
 
-import dorm
 from tests.models import Author
 
 

@@ -18,6 +18,24 @@ from .query import SQLQuery, _validate_identifier
 _T = TypeVar("_T", bound=Model)
 
 
+def _explain_row_to_str(row: Any) -> str:
+    """Render a single ``EXPLAIN`` output row as a string. PG returns one
+    column per row containing the plan line; SQLite returns multiple
+    columns (``id``, ``parent``, ``notused``, ``detail``)."""
+    if hasattr(row, "keys"):
+        # dict-like row (psycopg dict_row, sqlite3.Row).
+        d = dict(row)
+        # PG: one column ``QUERY PLAN``. SQLite: ``detail`` is the only
+        # column users actually care about.
+        for key in ("QUERY PLAN", "detail"):
+            if key in d:
+                return str(d[key])
+        return " ".join(str(v) for v in d.values())
+    if isinstance(row, (list, tuple)):
+        return " ".join(str(v) for v in row)
+    return str(row)
+
+
 class QuerySet(Generic[_T]):
     """
     Lazy, chainable query API compatible with Django's QuerySet.
@@ -581,6 +599,43 @@ class QuerySet(Generic[_T]):
         if collect_for_prefetch and instances:
             self._do_prefetch_related(instances)
             yield from instances
+
+    def explain(self, *, analyze: bool = False) -> str:
+        """Return the database's query plan for this queryset.
+
+        On PostgreSQL, ``analyze=True`` runs the query and includes
+        actual timing / row counts (``EXPLAIN (ANALYZE TRUE, BUFFERS
+        TRUE)``). On SQLite, ``EXPLAIN QUERY PLAN`` is used; the
+        ``analyze`` flag is ignored (SQLite has no equivalent).
+
+        Useful for diagnosing slow production queries::
+
+            slow_qs = Author.objects.filter(age__gte=18).select_related("publisher")
+            print(slow_qs.explain(analyze=True))
+        """
+        connection = self._get_connection()
+        query, _, _, _, _ = self._iter_setup()
+        sql, params = query.as_select(connection)
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            prefix = "EXPLAIN (ANALYZE TRUE, BUFFERS TRUE)" if analyze else "EXPLAIN"
+        else:
+            prefix = "EXPLAIN QUERY PLAN"
+        rows = connection.execute(f"{prefix} {sql}", params)
+        return "\n".join(_explain_row_to_str(r) for r in rows)
+
+    async def aexplain(self, *, analyze: bool = False) -> str:
+        """Async counterpart of :meth:`explain`."""
+        connection = self._get_async_connection()
+        query, _, _, _, _ = self._iter_setup()
+        sql, params = query.as_select(connection)
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            prefix = "EXPLAIN (ANALYZE TRUE, BUFFERS TRUE)" if analyze else "EXPLAIN"
+        else:
+            prefix = "EXPLAIN QUERY PLAN"
+        rows = await connection.execute(f"{prefix} {sql}", params)
+        return "\n".join(_explain_row_to_str(r) for r in rows)
 
     def iterator(self, chunk_size: int | None = None) -> Iterator[_T]:
         """Stream results one by one without populating the result cache.

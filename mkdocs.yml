@@ -1,0 +1,66 @@
+site_name: djanorm
+site_description: A Django-inspired ORM with sync + async support, FastAPI-friendly schemas, and a tiny CLI.
+site_url: https://rroblf01.github.io/d-orm/
+repo_url: https://github.com/rroblf01/d-orm/
+repo_name: rroblf01/d-orm
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Tutorial: tutorial.md
+  - Migration from Django ORM: migration-from-django.md
+  - API Reference:
+      - Models & fields: api/models.md
+      - QuerySet & Manager: api/queryset.md
+      - Transactions: api/transaction.md
+      - Signals: api/signals.md
+      - Pydantic interop: api/pydantic.md
+      - Connection / health: api/connection.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            members_order: source
+            docstring_style: google
+            heading_level: 2
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
