@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import threading
 from typing import Any
 
@@ -103,3 +104,13 @@ def reset_connections():
     _sync_connections.clear()
     # Async pools can only be closed with await; they will be GC'd.
     _async_connections.clear()
+
+
+def _atexit_close() -> None:
+    """Close sync connections at process exit. Async connections rely on
+    their daemon worker thread being torn down by the interpreter."""
+    _async_connections.clear()
+    close_all()
+
+
+atexit.register(_atexit_close)

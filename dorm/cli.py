@@ -266,6 +266,91 @@ def cmd_shell(args):
     code.interact(banner=banner, local=local_vars)
 
 
+_SETTINGS_TEMPLATE = '''"""djanorm settings.
+
+Uncomment the DATABASES block for the backend you want to use.
+"""
+
+# ── SQLite ────────────────────────────────────────────────────────────────────
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "sqlite",
+#         "NAME": "db.sqlite3",
+#     }
+# }
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "postgresql",
+#         "NAME": "mydb",
+#         "USER": "postgres",
+#         "PASSWORD": "postgres",
+#         "HOST": "localhost",
+#         "PORT": 5432,
+#     }
+# }
+
+# Apps are autodiscovered from any directory next to settings.py that has
+# both __init__.py and models.py. Set INSTALLED_APPS explicitly to override.
+# INSTALLED_APPS = []
+'''
+
+_MODELS_TEMPLATE = '''import dorm
+
+
+class User(dorm.Model):
+    username = dorm.CharField(max_length=150, unique=True)
+    email = dorm.EmailField(unique=True)
+    is_active = dorm.BooleanField(default=True)
+    created_at = dorm.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["username"]
+
+    def __str__(self):
+        return self.username
+'''
+
+
+def cmd_init(args):
+    cwd = Path.cwd()
+    settings_path = cwd / "settings.py"
+    if settings_path.exists():
+        print(f"settings.py already exists at {settings_path} — leaving it untouched.")
+    else:
+        settings_path.write_text(_SETTINGS_TEMPLATE)
+        print(f"Created {settings_path}")
+
+    app_name = args.app
+    if app_name:
+        app_dir = cwd / app_name
+        app_dir.mkdir(exist_ok=True)
+        init_file = app_dir / "__init__.py"
+        if not init_file.exists():
+            init_file.touch()
+            print(f"Created {init_file}")
+        models_file = app_dir / "models.py"
+        if models_file.exists():
+            print(f"{models_file} already exists — leaving it untouched.")
+        else:
+            models_file.write_text(_MODELS_TEMPLATE)
+            print(f"Created {models_file}")
+
+    print()
+    print("Next steps:")
+    print("  1. Edit settings.py and uncomment your DATABASES backend.")
+    if app_name:
+        print(f"  2. Run: dorm makemigrations {app_name}")
+    else:
+        print("  2. Run: dorm makemigrations")
+    print("  3. Run: dorm migrate")
+
+
+def cmd_help(args):
+    args.parser.print_help()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="dorm",
@@ -337,9 +422,37 @@ def main():
     sq.set_defaults(func=cmd_squashmigrations)
 
     # shell
-    sh = sub.add_parser("shell", help="Start an interactive Python shell")
+    sh = sub.add_parser(
+        "shell",
+        help="Start an interactive Python shell (uses IPython if installed, otherwise the standard Python REPL)",
+    )
     sh.add_argument("--settings", default=None)
     sh.set_defaults(func=cmd_shell)
+
+    # init
+    ini = sub.add_parser(
+        "init",
+        help=(
+            "Scaffold settings.py in the current directory. "
+            "Pass --app NAME to also create the app folder NAME/ with "
+            "__init__.py and a models.py containing an example User model."
+        ),
+    )
+    ini.add_argument(
+        "--app",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Name of an app to scaffold alongside settings.py. Creates "
+            "NAME/ (if missing), NAME/__init__.py, and NAME/models.py "
+            "with an example User model."
+        ),
+    )
+    ini.set_defaults(func=cmd_init)
+
+    # help
+    hp = sub.add_parser("help", help="Show this help message and exit")
+    hp.set_defaults(func=cmd_help, parser=parser)
 
     parsed = parser.parse_args()
     parsed.func(parsed)

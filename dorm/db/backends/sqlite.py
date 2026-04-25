@@ -21,7 +21,9 @@ class SQLiteDatabaseWrapper:
         conn = sqlite3.connect(self.database, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
+        journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
+        if journal_mode:
+            conn.execute(f"PRAGMA journal_mode = {journal_mode}")
         if self._autocommit:
             conn.isolation_level = None
         return conn
@@ -196,10 +198,20 @@ class SQLiteAsyncDatabaseWrapper:
         import aiosqlite
 
         isolation = None if self._autocommit else ""
-        conn = await aiosqlite.connect(self.database, isolation_level=isolation)
+        pending = aiosqlite.connect(self.database, isolation_level=isolation)
+        # aiosqlite's worker is a non-daemon Thread; in Python 3.13+ the
+        # interpreter joins non-daemon threads before atexit fires, so a
+        # forgotten close() hangs the process. Mark the thread as daemon
+        # before it starts (set via __await__) so the process can exit.
+        worker = getattr(pending, "_thread", None)
+        if worker is not None:
+            worker.daemon = True
+        conn = await pending
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.execute("PRAGMA journal_mode = WAL")
+        journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
+        if journal_mode:
+            await conn.execute(f"PRAGMA journal_mode = {journal_mode}")
         return conn
 
     async def _get_conn(self):
