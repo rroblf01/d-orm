@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager, contextmanager
 
-from ..utils import ASYNC_ATOMIC_STATE, normalize_db_exception
+from ..utils import ASYNC_ATOMIC_STATE, log_query, normalize_db_exception
 
 
 class SQLiteDatabaseWrapper:
@@ -88,22 +88,24 @@ class SQLiteDatabaseWrapper:
 
     def execute(self, sql: str, params=None) -> list:
         conn = self.get_connection()
-        try:
-            cursor = conn.execute(self._adapt(sql), params or [])
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
+        with log_query("sqlite", sql, params):
+            try:
+                cursor = conn.execute(self._adapt(sql), params or [])
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
         return cursor.fetchall()
 
     def execute_write(self, sql: str, params=None) -> int:
         conn = self.get_connection()
-        try:
-            cursor = conn.execute(self._adapt(sql), params or [])
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
-        if self._atomic_depth == 0 and not self._autocommit:
-            conn.commit()
+        with log_query("sqlite", sql, params):
+            try:
+                cursor = conn.execute(self._adapt(sql), params or [])
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+            if self._atomic_depth == 0 and not self._autocommit:
+                conn.commit()
         return cursor.rowcount
 
     def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
@@ -112,25 +114,27 @@ class SQLiteDatabaseWrapper:
         # PRIMARY KEY columns regardless of name).
         del pk_col
         conn = self.get_connection()
-        try:
-            cursor = conn.execute(self._adapt(sql), params or [])
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
-        if self._atomic_depth == 0 and not self._autocommit:
-            conn.commit()
+        with log_query("sqlite", sql, params):
+            try:
+                cursor = conn.execute(self._adapt(sql), params or [])
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+            if self._atomic_depth == 0 and not self._autocommit:
+                conn.commit()
         return cursor.lastrowid
 
     def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
         conn = self.get_connection()
-        try:
-            cursor = conn.execute(self._adapt(sql), params or [])
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
-        if self._atomic_depth == 0 and not self._autocommit:
-            conn.commit()
-        last = cursor.lastrowid
+        with log_query("sqlite", sql, params):
+            try:
+                cursor = conn.execute(self._adapt(sql), params or [])
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+            if self._atomic_depth == 0 and not self._autocommit:
+                conn.commit()
+            last = cursor.lastrowid
         if not last:
             return []
         return list(range(last - count + 1, last + 1))
@@ -302,51 +306,55 @@ class SQLiteAsyncDatabaseWrapper:
 
     async def execute(self, sql: str, params=None) -> list:
         async with self._operation_conn() as conn:
-            try:
-                cursor = await conn.execute(self._adapt(sql), params or [])
-                rows = await cursor.fetchall()
-            except Exception as exc:
-                normalize_db_exception(exc)
-                raise
+            with log_query("sqlite", sql, params):
+                try:
+                    cursor = await conn.execute(self._adapt(sql), params or [])
+                    rows = await cursor.fetchall()
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
             return list(rows)
 
     async def execute_write(self, sql: str, params=None) -> int:
         async with self._operation_conn() as conn:
-            try:
-                cursor = await conn.execute(self._adapt(sql), params or [])
-                if not self._in_atomic() and not self._autocommit:
-                    await conn.commit()
-                return cursor.rowcount
-            except Exception as exc:
-                normalize_db_exception(exc)
-                raise
+            with log_query("sqlite", sql, params):
+                try:
+                    cursor = await conn.execute(self._adapt(sql), params or [])
+                    if not self._in_atomic() and not self._autocommit:
+                        await conn.commit()
+                    return cursor.rowcount
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
 
     async def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
         # pk_col accepted for parity with PostgreSQL; aiosqlite uses lastrowid.
         del pk_col
         async with self._operation_conn() as conn:
-            try:
-                cursor = await conn.execute(self._adapt(sql), params or [])
-                if not self._in_atomic() and not self._autocommit:
-                    await conn.commit()
-                return cursor.lastrowid
-            except Exception as exc:
-                normalize_db_exception(exc)
-                raise
+            with log_query("sqlite", sql, params):
+                try:
+                    cursor = await conn.execute(self._adapt(sql), params or [])
+                    if not self._in_atomic() and not self._autocommit:
+                        await conn.commit()
+                    return cursor.lastrowid
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
 
     async def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
         async with self._operation_conn() as conn:
-            try:
-                cursor = await conn.execute(self._adapt(sql), params or [])
-                if not self._in_atomic() and not self._autocommit:
-                    await conn.commit()
-                last = cursor.lastrowid
-                if not last:
-                    return []
-                return list(range(last - count + 1, last + 1))
-            except Exception as exc:
-                normalize_db_exception(exc)
-                raise
+            with log_query("sqlite", sql, params):
+                try:
+                    cursor = await conn.execute(self._adapt(sql), params or [])
+                    if not self._in_atomic() and not self._autocommit:
+                        await conn.commit()
+                    last = cursor.lastrowid
+                    if not last:
+                        return []
+                    return list(range(last - count + 1, last + 1))
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
 
     async def execute_script(self, sql: str):
         async with self._lock:

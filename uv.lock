@@ -257,7 +257,7 @@ sqlite = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.22.1" },
+    { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.22.1,<0.23" },
     { name = "djanorm", extras = ["dev", "sqlite", "postgresql"], marker = "extra == 'all'" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgresql'", specifier = ">=3.3.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },

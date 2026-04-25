@@ -34,7 +34,11 @@ dev = [
     "testcontainers[postgres]>=4.14.2",
     "pytest-xdist>=3.8.0"
 ]
-sqlite = ["aiosqlite>=0.22.1"]
+# aiosqlite: pinned <0.23 because the daemon-thread fix in
+# dorm/db/backends/sqlite.py reads the private `_thread` attribute on
+# aiosqlite.Connection. Untested on 0.23+; bump only after verifying the
+# attribute name still exists (and update the runtime warning if not).
+sqlite = ["aiosqlite>=0.22.1,<0.23"]
 postgresql = ["psycopg[binary,pool]>=3.3.3"]
 all = ["djanorm[dev,sqlite,postgresql]"]
 

@@ -15,6 +15,33 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
+    services:
+      # Real Postgres so the postgres-parametrized tests actually run in CI.
+      # Without this the conftest's `_docker_available()` check would skip
+      # them silently on hosted runners that don't expose a docker daemon.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dorm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Tell conftest to use this service container directly instead of
+      # spawning a testcontainer (faster + more reliable in CI).
+      DORM_TEST_POSTGRES_HOST: localhost
+      DORM_TEST_POSTGRES_PORT: 5432
+      DORM_TEST_POSTGRES_USER: postgres
+      DORM_TEST_POSTGRES_PASSWORD: postgres
+      DORM_TEST_POSTGRES_DB: dorm_test
+
     steps:
       - uses: actions/checkout@v4
 

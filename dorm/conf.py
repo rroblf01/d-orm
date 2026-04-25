@@ -1,8 +1,37 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .exceptions import ImproperlyConfigured
+
+# Identifiers that we splice into SQL without parameter binding (table names,
+# column names, related-name aliases) must match this pattern. Since SQL
+# identifiers are user-controllable (via Meta.db_table, db_column,
+# related_name, etc.), we validate them at model-attach time so a mistake
+# raises eagerly with a clear message rather than producing a SQL injection.
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_IDENTIFIER_LEN = 63  # PostgreSQL's NAMEDATALEN-1; SQLite has no real cap.
+
+
+def _validate_identifier(value: str, *, kind: str = "identifier") -> str:
+    """Reject anything that wouldn't survive being spliced into a quoted
+    SQL identifier (``"foo"``). Allowed: ASCII letters, digits, underscore;
+    must start with a letter or underscore; up to 63 characters."""
+    if not isinstance(value, str) or not value:
+        raise ImproperlyConfigured(
+            f"Invalid {kind}: expected a non-empty string, got {value!r}."
+        )
+    if len(value) > _MAX_IDENTIFIER_LEN:
+        raise ImproperlyConfigured(
+            f"Invalid {kind} {value!r}: exceeds {_MAX_IDENTIFIER_LEN} characters."
+        )
+    if not _SAFE_IDENTIFIER_RE.match(value):
+        raise ImproperlyConfigured(
+            f"Invalid {kind} {value!r}: must match {_SAFE_IDENTIFIER_RE.pattern}. "
+            "Identifiers are spliced into SQL without quoting and must be safe."
+        )
+    return value
 
 _AUTODISCOVER_EXCLUDE = {
     "venv", ".venv", "env", ".env", "site-packages",
@@ -53,6 +82,11 @@ class Settings:
     DATABASES: dict = {}
     INSTALLED_APPS: list = []
     DEFAULT_AUTO_FIELD: str = "dorm.fields.BigAutoField"
+    # NOTE: TIME_ZONE and USE_TZ are reserved for future timezone-aware
+    # datetime support. They are NOT yet wired into the field encoding
+    # paths — datetime values are stored exactly as Python provides them.
+    # If you need timezone safety today, store UTC datetimes explicitly
+    # at the application layer.
     TIME_ZONE: str = "UTC"
     USE_TZ: bool = False
 

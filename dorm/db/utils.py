@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import contextvars
+import logging
+import os
 import re
+import time
+from contextlib import contextmanager
 
 _HINT = (
     "It looks like you forgot to create or apply your migrations.\n\n"
@@ -19,6 +23,40 @@ _HINT = (
 ASYNC_ATOMIC_STATE: contextvars.ContextVar = contextvars.ContextVar(
     "dorm_async_atomic_state", default=None
 )
+
+# ── Query logging ─────────────────────────────────────────────────────────────
+# Enable with `logging.getLogger("dorm.db").setLevel(logging.DEBUG)`.
+# Slow-query threshold (ms) controlled by env var DORM_SLOW_QUERY_MS (default 500).
+
+_slow_log = logging.getLogger("dorm.db")
+
+
+def _slow_query_ms() -> float:
+    """Read the slow-query threshold dynamically so tests / runtime tweaks work."""
+    try:
+        return float(os.environ.get("DORM_SLOW_QUERY_MS", "500"))
+    except (TypeError, ValueError):
+        return 500.0
+
+
+@contextmanager
+def log_query(vendor: str, sql: str, params=None):
+    """Time a SQL statement, emitting DEBUG for every query and WARNING when
+    the elapsed time exceeds DORM_SLOW_QUERY_MS. The logger name is
+    ``dorm.db.backends.<vendor>`` so users can filter per backend."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        log = logging.getLogger(f"dorm.db.backends.{vendor}")
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("(%.2fms) %s; params=%r", elapsed_ms, sql, params)
+        threshold = _slow_query_ms()
+        if elapsed_ms >= threshold:
+            log.warning(
+                "slow query (%.2fms ≥ %.0fms): %s", elapsed_ms, threshold, sql
+            )
 
 
 def raise_migration_hint(exc: Exception) -> None:

@@ -1020,6 +1020,15 @@ dorm migrate blog 0002
 dorm migrate blog zero
 ```
 
+### Concurrent migrations and rolling deploys
+
+`dorm migrate` is safe to run from multiple processes simultaneously. On
+PostgreSQL it acquires `pg_advisory_lock` so the second invocation blocks
+until the first finishes; on SQLite the database's natural single-writer
+file lock serializes them. This means it's safe to put `dorm migrate` in
+every replica's startup script — only one will actually apply pending
+migrations; the rest exit as no-ops.
+
 ### Custom migrations with `RunSQL` / `RunPython`
 
 ```python
@@ -1523,6 +1532,127 @@ await conn.rollback()  # manual rollback
 `set_autocommit()` is supported on all backends: SQLite sync/async and
 PostgreSQL sync/async. On PostgreSQL a dedicated persistent connection
 (separate from the pool) is used when autocommit is enabled.
+
+---
+
+## Production deployment
+
+A short checklist for running djanorm in production.
+
+### Logging
+
+Every SQL statement is logged at `DEBUG` on a per-vendor logger. Slow queries
+(default ≥ 500 ms) are also emitted at `WARNING`.
+
+```python
+import logging
+
+logging.getLogger("dorm.db.backends.postgresql").setLevel(logging.DEBUG)
+# Or just enable warnings (slow queries) without per-statement noise:
+logging.getLogger("dorm.db").setLevel(logging.WARNING)
+```
+
+Tune the slow-query threshold with the `DORM_SLOW_QUERY_MS` environment
+variable (default `500`).
+
+### Migration safety under rolling deploys
+
+`dorm migrate` acquires a cross-process advisory lock so two pods that boot
+simultaneously don't apply the same migration twice:
+
+- **PostgreSQL:** `pg_advisory_lock` (blocking). Released on connection drop.
+- **SQLite:** SQLite's natural single-writer file lock serializes concurrent
+  migrators at the first write transaction; no separate lock is taken.
+
+This means it's safe to run `dorm migrate` as part of every replica's
+startup script — the second through Nth invocations will block until the
+first one finishes, then exit as no-ops.
+
+### Pool sizing and retries
+
+`MIN_POOL_SIZE` / `MAX_POOL_SIZE` / `POOL_TIMEOUT` are documented in
+[Setup](#setup). For Kubernetes, set `MIN_POOL_SIZE=0` so a temporarily
+unreachable database doesn't fail the pod's liveness probe — the pool will
+open lazily on first use. For long-lived workers, set `MIN_POOL_SIZE` ≥ 1
+to avoid cold-start latency on the first request.
+
+If you've eliminated stale-connection bugs and want to shave per-query
+latency, set `POOL_CHECK=False` to skip the per-checkout `SELECT 1` probe.
+
+### Web frameworks
+
+dorm doesn't impose a request lifecycle, so framework integration is just
+about wiring `configure()` once at startup and (for async) cleaning up
+connections on shutdown.
+
+**FastAPI / Starlette (lifespan):**
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import dorm
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    dorm.configure(
+        DATABASES={"default": {"ENGINE": "postgresql", "NAME": "myapp", ...}},
+    )
+    yield
+    # Optional but recommended: close async pools cleanly so the worker
+    # doesn't have to rely on the daemon-thread fallback.
+    from dorm.db.connection import close_all_async
+    await close_all_async()
+
+app = FastAPI(lifespan=lifespan)
+```
+
+**Flask (sync):**
+
+```python
+import dorm
+from flask import Flask
+
+dorm.configure(
+    DATABASES={"default": {"ENGINE": "postgresql", "NAME": "myapp", ...}},
+)
+
+app = Flask(__name__)
+
+@app.teardown_appcontext
+def close_db(exc=None):
+    # Optional — pool connections return on context exit anyway.
+    pass
+```
+
+The async connection wrapper detects when the running event loop changes
+between `asyncio.run()` calls and drops its references safely; you don't
+need to call `close_all_async()` between requests, only at shutdown.
+
+### Batch sizing for `bulk_create` / `bulk_update`
+
+Both default to `batch_size=1000`. Each batch becomes one round-trip:
+
+- `bulk_create`: a multi-row INSERT.
+- `bulk_update`: an `UPDATE ... SET col = CASE pk WHEN ... END` whose SQL
+  size is ≈ `batch_size × len(fields) × 2` parameter slots.
+
+PostgreSQL's wire protocol caps a single statement's parameter count at
+65535. With many fields, lower `batch_size` to stay safe — for example,
+updating 10 columns means 1000 × 10 × 2 = 20 000 parameters per batch
+(fine), but 5000 × 10 × 2 = 100 000 (will fail). When in doubt, batch by
+500 for wide rows.
+
+### Cancellation and shutdown
+
+If a coroutine is cancelled mid-`await` on a queryset call, the connection
+is released back to the pool by its async-context-manager (PG) or its SQL
+finishes silently in the worker thread (SQLite). For deterministic cleanup
+on process exit, await `close_all_async()` from a `lifespan`/shutdown hook
+as shown above. Otherwise dorm relies on:
+
+- aiosqlite worker threads being marked daemon (so the interpreter can
+  exit even if you forget to close).
+- An `atexit` hook that closes sync connections.
 
 ---
 

@@ -45,6 +45,12 @@ class Options:
             self.db_table = f"{label_segment}_{self.model_name}"
         if not self.ordering:
             self.ordering = []
+        # Validate that db_table is safe to splice into SQL.
+        if not self.abstract:
+            from .conf import _validate_identifier
+            _validate_identifier(
+                self.db_table, kind=f"{cls.__name__}.Meta.db_table"
+            )
 
     def add_field(self, field):
         self.fields.append(field)

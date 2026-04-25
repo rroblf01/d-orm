@@ -91,9 +91,12 @@ class Field:
         Field.creation_counter += 1
 
     def contribute_to_class(self, cls, name: str):
+        from .conf import _validate_identifier
+
         self.name = name
         self.attname = name
         self.column = self.db_column or name
+        _validate_identifier(self.column, kind=f"{cls.__name__}.{name}.db_column")
         self.model = cls
         if self.verbose_name is None:
             self.verbose_name = name.replace("_", " ")
@@ -596,9 +599,16 @@ class RelatedField(Field):
         super().__init__(**kwargs)
 
     def contribute_to_class(self, cls, name: str):
+        from .conf import _validate_identifier
+
         self.name = name
         self.attname = f"{name}_id"
         self.column = self.db_column or f"{name}_id"
+        _validate_identifier(self.column, kind=f"{cls.__name__}.{name}.db_column")
+        if self.related_name:
+            _validate_identifier(
+                self.related_name, kind=f"{cls.__name__}.{name}.related_name"
+            )
         self.model = cls
         if self.verbose_name is None:
             self.verbose_name = name.replace("_", " ")
@@ -687,8 +697,18 @@ class ManyToManyField(Field):
         self.concrete = False
 
     def contribute_to_class(self, cls, name: str):
+        from .conf import _validate_identifier
+
         self.name = name
         self.attname = name
+        if self.through:
+            _validate_identifier(
+                self.through, kind=f"{cls.__name__}.{name}.through"
+            )
+        if self.related_name:
+            _validate_identifier(
+                self.related_name, kind=f"{cls.__name__}.{name}.related_name"
+            )
         self.model = cls
         if self.verbose_name is None:
             self.verbose_name = name.replace("_", " ")

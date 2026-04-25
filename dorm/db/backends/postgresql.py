@@ -5,7 +5,7 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
-from ..utils import ASYNC_ATOMIC_STATE, normalize_db_exception
+from ..utils import ASYNC_ATOMIC_STATE, log_query, normalize_db_exception
 
 def _to_pyformat(sql: str) -> str:
     """Convert $1, $2, ... placeholders to %s (psycopg3 style), skipping
@@ -178,24 +178,25 @@ class PostgreSQLDatabaseWrapper:
         insert: bool = False,
         pk_col: str = "id",
     ):
-        try:
-            with conn.cursor() as cur:
-                _sql = _to_pyformat(sql) + (f' RETURNING "{pk_col}"' if insert else "")
-                cur.execute(_sql, params or [])
-                if insert:
-                    row = cur.fetchone()
-                    return row[pk_col] if row else None
-                if write:
-                    return cur.rowcount
-                try:
-                    return cur.fetchall()
-                # cur.fetchall() raises ProgrammingError on statements that
-                # produce no result set (DDL, etc.); treat that as "no rows".
-                except Exception:
-                    return []
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
+        with log_query("postgresql", sql, params):
+            try:
+                with conn.cursor() as cur:
+                    _sql = _to_pyformat(sql) + (f' RETURNING "{pk_col}"' if insert else "")
+                    cur.execute(_sql, params or [])
+                    if insert:
+                        row = cur.fetchone()
+                        return row[pk_col] if row else None
+                    if write:
+                        return cur.rowcount
+                    try:
+                        return cur.fetchall()
+                    # cur.fetchall() raises ProgrammingError on statements that
+                    # produce no result set (DDL, etc.); treat that as "no rows".
+                    except Exception:
+                        return []
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
 
     def _get_persistent_conn(self):
         """Return a thread-local persistent connection used in autocommit mode."""
@@ -238,15 +239,16 @@ class PostgreSQLDatabaseWrapper:
             return self._exec(c, sql, params, insert=True, pk_col=pk_col)
 
     def _exec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
-        try:
-            with conn.cursor() as cur:
-                _sql = _to_pyformat(sql) + f' RETURNING "{pk_col}"'
-                cur.execute(_sql, params or [])
-                rows = cur.fetchall()
-                return [r[pk_col] for r in rows]
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
+        with log_query("postgresql", sql, params):
+            try:
+                with conn.cursor() as cur:
+                    _sql = _to_pyformat(sql) + f' RETURNING "{pk_col}"'
+                    cur.execute(_sql, params or [])
+                    rows = cur.fetchall()
+                    return [r[pk_col] for r in rows]
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
 
     def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
         conn = self._choose_conn()
@@ -413,23 +415,24 @@ class PostgreSQLAsyncDatabaseWrapper:
         insert: bool = False,
         pk_col: str = "id",
     ):
-        try:
-            async with conn.cursor() as cur:
-                _sql = _to_pyformat(sql) + (f' RETURNING "{pk_col}"' if insert else "")
-                await cur.execute(_sql, params or [])
-                if insert:
-                    row = await cur.fetchone()
-                    return row[pk_col] if row else None
-                if write:
-                    return cur.rowcount
-                try:
-                    return await cur.fetchall()
-                # See sync _exec: DDL statements raise on fetchall().
-                except Exception:
-                    return []
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
+        with log_query("postgresql", sql, params):
+            try:
+                async with conn.cursor() as cur:
+                    _sql = _to_pyformat(sql) + (f' RETURNING "{pk_col}"' if insert else "")
+                    await cur.execute(_sql, params or [])
+                    if insert:
+                        row = await cur.fetchone()
+                        return row[pk_col] if row else None
+                    if write:
+                        return cur.rowcount
+                    try:
+                        return await cur.fetchall()
+                    # See sync _exec: DDL statements raise on fetchall().
+                    except Exception:
+                        return []
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
 
     async def _get_autocommit_conn(self):
         if self._autocommit_conn is None or self._autocommit_conn.closed:
@@ -471,15 +474,16 @@ class PostgreSQLAsyncDatabaseWrapper:
             return await self._aexec(c, sql, params, insert=True, pk_col=pk_col)
 
     async def _aexec_bulk(self, conn, sql: str, params, pk_col: str) -> list[int]:
-        try:
-            async with conn.cursor() as cur:
-                _sql = _to_pyformat(sql) + f' RETURNING "{pk_col}"'
-                await cur.execute(_sql, params or [])
-                rows = await cur.fetchall()
-                return [r[pk_col] for r in rows]
-        except Exception as exc:
-            normalize_db_exception(exc)
-            raise
+        with log_query("postgresql", sql, params):
+            try:
+                async with conn.cursor() as cur:
+                    _sql = _to_pyformat(sql) + f' RETURNING "{pk_col}"'
+                    await cur.execute(_sql, params or [])
+                    rows = await cur.fetchall()
+                    return [r[pk_col] for r in rows]
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
 
     async def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
         conn = await self._choose_conn()

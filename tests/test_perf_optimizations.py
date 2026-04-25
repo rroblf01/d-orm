@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-import dorm
-from tests.models import Article, Author, Book, Publisher, Tag
+from tests.models import Article, Author, Tag
 
 
 # ── A: bulk_update / abulk_update execute one query per batch ─────────────────
