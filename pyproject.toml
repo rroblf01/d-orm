@@ -61,6 +61,11 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Share a single event loop across all async tests in a session so async
+# DB pools don't accumulate one stale set of connections per test (which
+# under xdist could leave PG sessions deadlocked between fixture cleanups).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 
 [tool.ty.src]

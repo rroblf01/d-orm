@@ -78,9 +78,12 @@ def _shared_admin_dsn(tmp_path_factory, worker_id: str) -> dict:
 
         # First worker: spawn the container. Don't wrap in `with` — we need
         # it alive past this fixture's exit. testcontainers' ryuk sidecar
-        # cleans it up at session end.
+        # cleans it up at session end. Bump max_connections so xdist
+        # workers leaving stale conns across event-loop transitions don't
+        # exhaust the server (default 100 is tight for 4 workers × pools).
         from testcontainers.postgres import PostgresContainer
         pg = PostgresContainer("postgres:16-alpine")
+        pg.with_command(["postgres", "-c", "max_connections=500"])
         pg.start()
         # PostgresContainer.start() returns when the docker container is
         # running, but PG may still be initializing internally. _connect()
@@ -164,6 +167,13 @@ def db_config(request, tmp_path_factory, worker_id):
         "PASSWORD": admin["password"],
         "HOST": admin["host"],
         "PORT": admin["port"],
+        # 4 xdist workers × 10 (default) = 40 active conns; with both sync
+        # and async pool plus the admin conn we used for CREATE DATABASE,
+        # we get close to PG's default max_connections=100. Cap tightly so
+        # cross-worker xdist runs don't exhaust the server when leftover
+        # connections from failed tests leak.
+        "MIN_POOL_SIZE": 1,
+        "MAX_POOL_SIZE": 3,
     }
 
 
