@@ -371,9 +371,61 @@ class QuerySet(Generic[_T]):
                 # Reverse FK
                 self._prefetch_reverse_fk(instances, fname)
 
-    def _prefetch_m2m(self, instances: list[_T], fname: str, field: Any) -> None:
+    # Special alias used by the M2M prefetch JOIN to carry the source-side
+    # PK back alongside the target row. Picked unlikely to clash with any
+    # user column name.
+    _M2M_SRC_PK_ALIAS = "__dorm_m2m_src_pk__"
+
+    def _build_m2m_prefetch_sql(
+        self, src_pks: list[Any], rel_model: Any, field: Any, conn: Any
+    ) -> tuple[str, list[Any]]:
+        """Build a single SELECT that joins the through table to the target
+        table, returning each target row plus the source pk it links to."""
         from .query import SQLQuery
 
+        rel_meta = rel_model._meta
+        rel_table = rel_meta.db_table
+        rel_pk = rel_meta.pk.column
+        rel_cols = [f.column for f in rel_meta.fields if f.column]
+        through = field._get_through_table()
+        src_col, tgt_col = field._get_through_columns()
+
+        cols_sql = ", ".join(f't."{c}"' for c in rel_cols)
+        ph = ", ".join(["%s"] * len(src_pks))
+        sql = (
+            f'SELECT j."{src_col}" AS "{self._M2M_SRC_PK_ALIAS}", {cols_sql} '
+            f'FROM "{through}" j '
+            f'JOIN "{rel_table}" t ON t."{rel_pk}" = j."{tgt_col}" '
+            f'WHERE j."{src_col}" IN ({ph})'
+        )
+        sql = SQLQuery(self.model)._adapt_placeholders(sql, conn)
+        return sql, list(src_pks)
+
+    def _hydrate_m2m_join_rows(
+        self, rows: Any, src_pks: list[Any], rel_model: Any, conn: Any
+    ) -> dict[Any, list[Any]]:
+        """Group rows from :meth:`_build_m2m_prefetch_sql` by source pk,
+        hydrating each target row into a model instance."""
+        rel_meta = rel_model._meta
+        rel_cols = [f.column for f in rel_meta.fields if f.column]
+
+        src_to_objs: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        for row in rows:
+            if hasattr(row, "keys"):
+                row_dict = dict(row)
+                src = row_dict.pop(self._M2M_SRC_PK_ALIAS, None)
+                # _from_db_row will look up by field.column; the popped alias
+                # is no longer present, so it can't shadow anything.
+                obj = rel_model._from_db_row(row_dict, conn)
+            else:
+                # Sequence row: alias is the first column, then rel_cols.
+                src = row[0]
+                obj = rel_model._from_db_row(list(row[1 : 1 + len(rel_cols)]), conn)
+            if src in src_to_objs:
+                src_to_objs[src].append(obj)
+        return src_to_objs
+
+    def _prefetch_m2m(self, instances: list[_T], fname: str, field: Any) -> None:
         cache_key = f"_prefetch_{fname}"
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
@@ -383,34 +435,31 @@ class QuerySet(Generic[_T]):
 
         conn = self._get_connection()
         rel_model = field._resolve_related_model()
-        through = field._get_through_table()
-        src_col, tgt_col = field._get_through_columns()
-
-        ph = ", ".join(["%s"] * len(src_pks))
-        sql = f'SELECT "{src_col}", "{tgt_col}" FROM "{through}" WHERE "{src_col}" IN ({ph})'
-        sql = SQLQuery(self.model)._adapt_placeholders(sql, conn)
-        rows = conn.execute(sql, src_pks)
-
-        src_to_tgts: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
-        all_tgt_pks: list[Any] = []
-        for row in rows:
-            s = row[src_col] if hasattr(row, "keys") else row[0]
-            t = row[tgt_col] if hasattr(row, "keys") else row[1]
-            if s in src_to_tgts:
-                src_to_tgts[s].append(t)
-            all_tgt_pks.append(t)
-
-        if all_tgt_pks:
-            tgt_objs: dict[Any, Any] = {
-                obj.pk: obj
-                for obj in QuerySet(rel_model, self._db).filter(pk__in=all_tgt_pks)  # type: ignore[arg-type]
-            }
-        else:
-            tgt_objs = {}
+        sql, params = self._build_m2m_prefetch_sql(src_pks, rel_model, field, conn)
+        rows = conn.execute(sql, params)
+        src_to_objs = self._hydrate_m2m_join_rows(rows, src_pks, rel_model, conn)
 
         for inst in instances:
-            tpks = src_to_tgts.get(inst.pk, [])
-            inst.__dict__[cache_key] = [tgt_objs[pk] for pk in tpks if pk in tgt_objs]
+            inst.__dict__[cache_key] = src_to_objs.get(inst.pk, [])
+
+    async def _aprefetch_m2m(
+        self, instances: list[_T], fname: str, field: Any
+    ) -> None:
+        cache_key = f"_prefetch_{fname}"
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        if not src_pks:
+            for inst in instances:
+                inst.__dict__[cache_key] = []
+            return
+
+        conn = self._get_async_connection()
+        rel_model = field._resolve_related_model()
+        sql, params = self._build_m2m_prefetch_sql(src_pks, rel_model, field, conn)
+        rows = await conn.execute(sql, params)
+        src_to_objs = self._hydrate_m2m_join_rows(rows, src_pks, rel_model, conn)
+
+        for inst in instances:
+            inst.__dict__[cache_key] = src_to_objs.get(inst.pk, [])
 
     def _prefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
         from .related_managers import ReverseFKDescriptor
@@ -752,24 +801,77 @@ class QuerySet(Generic[_T]):
                             obj.__dict__[meta.pk.attname] = pk
         return objs
 
+    def _build_bulk_update_sql(
+        self, batch: list[_T], fields: list[str], conn: Any
+    ) -> tuple[str, list[Any]] | None:
+        """Build a single ``UPDATE ... SET col = CASE pk WHEN ... END WHERE pk IN (...)``
+        statement for a batch of objects. Returns ``None`` if every row in the
+        batch lacks a primary key."""
+        from .query import SQLQuery
+
+        meta = self.model._meta
+        pk_col = meta.pk.column
+        table = meta.db_table
+
+        # Filter out objects without a pk (would be unaddressable).
+        rows = [obj for obj in batch if obj.pk is not None]
+        if not rows:
+            return None
+
+        field_objs: list[Any] = []
+        for fname in fields:
+            try:
+                f = meta.get_field(fname)
+            except Exception as exc:
+                raise ValueError(f"Unknown field for bulk_update: {fname!r}") from exc
+            if not f.column:
+                raise ValueError(
+                    f"Field {fname!r} has no DB column and can't be bulk-updated."
+                )
+            field_objs.append(f)
+
+        params: list[Any] = []
+        set_clauses: list[str] = []
+        for f in field_objs:
+            parts = [f'"{f.column}" = CASE "{pk_col}"']
+            for obj in rows:
+                parts.append(" WHEN %s THEN %s")
+                params.append(obj.pk)
+                params.append(f.get_db_prep_value(obj.__dict__.get(f.attname)))
+            parts.append(f' ELSE "{f.column}" END')
+            set_clauses.append("".join(parts))
+
+        pk_placeholders = ", ".join(["%s"] * len(rows))
+        params.extend(obj.pk for obj in rows)
+
+        sql = (
+            f'UPDATE "{table}" SET '
+            + ", ".join(set_clauses)
+            + f' WHERE "{pk_col}" IN ({pk_placeholders})'
+        )
+        sql = SQLQuery(self.model)._adapt_placeholders(sql, conn)
+        return sql, params
+
     def bulk_update(
         self, objs: list[_T], fields: list[str], batch_size: int = 1000
     ) -> int:
+        """Update *fields* on *objs* with a single ``UPDATE ... SET col = CASE pk
+        WHEN ...`` statement per batch (one round-trip per ``batch_size``
+        objects, instead of one per object)."""
         if not objs:
             return 0
         from .transaction import atomic
 
         count = 0
         with atomic(using=self._db):
-            for obj in objs:
-                update_kwargs = {}
-                for fname in fields:
-                    try:
-                        field = self.model._meta.get_field(fname)
-                        update_kwargs[fname] = obj.__dict__.get(field.attname)
-                    except Exception:
-                        update_kwargs[fname] = obj.__dict__.get(fname)
-                count += self.filter(pk=obj.pk).update(**update_kwargs)
+            connection = self._get_connection()
+            for i in range(0, len(objs), batch_size):
+                batch = objs[i : i + batch_size]
+                built = self._build_bulk_update_sql(batch, fields, connection)
+                if built is None:
+                    continue
+                sql, params = built
+                count += connection.execute_write(sql, params)
         return count
 
     def in_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
@@ -789,33 +891,101 @@ class QuerySet(Generic[_T]):
     def __aiter__(self) -> AsyncIterator[_T]:
         return self._aiterator()
 
+    async def _aprefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
+        """Async counterpart of :meth:`_prefetch_reverse_fk`."""
+        from .related_managers import ReverseFKDescriptor
+        from .fields import ForeignKey, OneToOneField
+
+        cache_key = f"_prefetch_{fname}"
+        descriptor = self.model.__dict__.get(fname)
+        if isinstance(descriptor, ReverseFKDescriptor):
+            target_model = descriptor.source_model
+            target_field = descriptor.fk_field
+        else:
+            from .models import _model_registry
+
+            target_field = None
+            target_model = None
+            seen: set[Any] = set()
+            for model_cls in _model_registry.values():
+                if model_cls in seen:
+                    continue
+                seen.add(model_cls)
+                for f in model_cls._meta.fields:
+                    if not isinstance(f, (ForeignKey, OneToOneField)):
+                        continue
+                    try:
+                        rel = f._resolve_related_model()
+                    except Exception:
+                        continue
+                    if rel is not self.model:
+                        continue
+                    rel_name = f.related_name or f"{model_cls.__name__.lower()}_set"
+                    if rel_name == fname:
+                        target_field = f
+                        target_model = model_cls
+                        break
+                if target_field:
+                    break
+
+            if target_field is None or target_model is None:
+                return
+
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        if not src_pks:
+            for inst in instances:
+                inst.__dict__[cache_key] = []
+            return
+
+        related_objs: list[Any] = []
+        async for obj in QuerySet(target_model, self._db).filter(  # type: ignore[arg-type]
+            **{f"{target_field.name}__in": src_pks}
+        ):
+            related_objs.append(obj)
+
+        fk_attname = target_field.attname
+        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        for obj in related_objs:
+            fk_val = obj.__dict__.get(fk_attname)
+            if fk_val in grouped:
+                grouped[fk_val].append(obj)
+        for inst in instances:
+            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
+
     async def _ado_prefetch_related(self, instances: list[_T]) -> None:
         for fname in self._query.prefetch_related_fields:
+            field = None
             try:
                 field = self.model._meta.get_field(fname)
             except Exception:
-                continue
-            if not hasattr(field, "_resolve_related_model"):
-                continue
-            rel_model = field._resolve_related_model()
-            pk_vals = list(
-                {
-                    obj.__dict__.get(field.attname)
-                    for obj in instances
-                    if obj.__dict__.get(field.attname) is not None
-                }
-            )
-            cache_key = f"_cache_{fname}"
-            if not pk_vals:
+                pass
+
+            if field is not None and getattr(field, "many_to_many", False):
+                await self._aprefetch_m2m(instances, fname, field)
+            elif field is not None and hasattr(field, "_resolve_related_model"):
+                # Forward FK
+                rel_model = field._resolve_related_model()
+                pk_vals = list(
+                    {
+                        obj.__dict__.get(field.attname)
+                        for obj in instances
+                        if obj.__dict__.get(field.attname) is not None
+                    }
+                )
+                cache_key = f"_cache_{fname}"
+                if not pk_vals:
+                    for inst in instances:
+                        inst.__dict__.setdefault(cache_key, None)
+                    continue
+                related_objs: dict = {}
+                async for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals):  # type: ignore[arg-type]
+                    related_objs[obj.pk] = obj
                 for inst in instances:
-                    inst.__dict__.setdefault(cache_key, None)
-                continue
-            related_objs: dict = {}
-            async for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals):  # type: ignore[arg-type]
-                related_objs[obj.pk] = obj
-            for inst in instances:
-                fk_val = inst.__dict__.get(field.attname)
-                inst.__dict__[cache_key] = related_objs.get(fk_val)
+                    fk_val = inst.__dict__.get(field.attname)
+                    inst.__dict__[cache_key] = related_objs.get(fk_val)
+            else:
+                # Reverse FK
+                await self._aprefetch_reverse_fk(instances, fname)
 
     async def _aiterator(self) -> AsyncIterator[_T]:
         conn = self._get_async_connection()
@@ -1083,23 +1253,22 @@ class QuerySet(Generic[_T]):
     async def abulk_update(
         self, objs: list[_T], fields: list[str], batch_size: int = 1000
     ) -> int:
-        """Async version of :meth:`bulk_update`. Updates the given fields on
-        each object in a single transaction, one UPDATE per row."""
+        """Async version of :meth:`bulk_update`. Same single-query batching
+        strategy: one UPDATE statement per batch of ``batch_size`` objects."""
         if not objs:
             return 0
         from .transaction import aatomic
 
         count = 0
         async with aatomic(using=self._db):
-            for obj in objs:
-                update_kwargs: dict[str, Any] = {}
-                for fname in fields:
-                    try:
-                        field = self.model._meta.get_field(fname)
-                        update_kwargs[fname] = obj.__dict__.get(field.attname)
-                    except Exception:
-                        update_kwargs[fname] = obj.__dict__.get(fname)
-                count += await self.filter(pk=obj.pk).aupdate(**update_kwargs)
+            conn = self._get_async_connection()
+            for i in range(0, len(objs), batch_size):
+                batch = objs[i : i + batch_size]
+                built = self._build_bulk_update_sql(batch, fields, conn)
+                if built is None:
+                    continue
+                sql, params = built
+                count += await conn.execute_write(sql, params)
         return count
 
     async def ain_bulk(

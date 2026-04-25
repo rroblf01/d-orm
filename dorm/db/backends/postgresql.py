@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, contextmanager
+from typing import Any
 
 from ..utils import ASYNC_ATOMIC_STATE, normalize_db_exception
 
@@ -89,6 +90,10 @@ class PostgreSQLDatabaseWrapper:
         self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
         self._pool_timeout = float(settings.get("POOL_TIMEOUT", 30.0))
+        # POOL_CHECK runs `SELECT 1` on each checkout to detect stale
+        # connections. Default-on for safety; turn off for high-throughput
+        # apps where the ~ms overhead matters more than transparent reconnect.
+        self._pool_check = bool(settings.get("POOL_CHECK", True))
         self._pool = None
         self._pool_lock = threading.Lock()
         self._local = threading.local()  # per-instance atomic state per thread
@@ -115,14 +120,18 @@ class PostgreSQLDatabaseWrapper:
                         "psycopg[pool] is required for PostgreSQL support. "
                         "Install it with: pip install 'djanorm[postgresql]'"
                     ) from e
-                self._pool = ConnectionPool(
-                    _dsn_to_conninfo(self._dsn),
+                pool_kwargs: dict[str, Any] = dict(
                     min_size=self._min_size,
                     max_size=self._max_size,
                     timeout=self._pool_timeout,
                     open=True,
                     kwargs={"row_factory": dict_row},
-                    check=ConnectionPool.check_connection,
+                )
+                if self._pool_check:
+                    pool_kwargs["check"] = ConnectionPool.check_connection
+                self._pool = ConnectionPool(
+                    _dsn_to_conninfo(self._dsn),
+                    **pool_kwargs,
                 )
         return self._pool
 
@@ -313,6 +322,7 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
         self._pool_timeout = float(settings.get("POOL_TIMEOUT", 30.0))
+        self._pool_check = bool(settings.get("POOL_CHECK", True))
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pool_lock = asyncio.Lock()
@@ -343,14 +353,18 @@ class PostgreSQLAsyncDatabaseWrapper:
                         "psycopg[pool] is required for async PostgreSQL support. "
                         "Install it with: pip install 'djanorm[postgresql]'"
                     ) from e
-                pool = AsyncConnectionPool(
-                    _dsn_to_conninfo(self._dsn),
+                pool_kwargs: dict[str, Any] = dict(
                     min_size=self._min_size,
                     max_size=self._max_size,
                     timeout=self._pool_timeout,
                     open=False,
                     kwargs={"row_factory": dict_row},
-                    check=AsyncConnectionPool.check_connection,
+                )
+                if self._pool_check:
+                    pool_kwargs["check"] = AsyncConnectionPool.check_connection
+                pool = AsyncConnectionPool(
+                    _dsn_to_conninfo(self._dsn),
+                    **pool_kwargs,
                 )
                 await pool.open()
                 self._pool = pool

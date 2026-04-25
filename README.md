@@ -23,7 +23,7 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 - **on_delete** — `CASCADE`, `PROTECT`, `SET_NULL`, `SET_DEFAULT` enforced at Python level
 - **Streaming** — `iterator()` / `aiterator()` for memory-efficient row-by-row processing
 - **Convenience** — `get_or_none()` / `aget_or_none()` returns `None` instead of raising `DoesNotExist`
-- **Efficient bulk inserts** — `bulk_create()` uses a single multi-row INSERT per batch
+- **Efficient bulk operations** — `bulk_create()` uses a single multi-row INSERT per batch; `bulk_update()` rewrites N rows in one `UPDATE ... SET col = CASE pk WHEN ...` per batch (1 query, not N)
 
 ---
 
@@ -87,6 +87,8 @@ DATABASES = {
         "MIN_POOL_SIZE": 1,    # default
         "MAX_POOL_SIZE": 10,   # default
         "POOL_TIMEOUT": 30.0,  # seconds to wait for a free pool connection
+        "POOL_CHECK": True,    # default: SELECT 1 on each checkout for stale-conn detection
+                               # set to False on hot paths to skip the per-checkout probe
         "OPTIONS": {
             # Keys here are passed straight to psycopg.connect() — use
             # psycopg names (lowercase), not Django-style uppercase ones.
@@ -605,6 +607,11 @@ articles = list(Article.objects.prefetch_related("tags"))
 for article in articles:
     print([t.name for t in article.tags.all()])      # no extra DB hit
 ```
+
+`prefetch_related()` issues exactly **one extra query per relation**: forward
+FKs do `SELECT ... WHERE pk IN (...)`, reverse FKs do `SELECT ... WHERE fk IN (...)`,
+and M2M relations do a single `JOIN` between the through table and the target
+table — never a "fetch through, then fetch targets" two-step.
 
 ---
 

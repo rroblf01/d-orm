@@ -431,9 +431,17 @@ class Model(metaclass=ModelBase):
         fields = []
         values = []
         for field in meta.fields:
+            # Skip M2M and other non-column fields (their `column` is None).
+            if not field.column:
+                continue
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
             col_val = field.get_db_prep_value(field.pre_save(self, add=True))
+            if col_val is None and not field.null and not isinstance(field, AutoField):
+                if field.has_default():
+                    default = field.get_default()
+                    col_val = field.get_db_prep_value(default)
+                    self.__dict__[field.attname] = default
             fields.append(field)
             values.append(col_val)
 
