@@ -36,9 +36,17 @@ class BaseManager(Generic[_T]):
         return mgr
 
     def get_queryset(self) -> QuerySet[_T]:
+        from .db.connection import router_db_for_read
         from .queryset import QuerySet
         assert self.model is not None
-        return QuerySet(self.model, self._db)  # type: ignore[arg-type]
+        # When the user pinned the manager via .using("alias") or
+        # db_manager(), respect that. Otherwise consult DATABASE_ROUTERS
+        # for read routing — supports replica fan-out with zero changes
+        # to query call sites.
+        alias = self._db
+        if alias == "default":
+            alias = router_db_for_read(self.model, default=alias)
+        return QuerySet(self.model, alias)  # type: ignore[arg-type]
 
     # ── Proxy all QuerySet methods ────────────────────────────────────────────
 

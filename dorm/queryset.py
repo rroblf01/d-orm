@@ -583,13 +583,56 @@ class QuerySet(Generic[_T]):
             yield from instances
 
     def iterator(self, chunk_size: int | None = None) -> Iterator[_T]:
-        """Stream results one by one without populating the result cache."""
-        return self._iterator()
+        """Stream results one by one without populating the result cache.
+
+        When ``chunk_size`` is given, uses a server-side cursor on PG
+        (so the entire result set never lands in client memory) and
+        ``cursor.arraysize`` on SQLite. Without ``chunk_size``, the
+        previous all-rows-then-iterate path is preserved for back-compat.
+        """
+        if chunk_size is None:
+            return self._iterator()
+        return self._iterator_streaming(chunk_size)
 
     async def aiterator(self, chunk_size: int | None = None) -> AsyncIterator[_T]:
-        """Async stream results one by one without populating the result cache."""
-        async for item in self._aiterator():
-            yield item
+        """Async stream results one by one without populating the result cache.
+
+        Same chunk_size semantics as :meth:`iterator`.
+        """
+        if chunk_size is None:
+            async for item in self._aiterator():
+                yield item
+        else:
+            async for item in self._aiterator_streaming(chunk_size):
+                yield item
+
+    # ── Streaming iterator (chunk_size opt-in) ────────────────────────────────
+
+    def _iterator_streaming(self, chunk_size: int) -> Iterator[_T]:
+        """Server-side-cursor variant of :meth:`_iterator`. select_related
+        and prefetch_related are NOT supported here — they require the
+        full row set up front to issue follow-up queries. Plain rows /
+        values() are fine."""
+        connection = self._get_connection()
+        query, sf, values_mode, _sr, _prefetch = self._iter_setup()
+        sql, params = query.as_select(connection)
+        for row in connection.execute_streaming(sql, params, chunk_size):
+            if values_mode:
+                assert sf is not None
+                yield self._row_to_values_dict(row, sf)  # type: ignore
+            else:
+                yield self.model._from_db_row(row, connection)  # type: ignore[misc]
+
+    async def _aiterator_streaming(self, chunk_size: int) -> AsyncIterator[_T]:
+        conn = self._get_async_connection()
+        query, sf, values_mode, _sr, _prefetch = self._iter_setup()
+        sql, params = query.as_select(conn)
+        async for row in conn.execute_streaming(sql, params, chunk_size):
+            if values_mode:
+                assert sf is not None
+                yield self._row_to_values_dict(row, sf)  # type: ignore
+            else:
+                yield self.model._from_db_row(row, conn)  # type: ignore[misc]
 
     def get(self, *args: Q, **kwargs: Any) -> _T:
         qs = self.filter(*args, **kwargs)

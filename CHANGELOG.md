@@ -95,6 +95,44 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Flask), batch sizing guidance, and a "Production deployment" section
   covering logging, migration safety, pool sizing, and shutdown.
 
+### Production deployment helpers
+- **Health check.** ``dorm.health_check(alias)`` and
+  ``dorm.ahealth_check(alias)`` run ``SELECT 1`` against the configured
+  backend and return a JSON-shaped status dict suitable for
+  Kubernetes / ALB / Render readiness probes. Never raises — health
+  endpoints have to answer the orchestrator even when the DB is down.
+- **Pool stats.** ``wrapper.pool_stats()`` returns ``{vendor, open,
+  min_size, max_size, pool_size, pool_available, requests_waiting,
+  ...}`` for ad-hoc inspection or Prometheus exporters. Sync and async
+  PG wrappers expose the full psycopg-pool stats; SQLite returns a
+  minimal shim for API parity.
+- **PG connection lifecycle settings.** New ``MAX_IDLE`` (default 10 min)
+  and ``MAX_LIFETIME`` (default 1 hour) on each ``DATABASES`` entry —
+  passes through to psycopg-pool so long-lived workers don't pile up
+  stale conns behind PgBouncer / RDS Proxy.
+- **Multi-DB / read replicas.** New ``DATABASE_ROUTERS`` setting; each
+  router is an object with optional ``db_for_read(model, **hints)`` /
+  ``db_for_write(model, **hints)`` methods. ``Manager.get_queryset()``
+  consults routers when no explicit ``using=`` is set, so existing
+  call sites pick up replica routing with zero changes.
+- **Server-side cursors for streaming on PG.** ``iterator(chunk_size=N)``
+  / ``aiterator(chunk_size=N)`` now use a server-side named cursor on
+  PostgreSQL (so multi-million-row scans don't load the whole result
+  set into client memory) and ``cursor.arraysize`` on SQLite. Without
+  ``chunk_size``, the previous all-rows-then-iterate path is preserved.
+- **Async cancellation safety test.** New regression test exercising
+  ``asyncio.wait_for`` mid-query: the pool's ctx-manager returns the
+  connection, no leaks even when a coroutine is cancelled.
+- **Tutorial doc.** ``docs/tutorial.md`` walks a new user from install
+  to a working FastAPI ``/users`` API in 5 minutes — a learning
+  on-ramp that the long reference README didn't provide.
+
+### CI
+- **PG version matrix.** A second job runs the suite against PostgreSQL
+  13 / 14 / 15 / 17 (in addition to 16 in the Python matrix), catching
+  version-specific quirks in advisory locks, IDENTITY columns and
+  syntax.
+
 ### Production hardening
 - **Transient-error retry.** PostgreSQL execute paths automatically retry
   ``OperationalError`` / ``InterfaceError`` (network blips, server

@@ -125,13 +125,55 @@ async def test_stress_async_mixed_workload():
         await Author.objects.filter(name__startswith="ST-mix").adelete()
 
 
+# ── Cancellation safety ──────────────────────────────────────────────────────
+
+
+async def test_async_cancellation_returns_pool_to_clean_state():
+    """When ``asyncio.wait_for`` cancels mid-query, the pool's
+    connection-acquisition context manager must run and return the
+    connection. After cancellation the pool must accept new work."""
+    from dorm.db.connection import get_async_connection
+
+    wrapper = get_async_connection()
+    if wrapper.vendor != "postgresql":
+        pytest.skip("pool semantics relevant on PG only")
+
+    # Trigger pool open by running a normal query first.
+    await Author.objects.acount()
+    before = wrapper.pool_stats()
+
+    # Cancel something that would normally block briefly. We use a tiny
+    # timeout so the await on cur.execute is virtually guaranteed to be
+    # in flight when cancellation hits.
+    async def slow():
+        # pg_sleep(0.5) holds the conn server-side for half a second.
+        await get_async_connection().execute("SELECT pg_sleep(0.5)")
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(slow(), timeout=0.05)
+
+    # Pool must still serve more work. If the cancelled connection had
+    # leaked, this acquire would block until POOL_TIMEOUT.
+    n = await Author.objects.acount()
+    assert n >= 0
+    after = wrapper.pool_stats()
+    # No requests currently waiting after the cancellation settles.
+    assert after.get("requests_waiting", 0) == 0
+    del before  # quiet linter — only used for breakpoint debugging
+
+
 # ── No leftover open connections at session end ──────────────────────────────
 
 
 def test_stress_no_connection_leak_after_burst():
     """Run a burst and confirm the connection wrappers are tracked
-    correctly (no orphan pools accumulating across iterations)."""
-    from dorm.db.connection import _async_connections, _sync_connections
+    correctly (no orphan pools accumulating across iterations) AND that
+    the pool's checked-out count returns to zero between bursts."""
+    from dorm.db.connection import (
+        _async_connections,
+        _sync_connections,
+        get_connection,
+    )
 
     initial_sync = len(_sync_connections)
     initial_async = len(_async_connections)
@@ -148,3 +190,16 @@ def test_stress_no_connection_leak_after_burst():
     # (one per alias), regardless of how many query bursts ran.
     assert len(_sync_connections) <= initial_sync + 1
     assert len(_async_connections) <= initial_async + 1
+
+    # Pool stats post-burst: PG wrapper should report no requests queued
+    # and no connections checked out for active work.
+    wrapper = get_connection()
+    stats = wrapper.pool_stats()
+    if stats.get("vendor") == "postgresql" and stats.get("open"):
+        # ``requests_waiting`` is the number of acquirers currently
+        # blocked waiting for a connection — must be 0 after a quiet
+        # period. (``requests_queued`` is the cumulative count and
+        # legitimately grows on warm-up checkouts.)
+        assert stats.get("requests_waiting", 0) == 0, (
+            f"connections leaked: {stats!r}"
+        )

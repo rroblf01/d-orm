@@ -407,6 +407,204 @@ def test_dbcheck_passes_after_fresh_migration_with_fk(tmp_path: Path):
     assert "match" in dc.stdout.lower()
 
 
+# ── health_check / ahealth_check ──────────────────────────────────────────────
+
+
+def test_health_check_returns_ok_when_db_works():
+    result = dorm.health_check()
+    assert result["status"] == "ok"
+    assert result["alias"] == "default"
+    assert result["elapsed_ms"] >= 0
+
+
+def test_health_check_returns_error_for_unknown_alias():
+    """Wrong alias must return ``error`` status, not raise — health
+    endpoints have to respond to the orchestrator regardless."""
+    result = dorm.health_check(alias="does_not_exist")
+    assert result["status"] == "error"
+    assert "error" in result
+
+
+async def test_ahealth_check_returns_ok():
+    result = await dorm.ahealth_check()
+    assert result["status"] == "ok"
+    assert result["elapsed_ms"] >= 0
+
+
+async def test_ahealth_check_handles_error_gracefully():
+    result = await dorm.ahealth_check(alias="missing")
+    assert result["status"] == "error"
+
+
+# ── pool_stats() ──────────────────────────────────────────────────────────────
+
+
+def test_pool_stats_shape():
+    from dorm.db.connection import get_connection
+
+    wrapper = get_connection()
+    # Trigger pool open with a query.
+    wrapper.execute("SELECT 1")
+    stats = wrapper.pool_stats()
+    assert "vendor" in stats
+    assert stats["vendor"] in ("sqlite", "postgresql")
+    if stats["vendor"] == "postgresql":
+        # min_size / max_size always present for PG; pool was opened above.
+        assert "min_size" in stats
+        assert "max_size" in stats
+
+
+def test_pool_stats_settings_max_idle_lifetime_pass_through():
+    """Verify MAX_IDLE / MAX_LIFETIME from DATABASES reach the wrapper."""
+    from dorm.db.backends.postgresql import PostgreSQLDatabaseWrapper
+
+    w = PostgreSQLDatabaseWrapper({
+        "NAME": "x",
+        "USER": "u",
+        "MAX_IDLE": 120.0,
+        "MAX_LIFETIME": 1800.0,
+    })
+    assert w._max_idle == 120.0
+    assert w._max_lifetime == 1800.0
+
+
+# ── DATABASE_ROUTERS ──────────────────────────────────────────────────────────
+
+
+def test_router_db_for_read_consults_routers(monkeypatch):
+    from dorm.db.connection import router_db_for_read
+    from dorm.conf import settings
+
+    class _R:
+        def db_for_read(self, model, **hints):
+            return "replica"
+
+    original = list(settings.DATABASE_ROUTERS)
+    settings.DATABASE_ROUTERS = [_R()]
+    try:
+        from tests.models import Author
+        assert router_db_for_read(Author) == "replica"
+    finally:
+        settings.DATABASE_ROUTERS = original
+
+
+def test_router_falls_back_to_default_when_no_router_returns():
+    from dorm.db.connection import router_db_for_read
+    from tests.models import Author
+
+    class _R:
+        def db_for_read(self, model, **hints):
+            return None  # opt out
+
+    from dorm.conf import settings
+    original = list(settings.DATABASE_ROUTERS)
+    settings.DATABASE_ROUTERS = [_R()]
+    try:
+        assert router_db_for_read(Author) == "default"
+    finally:
+        settings.DATABASE_ROUTERS = original
+
+
+def test_router_first_truthy_wins():
+    """First router that returns a non-None alias wins; later ones don't run."""
+    from dorm.db.connection import router_db_for_read
+    from tests.models import Author
+
+    calls = []
+
+    class _A:
+        def db_for_read(self, model, **hints):
+            calls.append("A")
+            return "first"
+
+    class _B:
+        def db_for_read(self, model, **hints):
+            calls.append("B")
+            return "second"
+
+    from dorm.conf import settings
+    original = list(settings.DATABASE_ROUTERS)
+    settings.DATABASE_ROUTERS = [_A(), _B()]
+    try:
+        assert router_db_for_read(Author) == "first"
+        assert calls == ["A"]
+    finally:
+        settings.DATABASE_ROUTERS = original
+
+
+# ── execute_streaming / iterator(chunk_size=N) ────────────────────────────────
+
+
+def test_iterator_with_chunk_size_streams():
+    """``iterator(chunk_size=N)`` must yield rows lazily — verify by
+    inserting a known volume and consuming the generator one row at a
+    time."""
+    from tests.models import Author
+
+    Author.objects.filter(name__startswith="STR-").delete()
+    Author.objects.bulk_create([
+        Author(name=f"STR-{i:04d}", age=i, email=f"str{i}@x.com")
+        for i in range(250)
+    ])
+    try:
+        seen = 0
+        for obj in (
+            Author.objects.filter(name__startswith="STR-")
+            .order_by("name")
+            .iterator(chunk_size=50)
+        ):
+            assert obj.name.startswith("STR-")
+            seen += 1
+        assert seen == 250
+    finally:
+        Author.objects.filter(name__startswith="STR-").delete()
+
+
+async def test_aiterator_with_chunk_size_streams():
+    from tests.models import Author
+
+    await Author.objects.filter(name__startswith="ASTR-").adelete()
+    await Author.objects.abulk_create([
+        Author(name=f"ASTR-{i:04d}", age=i, email=f"astr{i}@x.com")
+        for i in range(150)
+    ])
+    try:
+        seen = 0
+        async for obj in (
+            Author.objects.filter(name__startswith="ASTR-")
+            .order_by("name")
+            .aiterator(chunk_size=50)
+        ):
+            assert obj.name.startswith("ASTR-")
+            seen += 1
+        assert seen == 150
+    finally:
+        await Author.objects.filter(name__startswith="ASTR-").adelete()
+
+
+def test_iterator_with_values_mode_and_chunk_size():
+    """Streaming + values() — yields dicts, still streams."""
+    from tests.models import Author
+
+    Author.objects.filter(name__startswith="STV-").delete()
+    Author.objects.bulk_create([
+        Author(name=f"STV-{i}", age=i, email=f"stv{i}@x.com")
+        for i in range(50)
+    ])
+    try:
+        rows = list(
+            Author.objects.filter(name__startswith="STV-")
+            .order_by("name")
+            .values("name", "age")
+            .iterator(chunk_size=10)
+        )
+        assert len(rows) == 50
+        assert all(isinstance(r, dict) for r in rows)
+        assert {"name", "age"} <= set(rows[0].keys())
+    finally:
+        Author.objects.filter(name__startswith="STV-").delete()
+
+
 def test_dbcheck_reports_column_drift(tmp_path: Path):
     db_path = tmp_path / "db.sqlite3"
     (tmp_path / "settings.py").write_text(

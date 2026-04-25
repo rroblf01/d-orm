@@ -144,6 +144,24 @@ class SQLiteDatabaseWrapper:
         conn.executescript(sql)
         conn.commit()
 
+    def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
+        """Yield rows lazily without buffering the whole result set.
+
+        SQLite's default cursor already streams from disk in arraysize
+        chunks, so we just expose its iterator. ``chunk_size`` tunes
+        ``cursor.arraysize``.
+        """
+        conn = self.get_connection()
+        with log_query("sqlite", sql, params):
+            try:
+                cursor = conn.execute(self._adapt(sql), params or [])
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+            cursor.arraysize = chunk_size
+        for row in cursor:
+            yield row
+
     def table_exists(self, table_name: str) -> bool:
         rows = self.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -170,6 +188,13 @@ class SQLiteDatabaseWrapper:
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             conn.rollback()
+
+    def pool_stats(self) -> dict:
+        """SQLite has no pool — returns a minimal dict for API parity with
+        the PG wrappers (``open`` reflects whether a thread-local conn
+        exists for the calling thread)."""
+        conn = getattr(self._local, "conn", None)
+        return {"open": conn is not None, "vendor": "sqlite"}
 
     def close(self):
         if hasattr(self._local, "conn") and self._local.conn:
@@ -362,6 +387,19 @@ class SQLiteAsyncDatabaseWrapper:
             await conn.executescript(sql)
             await conn.commit()
 
+    async def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
+        """Async equivalent of :meth:`SQLiteDatabaseWrapper.execute_streaming`."""
+        async with self._operation_conn() as conn:
+            with log_query("sqlite", sql, params):
+                try:
+                    cursor = await conn.execute(self._adapt(sql), params or [])
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
+            cursor.arraysize = chunk_size
+            async for row in cursor:
+                yield row
+
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -391,6 +429,11 @@ class SQLiteAsyncDatabaseWrapper:
     async def rollback(self) -> None:
         if self._conn is not None:
             await self._conn.rollback()
+
+    def pool_stats(self) -> dict:
+        """API-parity shim for the async wrapper. SQLite uses a single
+        connection per loop, no pool."""
+        return {"open": self._conn is not None, "vendor": "sqlite"}
 
     async def close(self):
         if self._conn is not None:

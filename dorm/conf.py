@@ -82,6 +82,16 @@ class Settings:
     DATABASES: dict = {}
     INSTALLED_APPS: list = []
     DEFAULT_AUTO_FIELD: str = "dorm.fields.BigAutoField"
+    # Routers: list of objects with optional ``db_for_read(model, **hints)``
+    # / ``db_for_write(model, **hints)`` methods. The first router that
+    # returns a non-None alias wins. Use to point reads at a replica:
+    #
+    #     class ReplicaRouter:
+    #         def db_for_read(self, model, **hints): return "replica"
+    #         def db_for_write(self, model, **hints): return "default"
+    #
+    #     dorm.configure(DATABASES={...}, DATABASE_ROUTERS=[ReplicaRouter()])
+    DATABASE_ROUTERS: list = []
     # NOTE: TIME_ZONE and USE_TZ are reserved for future timezone-aware
     # datetime support. They are NOT yet wired into the field encoding
     # paths — datetime values are stored exactly as Python provides them.

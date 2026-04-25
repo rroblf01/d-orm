@@ -2,6 +2,33 @@
 
 A Django-inspired ORM for Python with full **synchronous and asynchronous** support. The same API you know from Django, without depending on the full framework.
 
+> **New here?** The 5-minute walkthrough lives in [docs/tutorial.md](docs/tutorial.md). The rest of this README is reference material — use the TOC to jump to what you need.
+
+## Table of contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Setup](#setup)
+- [Defining models](#defining-models)
+- [Synchronous operations](#synchronous-operations)
+- [Asynchronous operations](#asynchronous-operations)
+- [Relationship loading](#relationship-loading)
+- [Aggregations and annotations](#aggregations-and-annotations)
+- [DB Functions](#db-functions)
+- [Set operations](#set-operations)
+- [Streaming with `iterator()`](#streaming-with-iterator)
+- [Transactions](#transactions)
+- [Signals](#signals)
+- [Validation](#validation)
+- [ManyToManyField](#manytomanyfield)
+- [Migrations](#migrations)
+- [Production deployment](#production-deployment)
+- [Versioning and deprecation policy](#versioning-and-deprecation-policy)
+- [Dependencies](#dependencies)
+- [License](#license)
+
+---
+
 ## Features
 
 - **Type-safe** — every field is `Field[T]` (e.g. `CharField(Field[str])`), so `user.name` is statically `str` (not `Any`), and `Author.objects.filter(...).first()` is `Author | None`. Same `Mapped[T]` ergonomic SQLAlchemy 2.0 made famous, no extra annotation per field.
@@ -1652,6 +1679,94 @@ to avoid cold-start latency on the first request.
 
 If you've eliminated stale-connection bugs and want to shave per-query
 latency, set `POOL_CHECK=False` to skip the per-checkout `SELECT 1` probe.
+
+### Health check endpoint
+
+For Kubernetes readiness / liveness probes, AWS ALB target groups, or
+any orchestrator that polls a URL, dorm ships a tiny helper that runs
+`SELECT 1` and returns a JSON-friendly status dict. It **never raises**
+— health checks must answer the orchestrator even when the DB is down.
+
+```python
+import dorm
+
+# Sync (Flask / Django views):
+status = dorm.health_check()
+# → {"status": "ok", "alias": "default", "elapsed_ms": 1.4}
+# or  {"status": "error", "alias": "default", "elapsed_ms": 5000.0,
+#      "error": "OperationalError: connection refused"}
+
+# Async (FastAPI / Starlette):
+@app.get("/healthz")
+async def healthz():
+    return await dorm.ahealth_check()
+```
+
+A failed check returns `{"status": "error"}` with HTTP 200; map that to
+a non-2xx response in your route handler if your orchestrator demands
+it. Multi-DB? Pass `alias="replica"` to check that one instead.
+
+### Pool monitoring
+
+Both wrappers expose `pool_stats()` for ad-hoc inspection or for
+Prometheus exporters:
+
+```python
+from dorm.db.connection import get_async_connection
+
+stats = get_async_connection().pool_stats()
+# PG → {"open": True, "vendor": "postgresql", "min_size": 1, "max_size": 10,
+#       "pool_size": 4, "pool_available": 3, "requests_waiting": 0, ...}
+# SQLite → {"open": True, "vendor": "sqlite"}
+```
+
+Combined with `dorm.post_query` (see below), it's all you need to
+wire end-to-end observability.
+
+### Connection lifecycle (PG)
+
+In addition to `MIN_POOL_SIZE` / `MAX_POOL_SIZE` / `POOL_TIMEOUT`,
+the PG pool exposes:
+
+| setting | default | meaning |
+|---|---|---|
+| `MAX_IDLE` | `600.0` (10 min) | recycle connections idle longer than this |
+| `MAX_LIFETIME` | `3600.0` (1 hr) | recycle every connection after this regardless of activity |
+
+The defaults are sensible for most apps. Long-lived workers behind a
+proxy (PgBouncer, RDS Proxy) or with strict ALB idle timeouts may want
+`MAX_IDLE` lower than the proxy's drop timeout.
+
+### Multi-DB / read replicas (DATABASE_ROUTERS)
+
+Pass `DATABASE_ROUTERS=[router]` to `dorm.configure()` to send reads
+and writes to different aliases. Each router is an object with
+optional `db_for_read(model, **hints)` / `db_for_write(model, **hints)`
+methods; the first router that returns a non-`None` alias wins.
+
+```python
+class ReplicaRouter:
+    def db_for_read(self, model, **hints):
+        return "replica"
+    def db_for_write(self, model, **hints):
+        return "default"
+
+dorm.configure(
+    DATABASES={
+        "default": {"ENGINE": "postgresql", "HOST": "primary.local", ...},
+        "replica": {"ENGINE": "postgresql", "HOST": "replica.local", ...},
+    },
+    DATABASE_ROUTERS=[ReplicaRouter()],
+)
+
+# Now Author.objects.filter(...) reads from "replica";
+# Author.objects.using("default").create(...) (or via db_for_write) writes
+# to the primary.
+```
+
+Routers are consulted only when no explicit `using=` is set, so calls
+that need to bypass routing (admin scripts, test setup) just pass
+`using="default"`.
 
 ### Web frameworks
 

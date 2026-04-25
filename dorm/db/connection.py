@@ -11,6 +11,42 @@ _async_connections: dict[str, Any] = {}
 _sync_lock = threading.Lock()
 
 
+def router_db_for_read(model, *, default: str = "default", **hints) -> str:
+    """Consult ``settings.DATABASE_ROUTERS`` for the alias to use when
+    reading rows of *model*. First router that returns a truthy string
+    wins; otherwise *default*."""
+    from ..conf import settings
+
+    for router in getattr(settings, "DATABASE_ROUTERS", []) or []:
+        fn = getattr(router, "db_for_read", None)
+        if fn is None:
+            continue
+        try:
+            alias = fn(model, **hints)
+        except Exception:
+            continue
+        if alias:
+            return alias
+    return default
+
+
+def router_db_for_write(model, *, default: str = "default", **hints) -> str:
+    """Mirror of :func:`router_db_for_read` for writes."""
+    from ..conf import settings
+
+    for router in getattr(settings, "DATABASE_ROUTERS", []) or []:
+        fn = getattr(router, "db_for_write", None)
+        if fn is None:
+            continue
+        try:
+            alias = fn(model, **hints)
+        except Exception:
+            continue
+        if alias:
+            return alias
+    return default
+
+
 def _get_settings(alias: str = "default") -> dict:
     from ..conf import settings, _autodiscover_settings
     if not settings._configured:
@@ -91,6 +127,59 @@ async def close_all_async():
         if hasattr(conn, "close"):
             await conn.close()
     _async_connections.clear()
+
+
+def health_check(alias: str = "default", timeout: float = 5.0) -> dict[str, Any]:
+    """Run a trivial ``SELECT 1`` against the configured backend and return
+    a status dict suitable for a Kubernetes / ECS / Render readiness probe.
+
+    Returns a ``dict`` with ``status`` (``"ok"`` / ``"error"``), ``alias``,
+    ``elapsed_ms``, and (on failure) ``error`` describing the underlying
+    exception. Never raises — health checks must always respond, even when
+    the database is down.
+    """
+    import time as _time
+
+    start = _time.perf_counter()
+    try:
+        conn = get_connection(alias)
+        conn.execute("SELECT 1")
+    except Exception as exc:
+        return {
+            "status": "error",
+            "alias": alias,
+            "elapsed_ms": (_time.perf_counter() - start) * 1000.0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "status": "ok",
+        "alias": alias,
+        "elapsed_ms": (_time.perf_counter() - start) * 1000.0,
+    }
+
+
+async def ahealth_check(alias: str = "default", timeout: float = 5.0) -> dict[str, Any]:
+    """Async counterpart of :func:`health_check` for FastAPI / Starlette /
+    Sanic routes."""
+    import asyncio
+    import time as _time
+
+    start = _time.perf_counter()
+    try:
+        conn = get_async_connection(alias)
+        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=timeout)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "alias": alias,
+            "elapsed_ms": (_time.perf_counter() - start) * 1000.0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "status": "ok",
+        "alias": alias,
+        "elapsed_ms": (_time.perf_counter() - start) * 1000.0,
+    }
 
 
 def reset_connections():

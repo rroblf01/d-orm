@@ -101,6 +101,12 @@ class PostgreSQLDatabaseWrapper:
         self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
         self._pool_timeout = float(settings.get("POOL_TIMEOUT", 30.0))
+        # MAX_IDLE: idle connections older than this are recycled.
+        # MAX_LIFETIME: every connection is recycled after living this long
+        # regardless of activity (defends against server-side memory growth
+        # on long-running PG sessions).
+        self._max_idle = float(settings.get("MAX_IDLE", 600.0))
+        self._max_lifetime = float(settings.get("MAX_LIFETIME", 3600.0))
         # POOL_CHECK runs `SELECT 1` on each checkout to detect stale
         # connections. Default-on for safety; turn off for high-throughput
         # apps where the ~ms overhead matters more than transparent reconnect.
@@ -135,6 +141,8 @@ class PostgreSQLDatabaseWrapper:
                     min_size=self._min_size,
                     max_size=self._max_size,
                     timeout=self._pool_timeout,
+                    max_idle=self._max_idle,
+                    max_lifetime=self._max_lifetime,
                     open=True,
                     kwargs={"row_factory": dict_row},
                 )
@@ -302,6 +310,36 @@ class PostgreSQLDatabaseWrapper:
             with conn.cursor() as cur:
                 cur.execute(sql)
 
+    def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
+        """Yield rows from a server-side named cursor — for huge result
+        sets that would blow up memory if fetched all at once. PG holds
+        the result set on the server and streams in batches of
+        ``chunk_size``.
+
+        Falls back to the regular non-streaming path while inside an
+        ``atomic()`` block: named cursors require their own transaction
+        and we don't want to interfere with the user's current one.
+        """
+        if self._atomic_conn is not None:
+            for row in self._exec(self._atomic_conn, sql, params):
+                yield row
+            return
+
+        sql_adapted = _to_pyformat(sql)
+        with log_query("postgresql", sql, params):
+            with self._get_pool().connection() as conn:
+                # Named cursor → server-side. ``itersize`` is psycopg's
+                # batch fetch size.
+                with conn.cursor(name="dorm_stream") as cur:
+                    cur.itersize = chunk_size
+                    try:
+                        cur.execute(sql_adapted, params or [])
+                    except Exception as exc:
+                        normalize_db_exception(exc)
+                        raise
+                    for row in cur:
+                        yield row
+
     def table_exists(self, table_name: str) -> bool:
         rows = self.execute(
             "SELECT tablename FROM pg_tables WHERE tablename = %s",
@@ -342,6 +380,24 @@ class PostgreSQLDatabaseWrapper:
         if conn is not None and not conn.autocommit:
             conn.rollback()
 
+    def pool_stats(self) -> dict[str, Any]:
+        """Return current pool statistics — useful for capacity planning,
+        admin dashboards, and Prometheus exporters. Keys depend on
+        psycopg-pool's internal stats; ``open`` is always present."""
+        if self._pool is None:
+            return {"open": False, "vendor": "postgresql"}
+        try:
+            stats = self._pool.get_stats()
+        except Exception:
+            stats = {}
+        return {
+            "open": True,
+            "vendor": "postgresql",
+            "min_size": self._min_size,
+            "max_size": self._max_size,
+            **stats,
+        }
+
     def close(self):
         conn = getattr(self._local, "autocommit_conn", None)
         if conn is not None:
@@ -365,6 +421,8 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._min_size = int(settings.get("MIN_POOL_SIZE", 1))
         self._max_size = int(settings.get("MAX_POOL_SIZE", 10))
         self._pool_timeout = float(settings.get("POOL_TIMEOUT", 30.0))
+        self._max_idle = float(settings.get("MAX_IDLE", 600.0))
+        self._max_lifetime = float(settings.get("MAX_LIFETIME", 3600.0))
         self._pool_check = bool(settings.get("POOL_CHECK", True))
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -400,6 +458,8 @@ class PostgreSQLAsyncDatabaseWrapper:
                     min_size=self._min_size,
                     max_size=self._max_size,
                     timeout=self._pool_timeout,
+                    max_idle=self._max_idle,
+                    max_lifetime=self._max_lifetime,
                     open=False,
                     kwargs={"row_factory": dict_row},
                 )
@@ -563,6 +623,29 @@ class PostgreSQLAsyncDatabaseWrapper:
             async with conn.cursor() as cur:
                 await cur.execute(sql)
 
+    async def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
+        """Async streaming via a server-side named cursor. See
+        :meth:`PostgreSQLDatabaseWrapper.execute_streaming` for the sync
+        version's notes about transaction interactions."""
+        state = ASYNC_ATOMIC_STATE.get()
+        if state is not None and state[0] is self:
+            for row in await self._aexec(state[1], sql, params):
+                yield row
+            return
+
+        sql_adapted = _to_pyformat(sql)
+        with log_query("postgresql", sql, params):
+            async with (await self._get_pool()).connection() as conn:
+                async with conn.cursor(name="dorm_stream") as cur:
+                    cur.itersize = chunk_size
+                    try:
+                        await cur.execute(sql_adapted, params or [])
+                    except Exception as exc:
+                        normalize_db_exception(exc)
+                        raise
+                    async for row in cur:
+                        yield row
+
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(
             "SELECT tablename FROM pg_tables WHERE tablename = %s",
@@ -598,6 +681,23 @@ class PostgreSQLAsyncDatabaseWrapper:
     async def rollback(self) -> None:
         if self._autocommit_conn is not None and not self._autocommit_conn.autocommit:
             await self._autocommit_conn.rollback()
+
+    def pool_stats(self) -> dict[str, Any]:
+        """Async pool stats — same shape as the sync wrapper's
+        :meth:`pool_stats`. Safe to call without awaiting."""
+        if self._pool is None:
+            return {"open": False, "vendor": "postgresql"}
+        try:
+            stats = self._pool.get_stats()
+        except Exception:
+            stats = {}
+        return {
+            "open": True,
+            "vendor": "postgresql",
+            "min_size": self._min_size,
+            "max_size": self._max_size,
+            **stats,
+        }
 
     async def close(self):
         if self._autocommit_conn is not None:

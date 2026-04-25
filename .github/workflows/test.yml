@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
+    name: Python ${{ matrix.python-version }} / PG 16
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -61,6 +61,56 @@ jobs:
 
       - name: Lint
         run: uv run ruff check .
+
+      - name: Run tests
+        run: uv run pytest -n 4 --tb=short -q
+
+  # Catch PG-version-specific behavior (advisory locks, IDENTITY columns,
+  # syntax differences) by running the suite against the supported range.
+  # Latest Python only — Python compat is covered by the matrix above.
+  pg-matrix:
+    name: PG ${{ matrix.postgres-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["13-alpine", "14-alpine", "15-alpine", "17-alpine"]
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dorm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DORM_TEST_POSTGRES_HOST: localhost
+      DORM_TEST_POSTGRES_PORT: 5432
+      DORM_TEST_POSTGRES_USER: postgres
+      DORM_TEST_POSTGRES_PASSWORD: postgres
+      DORM_TEST_POSTGRES_DB: dorm_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --extra=all
 
       - name: Run tests
         run: uv run pytest -n 4 --tb=short -q
