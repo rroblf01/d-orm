@@ -22,3 +22,5 @@ wheels/
 example/**/migrations/
 
 .coverage
+
+site/*

@@ -23,9 +23,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
@@ -33,9 +33,11 @@ jobs:
         run: uv sync --extra=docs --extra=sqlite --extra=postgresql --extra=pydantic
 
       - name: Build site
+        env:
+          SITE_URL: https://rroblf01.github.io/d-orm/
         run: uv run mkdocs build --strict
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: ./site
 

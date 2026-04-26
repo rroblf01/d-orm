@@ -139,6 +139,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **README sections**: Secrets management (env vars / pydantic-settings
   / AWS Secrets Manager), OpenTelemetry integration snippet for the
   query observability hooks.
+- **Bilingual documentation site** (English + Spanish) via
+  ``mkdocs-static-i18n`` with the ``suffix`` layout (``foo.en.md`` /
+  ``foo.es.md``). New full-length guides shipped in both languages:
+  Getting started, Tutorial, Models & fields, Querying, Async
+  patterns, Migrations, Transactions, FastAPI integration, CLI
+  reference, Production deployment, Cookbook, Troubleshooting, and
+  Migration from Django ORM. The auto-generated API reference stays
+  English-only (docstrings) with Spanish stubs that link back.
 
 ### Production deployment helpers
 - **Health check.** ``dorm.health_check(alias)`` and

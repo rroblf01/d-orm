@@ -1,15 +1,22 @@
 site_name: djanorm
 site_description: A Django-inspired ORM with sync + async support, FastAPI-friendly schemas, and a tiny CLI.
-site_url: https://rroblf01.github.io/d-orm/
+# site_url is read from $SITE_URL so `mkdocs serve` can run at "/" locally
+# without forcing the /d-orm/ prefix that GitHub Pages serves under. The
+# deploy workflow sets SITE_URL=https://rroblf01.github.io/d-orm/ before
+# running mkdocs build, so canonical URLs and the i18n language switcher
+# point at the right place in production.
+site_url: !ENV [SITE_URL, ""]
 repo_url: https://github.com/rroblf01/d-orm/
 repo_name: rroblf01/d-orm
 
 theme:
   name: material
   features:
-    - navigation.instant
+    # navigation.instant is incompatible with the i18n plugin's
+    # contextual language switcher — leave it off.
     - navigation.tracking
     - navigation.sections
+    - navigation.tabs
     - content.code.copy
     - content.code.annotate
   palette:
@@ -26,20 +33,46 @@ theme:
         icon: material/weather-night
         name: Switch to light mode
 
-nav:
-  - Home: index.md
-  - Tutorial: tutorial.md
-  - Migration from Django ORM: migration-from-django.md
-  - API Reference:
-      - Models & fields: api/models.md
-      - QuerySet & Manager: api/queryset.md
-      - Transactions: api/transaction.md
-      - Signals: api/signals.md
-      - Pydantic interop: api/pydantic.md
-      - Connection / health: api/connection.md
-
+# i18n: docs files use the suffix scheme — `foo.en.md` / `foo.es.md`.
+# A language picker appears in the header automatically.
 plugins:
   - search
+  - i18n:
+      docs_structure: suffix
+      # API reference pages are English-only (auto-generated from
+      # docstrings). Disabling fallback prevents the i18n plugin from
+      # duplicating them under /es/, which would make mkdocstrings
+      # register every Python identifier twice.
+      fallback_to_default: false
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: es
+          name: Español
+          build: true
+          nav_translations:
+            Home: Inicio
+            Getting started: Empezando
+            Tutorial: Tutorial
+            Guides: Guías
+            Models & fields: Modelos y campos
+            Querying: Consultas
+            Async patterns: Patrones async
+            Migrations: Migraciones
+            Transactions: Transacciones
+            FastAPI integration: Integración con FastAPI
+            CLI reference: Referencia del CLI
+            Production deployment: Despliegue en producción
+            Cookbook: Recetario
+            Troubleshooting: Resolución de problemas
+            Migration from Django ORM: Migración desde Django ORM
+            API Reference: Referencia API
+            QuerySet & Manager: QuerySet y Manager
+            Signals: Señales
+            Pydantic interop: Interop con Pydantic
+            Connection / health: Conexión y health-check
   - mkdocstrings:
       handlers:
         python:
@@ -51,6 +84,30 @@ plugins:
             docstring_style: google
             heading_level: 2
 
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Tutorial: tutorial.md
+  - Guides:
+      - Models & fields: models.md
+      - Querying: queries.md
+      - Async patterns: async.md
+      - Migrations: migrations.md
+      - Transactions: transactions.md
+      - FastAPI integration: fastapi.md
+      - CLI reference: cli.md
+      - Production deployment: production.md
+      - Cookbook: cookbook.md
+      - Troubleshooting: troubleshooting.md
+      - Migration from Django ORM: migration-from-django.md
+  - API Reference:
+      - Models & fields: api/models.md
+      - QuerySet & Manager: api/queryset.md
+      - Transactions: api/transaction.md
+      - Signals: api/signals.md
+      - Pydantic interop: api/pydantic.md
+      - Connection / health: api/connection.md
+
 markdown_extensions:
   - admonition
   - attr_list
@@ -58,7 +115,10 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
   - pymdownx.inlinehilite
+  - pymdownx.snippets
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
