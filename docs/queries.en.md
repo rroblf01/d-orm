@@ -76,15 +76,48 @@ Author.objects.first()                       # SELECT ... LIMIT 1
 Author.objects.last()                        # opposite ordering, LIMIT 1
 ```
 
+## Materializing the whole queryset
+
+`all()` returns a fresh `QuerySet` — it doesn't hit the DB until you
+iterate, slice, or call a terminal method.
+
+```python
+# Sync
+authors = list(Author.objects.all())
+for a in Author.objects.all():
+    ...
+
+# Async — three equivalent ways
+authors = [a async for a in Author.objects.all()]
+authors = await Author.objects.all()           # QuerySets are awaitable
+async for a in Author.objects.all():
+    ...
+```
+
+Use `iterator()` / `aiterator()` (see [Streaming](#streaming-for-huge-result-sets))
+when you don't want every row in memory at once.
+
 ## Values and value lists
 
 ```python
-# list[dict[str, Any]] — chainable (filter, order_by) before iterating
+# Sync — list[dict[str, Any]] — chainable (filter, order_by) before iterating
 Author.objects.values("name", "age")
 
-# list[tuple] — single column with flat=True returns list[value]
+# Async — same shape, awaitable
+await Author.objects.avalues("name", "age")
+# or, since QuerySets are awaitable:
+await Author.objects.values("name", "age")
+
+# Sync — list[tuple]; flat=True with a single column returns list[value]
 Author.objects.values_list("name", flat=True)
+
+# Async — same shape, awaitable
+await Author.objects.avalues_list("name", flat=True)
+await Author.objects.values_list("name", flat=True)
 ```
+
+`avalues` / `avalues_list` materialize the whole queryset in one
+round-trip; for huge sets prefer streaming via `aiterator()`.
 
 ## Aggregations & annotations
 

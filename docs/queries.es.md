@@ -73,15 +73,49 @@ Author.objects.first()                       # SELECT ... LIMIT 1
 Author.objects.last()
 ```
 
+## Materializar el queryset completo
+
+`all()` devuelve un `QuerySet` nuevo — no toca la BD hasta que
+itere, slices, o llames a un método terminal.
+
+```python
+# Sync
+authors = list(Author.objects.all())
+for a in Author.objects.all():
+    ...
+
+# Async — tres formas equivalentes
+authors = [a async for a in Author.objects.all()]
+authors = await Author.objects.all()           # los QuerySets son awaitable
+async for a in Author.objects.all():
+    ...
+```
+
+Usa `iterator()` / `aiterator()` (ver [Streaming](#streaming-para-resultsets-enormes))
+cuando no quieras cargar todas las filas en memoria.
+
 ## Values y value lists
 
 ```python
-# list[dict[str, Any]] — encadenable (filter, order_by) antes de iterar
+# Sync — list[dict[str, Any]] — encadenable (filter, order_by) antes de iterar
 Author.objects.values("name", "age")
 
-# list[tuple] — una sola columna con flat=True devuelve list[value]
+# Async — misma forma, awaitable
+await Author.objects.avalues("name", "age")
+# o bien, como los QuerySets son awaitable:
+await Author.objects.values("name", "age")
+
+# Sync — list[tuple]; flat=True con una sola columna devuelve list[value]
 Author.objects.values_list("name", flat=True)
+
+# Async — misma forma, awaitable
+await Author.objects.avalues_list("name", flat=True)
+await Author.objects.values_list("name", flat=True)
 ```
+
+`avalues` / `avalues_list` materializan el queryset entero en un
+único round-trip; para sets enormes prefiere streaming con
+`aiterator()`.
 
 ## Agregaciones y anotaciones
 
