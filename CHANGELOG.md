@@ -6,6 +6,31 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **SQLite ``journal_mode`` whitelist** — ``DATABASES["default"]["OPTIONS"]
+  ["journal_mode"]`` is now validated against the documented set
+  (``DELETE``, ``TRUNCATE``, ``PERSIST``, ``MEMORY``, ``WAL``, ``OFF``)
+  before being spliced into ``PRAGMA journal_mode = ...``. Previously
+  any string was interpolated verbatim — a misconfigured value such as
+  ``"WAL; DROP TABLE dorm_migrations; --"`` would have executed as DDL.
+  Defence-in-depth: the value comes from a trusted ``settings.py``, but
+  configs populated from environment variables / vault secrets now fail
+  fast with ``ImproperlyConfigured`` instead of running arbitrary SQL.
+
+### Fixed
+- **Async ``execute_script()`` deadlock inside ``aatomic()``** — the
+  async SQLite wrapper held its outer ``_lock`` for the entire
+  ``aatomic`` block, but ``execute_script`` tried to re-acquire the
+  same (non-reentrant) lock, hanging the coroutine forever. It now
+  goes through ``_operation_conn`` and reuses the already-held atomic
+  connection. (``execute_script`` is called by user code that runs
+  ``RunSQL`` migrations or raw DDL.)
+- **Sync ``execute_script()`` redundant commit** — ``sqlite3``'s
+  ``executescript()`` already commits implicitly, so the explicit
+  ``conn.commit()`` afterwards was a no-op round-trip. Removed; both
+  sync and async ``execute_script`` now document SQLite's behaviour
+  of committing the surrounding transaction.
+
 ### Added
 - `dorm` CLI: `init` subcommand to scaffold `settings.py` (and optionally an
   app folder via `--app NAME`); `help` subcommand showing all available

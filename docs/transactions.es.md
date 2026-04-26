@@ -134,3 +134,12 @@ Algunas cosas que conviene saber del modelo:
 - **Mantener un `atomic()` largo alrededor de I/O externa**: deja
   los locks abiertos durante la parte lenta. Saca la I/O fuera del
   bloque cuando puedas.
+- **`execute_script()` cierra la transacción envolvente en SQLite**:
+  el `executescript()` de SQLite siempre emite un `COMMIT` antes y
+  después del script, así que llamar a
+  `connection.execute_script(...)` dentro de `atomic()` / `aatomic()`
+  cierra la transacción externa — las sentencias previas del bloque
+  quedan committed y ya no se pueden revertir. Es una limitación de
+  SQLite, no un bug de dorm. Usa `connection.execute(...)` (una
+  sentencia) cuando necesites control transaccional completo.
+  PostgreSQL no se ve afectado.

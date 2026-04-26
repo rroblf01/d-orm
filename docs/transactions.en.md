@@ -133,3 +133,11 @@ A few things to know about the model:
 - **Long-running `atomic()` around external I/O**: holds locks open
   during the slow part. Move the I/O outside the block whenever you
   can.
+- **`execute_script()` ends the surrounding transaction on SQLite**:
+  SQLite's `executescript()` always issues a `COMMIT` before and
+  after the script, so calling `connection.execute_script(...)` from
+  inside `atomic()` / `aatomic()` ends the outer transaction — any
+  earlier statements in the block are committed and can no longer be
+  rolled back. This is a SQLite limitation, not a dorm bug. Use
+  single-statement `connection.execute(...)` calls when you need full
+  transactional control. PostgreSQL is unaffected.

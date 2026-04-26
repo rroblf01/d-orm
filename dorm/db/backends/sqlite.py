@@ -5,7 +5,32 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager, contextmanager
 
+from ...exceptions import ImproperlyConfigured
 from ..utils import ASYNC_ATOMIC_STATE, log_query, normalize_db_exception
+
+
+# SQLite's PRAGMA syntax doesn't accept bound parameters, so the value goes
+# straight into SQL via f-string. To prevent injection from a misconfigured
+# settings.py (or one populated from env vars), accept only the documented
+# values for `journal_mode`. See https://sqlite.org/pragma.html#pragma_journal_mode
+_VALID_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+
+
+def _validate_journal_mode(value: str) -> str:
+    """Return *value* uppercased if it's a recognised SQLite journal mode,
+    otherwise raise ``ImproperlyConfigured``."""
+    if not isinstance(value, str):
+        raise ImproperlyConfigured(
+            f"DATABASES['default']['OPTIONS']['journal_mode'] must be a string, "
+            f"got {type(value).__name__}."
+        )
+    upper = value.strip().upper()
+    if upper not in _VALID_JOURNAL_MODES:
+        raise ImproperlyConfigured(
+            f"Invalid SQLite journal_mode {value!r}. "
+            f"Allowed: {sorted(_VALID_JOURNAL_MODES)}."
+        )
+    return upper
 
 
 class SQLiteDatabaseWrapper:
@@ -23,7 +48,8 @@ class SQLiteDatabaseWrapper:
         conn.execute("PRAGMA foreign_keys = ON")
         journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
         if journal_mode:
-            conn.execute(f"PRAGMA journal_mode = {journal_mode}")
+            mode = _validate_journal_mode(journal_mode)
+            conn.execute(f"PRAGMA journal_mode = {mode}")
         if self._autocommit:
             conn.isolation_level = None
         return conn
@@ -140,9 +166,20 @@ class SQLiteDatabaseWrapper:
         return list(range(last - count + 1, last + 1))
 
     def execute_script(self, sql: str):
+        """Run a multi-statement SQL script.
+
+        **SQLite limitation:** ``sqlite3.Connection.executescript()`` issues
+        an implicit ``COMMIT`` before the script and another after, so
+        calling this from inside an ``atomic()`` block ends the surrounding
+        transaction. The OS-level file lock still protects against concurrent
+        writers, but the ``atomic()`` rollback guarantee no longer applies to
+        statements that ran before this call. Use single-statement
+        ``execute()`` calls when you need full transactional control.
+        """
         conn = self.get_connection()
         conn.executescript(sql)
-        conn.commit()
+        # executescript() already commits; an explicit commit() here would
+        # be redundant. Skip it so we don't generate spurious wal-frames.
 
     def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
         """Yield rows lazily without buffering the whole result set.
@@ -256,7 +293,8 @@ class SQLiteAsyncDatabaseWrapper:
         await conn.execute("PRAGMA foreign_keys = ON")
         journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
         if journal_mode:
-            await conn.execute(f"PRAGMA journal_mode = {journal_mode}")
+            mode = _validate_journal_mode(journal_mode)
+            await conn.execute(f"PRAGMA journal_mode = {mode}")
         return conn
 
     async def _get_conn(self):
@@ -382,10 +420,21 @@ class SQLiteAsyncDatabaseWrapper:
                     raise
 
     async def execute_script(self, sql: str):
-        async with self._lock:
-            conn = await self._get_conn()
+        """Async counterpart of :meth:`SQLiteDatabaseWrapper.execute_script`.
+
+        Same SQLite limitation applies: ``executescript()`` commits before
+        and after, so the surrounding ``aatomic()`` block can no longer roll
+        back statements that ran earlier in it.
+
+        Uses :meth:`_operation_conn` so that calling this inside an
+        ``aatomic()`` block reuses the already-held connection instead of
+        deadlocking on ``self._lock`` (the lock is held for the entire
+        duration of the atomic block).
+        """
+        async with self._operation_conn() as conn:
             await conn.executescript(sql)
-            await conn.commit()
+            # executescript() already commits internally; an extra commit
+            # here would just be a no-op round-trip.
 
     async def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
         """Async equivalent of :meth:`SQLiteDatabaseWrapper.execute_streaming`."""
