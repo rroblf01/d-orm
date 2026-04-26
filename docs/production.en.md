@@ -14,6 +14,9 @@ PostgreSQL settings (`DATABASES["default"]`):
 | `MAX_POOL_SIZE` | `10` | hard cap; checkouts beyond this wait |
 | `POOL_TIMEOUT` | `30.0` | seconds before a checkout raises `PoolTimeout` |
 | `POOL_CHECK` | `True` | run `SELECT 1` on checkout to drop stale conns |
+| `PREPARE_THRESHOLD` | psycopg default (5) | after how many executions of the same SQL shape psycopg server-prepares it. Set `0` for "always prepare" on apps dominated by repeated queries; raise it for workloads with many one-shot queries |
+| `MAX_IDLE` | `600.0` | recycle conns idle for more than N seconds |
+| `MAX_LIFETIME` | `3600.0` | recycle every conn after N seconds, regardless of activity |
 
 **Sizing rule of thumb**: `MAX_POOL_SIZE = vCPU * 2` per process.
 Multiply by the number of worker processes (gunicorn, uvicorn) to

@@ -14,6 +14,9 @@ Settings de PostgreSQL (`DATABASES["default"]`):
 | `MAX_POOL_SIZE` | `10` | tope duro; los checkouts adicionales esperan |
 | `POOL_TIMEOUT` | `30.0` | segundos antes de que un checkout lance `PoolTimeout` |
 | `POOL_CHECK` | `True` | `SELECT 1` al checkout para descartar conexiones rotas |
+| `PREPARE_THRESHOLD` | default de psycopg (5) | tras cuántas ejecuciones del mismo SQL psycopg lo prepara en el servidor. Pon `0` para "siempre preparar" en apps dominadas por queries repetidas; súbelo si tu workload genera muchas queries únicas |
+| `MAX_IDLE` | `600.0` | recicla conexiones que llevan idle más de N segundos |
+| `MAX_LIFETIME` | `3600.0` | recicla cada conexión tras N segundos, independientemente de la actividad |
 
 **Regla de oro**: `MAX_POOL_SIZE = vCPU * 2` por proceso.
 Multiplica por el número de workers (gunicorn, uvicorn) para

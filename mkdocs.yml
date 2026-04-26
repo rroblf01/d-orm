@@ -94,6 +94,7 @@ nav:
       - Async patterns: async.md
       - Migrations: migrations.md
       - Transactions: transactions.md
+      - Signals: signals.md
       - FastAPI integration: fastapi.md
       - CLI reference: cli.md
       - Production deployment: production.md

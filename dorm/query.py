@@ -347,7 +347,8 @@ class SQLQuery:
                 v.pk if hasattr(v, "_meta") and hasattr(v, "pk") else v
                 for v in value
             ]
-        sql, params = build_lookup_sql(col, lookup, value)
+        vendor = getattr(connection, "vendor", "sqlite")
+        sql, params = build_lookup_sql(col, lookup, value, vendor=vendor)
         # Return raw %s — outer as_* method adapts placeholders once for the full SQL
         return sql, params
 

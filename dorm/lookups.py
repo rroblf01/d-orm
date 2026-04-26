@@ -62,8 +62,17 @@ def parse_lookup_key(key: str) -> tuple[list[str], str]:
     return parts, "exact"
 
 
-def build_lookup_sql(col: str, lookup: str, value) -> tuple[str, list]:
-    """Return (sql_fragment, params) for a single lookup condition."""
+def build_lookup_sql(
+    col: str, lookup: str, value, vendor: str = "sqlite"
+) -> tuple[str, list]:
+    """Return (sql_fragment, params) for a single lookup condition.
+
+    *vendor* is ``"postgresql"`` or ``"sqlite"`` and currently only
+    influences the ``__in`` lookup: PostgreSQL emits ``col = ANY(%s)``
+    (one prepared-statement shape regardless of list length, so PG's
+    plan cache hits across calls with different list sizes), while
+    SQLite stays on the classic ``col IN (?, ?, ...)``.
+    """
     if lookup not in LOOKUPS:
         raise ValueError(f"Unsupported lookup: '{lookup}'")
 
@@ -81,6 +90,12 @@ def build_lookup_sql(col: str, lookup: str, value) -> tuple[str, list]:
     if lookup == "in":
         if not value:
             return "1=0", []  # empty IN → always false
+        if vendor == "postgresql":
+            # ANY(array) bound as a single parameter — same SQL shape for
+            # any list size, so PG's prepared-statement cache hits across
+            # calls with different lengths. psycopg adapts a Python list
+            # to a Postgres array automatically.
+            return f"{col} = ANY(%s)", [list(value)]
         placeholders = ", ".join(["%s"] * len(value))
         return f"{col} IN ({placeholders})", list(value)
 

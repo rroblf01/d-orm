@@ -6,6 +6,44 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-04-26
+
+### Performance
+- **`_to_pyformat()` cached with `functools.lru_cache(4096)`** — the
+  ``$N`` → ``%s`` placeholder rewrite is on every PG query's hot path.
+  Real apps reuse the same SQL strings billions of times across
+  requests; caching converts the per-call O(len(sql)) state-machine
+  into a dict lookup.
+- **PG ``__in`` lookup uses `= ANY(%s)`** instead of
+  ``IN (?, ?, ...)``. One prepared-statement shape regardless of the
+  list length, so PostgreSQL's plan cache hits across calls with
+  different ``len(ids)``. SQLite stays on the classic ``IN`` syntax.
+- **M2M `add()` / `aadd()` batched into 2 queries** — previously
+  ``for obj in objs: SELECT 1; INSERT VALUES (..)`` issued ``2N``
+  round-trips. Now one ``SELECT ... WHERE tgt IN (...)`` to find
+  existing links + one multi-row ``INSERT`` for the missing ones.
+  Adding 1000 tags drops from ~2000 queries to 2.
+- **M2M `remove()` / `aremove()` batched into 1 query** —
+  ``DELETE ... WHERE tgt IN (...)`` instead of N per-object DELETEs.
+- **Async `prefetch_related` parallelized via `asyncio.gather`** —
+  previously each prefetched relation awaited sequentially, so
+  ``.prefetch_related("author", "category", "tags")`` cost 3× the
+  latency of one. Now they fire concurrently; total wait collapses
+  to the slowest single sub-query.
+- **`bulk_create()` / `abulk_create()` field list hoisted out of the
+  batch loop** — small constant-factor win (~5%) when the call has
+  many batches, and clearer code.
+
+### Added
+- **PostgreSQL pool `PREPARE_THRESHOLD` setting** —
+  ``DATABASES["default"]["PREPARE_THRESHOLD"]`` is forwarded to
+  psycopg's connection ``kwargs``. Set ``0`` for "always prepare"
+  on workloads dominated by repeated SELECT/UPDATE shapes; leave
+  unset to keep psycopg's default of 5. Both sync and async wrappers
+  honour it.
+
+## [2.0.0]
+
 ### Security
 - **SQLite ``journal_mode`` whitelist** — ``DATABASES["default"]["OPTIONS"]
   ["journal_mode"]`` is now validated against the documented set

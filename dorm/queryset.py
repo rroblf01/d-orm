@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 from typing import (
     Any,
@@ -870,14 +871,20 @@ class QuerySet(Generic[_T]):
         ]
         pk_col = meta.pk.column if meta.pk else "id"
 
+        # Field list is determined once from the first object — every batch
+        # shares the same shape. Previously this was recomputed per batch,
+        # which on bulk_create(100k objs, batch_size=1000) was 100 wasted
+        # passes over concrete_fields. Match Django's behaviour: assume all
+        # objects in a single bulk_create call have the same PK presence.
+        fields = [
+            f
+            for f in concrete_fields
+            if not f.primary_key or objs[0].__dict__.get(f.attname) is not None
+        ]
+
         with atomic(using=self._db):
             for i in range(0, len(objs), batch_size):
                 batch = objs[i : i + batch_size]
-                fields = [
-                    f
-                    for f in concrete_fields
-                    if not f.primary_key or batch[0].__dict__.get(f.attname) is not None
-                ]
                 rows_values = [
                     [
                         f.get_db_prep_value(
@@ -1051,6 +1058,39 @@ class QuerySet(Generic[_T]):
             inst.__dict__[cache_key] = grouped.get(inst.pk, [])
 
     async def _ado_prefetch_related(self, instances: list[_T]) -> None:
+        """Run every prefetch concurrently with ``asyncio.gather``.
+
+        Each prefetch is an independent SQL round-trip (different table /
+        join), so we can fire them all at once and let the event loop
+        await them in parallel. Previously the ``for fname in ...`` loop
+        awaited each one sequentially, multiplying latency by the number
+        of prefetched relations.
+        """
+        if not self._query.prefetch_related_fields:
+            return
+
+        async def _one_forward_fk(fname: str, field: Any) -> None:
+            rel_model = field._resolve_related_model()
+            pk_vals = list(
+                {
+                    obj.__dict__.get(field.attname)
+                    for obj in instances
+                    if obj.__dict__.get(field.attname) is not None
+                }
+            )
+            cache_key = f"_cache_{fname}"
+            if not pk_vals:
+                for inst in instances:
+                    inst.__dict__.setdefault(cache_key, None)
+                return
+            related_objs: dict = {}
+            async for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals):  # type: ignore[arg-type]
+                related_objs[obj.pk] = obj
+            for inst in instances:
+                fk_val = inst.__dict__.get(field.attname)
+                inst.__dict__[cache_key] = related_objs.get(fk_val)
+
+        coros: list = []
         for fname in self._query.prefetch_related_fields:
             field = None
             try:
@@ -1059,31 +1099,14 @@ class QuerySet(Generic[_T]):
                 pass
 
             if field is not None and getattr(field, "many_to_many", False):
-                await self._aprefetch_m2m(instances, fname, field)
+                coros.append(self._aprefetch_m2m(instances, fname, field))
             elif field is not None and hasattr(field, "_resolve_related_model"):
-                # Forward FK
-                rel_model = field._resolve_related_model()
-                pk_vals = list(
-                    {
-                        obj.__dict__.get(field.attname)
-                        for obj in instances
-                        if obj.__dict__.get(field.attname) is not None
-                    }
-                )
-                cache_key = f"_cache_{fname}"
-                if not pk_vals:
-                    for inst in instances:
-                        inst.__dict__.setdefault(cache_key, None)
-                    continue
-                related_objs: dict = {}
-                async for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals):  # type: ignore[arg-type]
-                    related_objs[obj.pk] = obj
-                for inst in instances:
-                    fk_val = inst.__dict__.get(field.attname)
-                    inst.__dict__[cache_key] = related_objs.get(fk_val)
+                coros.append(_one_forward_fk(fname, field))
             else:
-                # Reverse FK
-                await self._aprefetch_reverse_fk(instances, fname)
+                coros.append(self._aprefetch_reverse_fk(instances, fname))
+
+        if coros:
+            await asyncio.gather(*coros)
 
     async def _aiterator(self) -> AsyncIterator[_T]:
         conn = self._get_async_connection()
@@ -1321,14 +1344,17 @@ class QuerySet(Generic[_T]):
         ]
         pk_col = meta.pk.column if meta.pk else "id"
 
+        # Hoisted: compute the field list once from objs[0]. See the
+        # comment in `bulk_create` for the reasoning.
+        fields = [
+            f
+            for f in concrete_fields
+            if not f.primary_key or objs[0].__dict__.get(f.attname) is not None
+        ]
+
         async with aatomic(using=self._db):
             for i in range(0, len(objs), batch_size):
                 batch = objs[i : i + batch_size]
-                fields = [
-                    f
-                    for f in concrete_fields
-                    if not f.primary_key or batch[0].__dict__.get(f.attname) is not None
-                ]
                 rows_values = [
                     [
                         f.get_db_prep_value(

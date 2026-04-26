@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "2.0.0"
+version = "2.0.1"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]

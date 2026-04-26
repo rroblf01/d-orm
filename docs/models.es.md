@@ -207,3 +207,10 @@ pre_save.connect(slugify, sender=Article)
 Señales disponibles: `pre_save`, `post_save`, `pre_delete`,
 `post_delete`, `pre_query`, `post_query`. Disparan tanto en operaciones
 sync como async.
+
+Para la referencia completa — kwargs que recibe cada señal, la
+diferencia entre `sender` para save/delete (clase modelo) y `sender`
+para señales de query (string del vendor), `dispatch_uid` para
+registración idempotente, referencias débiles, y los pitfalls sobre
+tragado de excepciones y recursión — mira la
+[guía de Señales](signals.md).

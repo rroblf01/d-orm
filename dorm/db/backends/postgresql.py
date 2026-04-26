@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 from contextlib import asynccontextmanager, contextmanager
@@ -18,10 +19,18 @@ from ..utils import (
 # trace boot / shutdown without DEBUG-level per-query noise.
 _lifecycle = logging.getLogger("dorm.db.lifecycle.postgresql")
 
+@functools.lru_cache(maxsize=4096)
 def _to_pyformat(sql: str) -> str:
     """Convert $1, $2, ... placeholders to %s (psycopg3 style), skipping
     occurrences inside single-quoted string literals and double-quoted
-    identifiers so user-supplied data containing $N is never mangled."""
+    identifiers so user-supplied data containing $N is never mangled.
+
+    Cached because most apps reuse the same SQL strings across requests
+    (a typical app issues a few dozen distinct SELECT/INSERT shapes that
+    are then repeated millions of times). The state machine below is
+    O(len(sql)) but compiling it is pure overhead on the hot path. With
+    a 4096-entry LRU we cover any realistic application's distinct
+    queries while bounding memory."""
     out: list[str] = []
     i = 0
     n = len(sql)
@@ -111,6 +120,15 @@ class PostgreSQLDatabaseWrapper:
         # connections. Default-on for safety; turn off for high-throughput
         # apps where the ~ms overhead matters more than transparent reconnect.
         self._pool_check = bool(settings.get("POOL_CHECK", True))
+        # PREPARE_THRESHOLD controls server-side prepared-statement caching.
+        # ``None`` defers to psycopg's default (5 — i.e. cache after the 5th
+        # execution of the same SQL shape). Set to ``0`` for "always prepare"
+        # on workloads dominated by repeated SELECT/UPDATE shapes, or to a
+        # higher value when most queries are unique.
+        prep = settings.get("PREPARE_THRESHOLD")
+        self._prepare_threshold: int | None = (
+            int(prep) if prep is not None else None
+        )
         self._pool = None
         self._pool_lock = threading.Lock()
         self._local = threading.local()  # per-instance atomic state per thread
@@ -137,6 +155,9 @@ class PostgreSQLDatabaseWrapper:
                         "psycopg[pool] is required for PostgreSQL support. "
                         "Install it with: pip install 'djanorm[postgresql]'"
                     ) from e
+                conn_kwargs: dict[str, Any] = {"row_factory": dict_row}
+                if self._prepare_threshold is not None:
+                    conn_kwargs["prepare_threshold"] = self._prepare_threshold
                 pool_kwargs: dict[str, Any] = dict(
                     min_size=self._min_size,
                     max_size=self._max_size,
@@ -144,7 +165,7 @@ class PostgreSQLDatabaseWrapper:
                     max_idle=self._max_idle,
                     max_lifetime=self._max_lifetime,
                     open=True,
-                    kwargs={"row_factory": dict_row},
+                    kwargs=conn_kwargs,
                 )
                 if self._pool_check:
                     pool_kwargs["check"] = ConnectionPool.check_connection
@@ -424,6 +445,10 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._max_idle = float(settings.get("MAX_IDLE", 600.0))
         self._max_lifetime = float(settings.get("MAX_LIFETIME", 3600.0))
         self._pool_check = bool(settings.get("POOL_CHECK", True))
+        prep = settings.get("PREPARE_THRESHOLD")
+        self._prepare_threshold: int | None = (
+            int(prep) if prep is not None else None
+        )
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pool_lock = asyncio.Lock()
@@ -454,6 +479,9 @@ class PostgreSQLAsyncDatabaseWrapper:
                         "psycopg[pool] is required for async PostgreSQL support. "
                         "Install it with: pip install 'djanorm[postgresql]'"
                     ) from e
+                conn_kwargs: dict[str, Any] = {"row_factory": dict_row}
+                if self._prepare_threshold is not None:
+                    conn_kwargs["prepare_threshold"] = self._prepare_threshold
                 pool_kwargs: dict[str, Any] = dict(
                     min_size=self._min_size,
                     max_size=self._max_size,
@@ -461,7 +489,7 @@ class PostgreSQLAsyncDatabaseWrapper:
                     max_idle=self._max_idle,
                     max_lifetime=self._max_lifetime,
                     open=False,
-                    kwargs={"row_factory": dict_row},
+                    kwargs=conn_kwargs,
                 )
                 if self._pool_check:
                     pool_kwargs["check"] = AsyncConnectionPool.check_connection

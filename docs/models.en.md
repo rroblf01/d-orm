@@ -208,3 +208,9 @@ pre_save.connect(slugify, sender=Article)
 Available signals: `pre_save`, `post_save`, `pre_delete`, `post_delete`,
 `pre_query`, `post_query`. Signals fire for both sync and async
 operations.
+
+For the full reference — kwargs each signal receives, the difference
+between `sender` for save/delete (model class) vs `sender` for query
+signals (vendor string), `dispatch_uid` for idempotent registration,
+weak references, and the gotchas around exception swallowing and
+recursion — see the [Signals guide](signals.md).

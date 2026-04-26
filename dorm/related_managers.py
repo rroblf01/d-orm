@@ -82,43 +82,112 @@ class ManyRelatedManager:
     # ── Mutations ─────────────────────────────────────────────────────────────
 
     def add(self, *objs: Any, through_defaults: dict | None = None) -> None:
+        """Add *objs* to the M2M relation, skipping duplicates.
+
+        **Batched in two queries** regardless of how many objects are passed:
+        one SELECT to find which targets already exist for this source, then
+        one multi-row INSERT for the missing ones. The previous "SELECT then
+        INSERT per object" loop was 2 round-trips per object — adding 1000
+        tags meant 2000 queries; now it's 2.
+        """
+        if not objs:
+            return
+        target_pks = [obj.pk if hasattr(obj, "pk") else obj for obj in objs]
+        # Drop dupes within the call itself while preserving order.
+        seen: set = set()
+        target_pks = [pk for pk in target_pks if pk not in seen and not seen.add(pk)]
+
         conn = self._get_connection()
         through = self._through_table
         src_col, tgt_col = self._through_columns
-        extra_cols = ""
-        extra_phs = ""
-        extra_vals: list[Any] = []
-        if through_defaults:
-            cols = list(through_defaults.keys())
-            extra_cols = ", " + ", ".join(f'"{c}"' for c in cols)
-            extra_phs = ", " + ", ".join(["%s"] * len(cols))
-            extra_vals = list(through_defaults.values())
 
-        check_sql = self._adapt(
-            f'SELECT 1 FROM "{through}" WHERE "{src_col}" = %s AND "{tgt_col}" = %s LIMIT 1',
-            conn,
-        )
+        existing = self._fetch_existing_targets(conn, target_pks)
+        to_add = [pk for pk in target_pks if pk not in existing]
+        if not to_add:
+            return
+
+        extra_cols, extra_phs, extra_vals = self._through_defaults_sql(through_defaults)
+        # Multi-row VALUES (...), (...), ... — psycopg adapts the parameter list
+        # in one statement. SQLite >=3.7.11 (Python ships 3.x with it) too.
+        row_phs = ", ".join([f"(%s, %s{extra_phs})"] * len(to_add))
         ins_sql = self._adapt(
             f'INSERT INTO "{through}" ("{src_col}", "{tgt_col}"{extra_cols}) '
-            f"VALUES (%s, %s{extra_phs})",
+            f"VALUES {row_phs}",
             conn,
         )
-        for obj in objs:
-            pk = obj.pk if hasattr(obj, "pk") else obj
-            if not conn.execute(check_sql, [self.instance.pk, pk]):
-                conn.execute_write(ins_sql, [self.instance.pk, pk] + extra_vals)
+        params: list[Any] = []
+        for pk in to_add:
+            params.append(self.instance.pk)
+            params.append(pk)
+            params.extend(extra_vals)
+        conn.execute_write(ins_sql, params)
+
+    # ── helpers shared between sync and async ────────────────────────────────
+
+    @staticmethod
+    def _through_defaults_sql(
+        through_defaults: dict | None,
+    ) -> tuple[str, str, list[Any]]:
+        if not through_defaults:
+            return "", "", []
+        cols = list(through_defaults.keys())
+        extra_cols = ", " + ", ".join(f'"{c}"' for c in cols)
+        extra_phs = ", " + ", ".join(["%s"] * len(cols))
+        extra_vals = list(through_defaults.values())
+        return extra_cols, extra_phs, extra_vals
+
+    def _fetch_existing_targets(self, conn, target_pks: list):
+        """Return the set of *target_pks* already linked to ``self.instance``.
+
+        Return type annotation is omitted intentionally: this class has a
+        ``set()`` instance method, which shadows ``builtins.set`` in the
+        annotation namespace and trips ty.
+        """
+        if not target_pks:
+            return set()
+        through = self._through_table
+        src_col, tgt_col = self._through_columns
+        placeholders = ", ".join(["%s"] * len(target_pks))
+        sql = self._adapt(
+            f'SELECT "{tgt_col}" FROM "{through}" '
+            f'WHERE "{src_col}" = %s AND "{tgt_col}" IN ({placeholders})',
+            conn,
+        )
+        rows = conn.execute(sql, [self.instance.pk] + list(target_pks))
+        return {r[tgt_col] if hasattr(r, "keys") else r[0] for r in rows}
+
+    async def _afetch_existing_targets(self, conn, target_pks: list):
+        # Return type annotation omitted: see _fetch_existing_targets.
+        if not target_pks:
+            return set()
+        through = self._through_table
+        src_col, tgt_col = self._through_columns
+        placeholders = ", ".join(["%s"] * len(target_pks))
+        sql = self._adapt(
+            f'SELECT "{tgt_col}" FROM "{through}" '
+            f'WHERE "{src_col}" = %s AND "{tgt_col}" IN ({placeholders})',
+            conn,
+        )
+        rows = await conn.execute(sql, [self.instance.pk] + list(target_pks))
+        return {r[tgt_col] if hasattr(r, "keys") else r[0] for r in rows}
 
     def remove(self, *objs: Any) -> None:
+        """Remove *objs* from the M2M relation. **Batched in one query**
+        with ``DELETE ... WHERE tgt IN (...)`` instead of N per-object
+        DELETEs."""
+        if not objs:
+            return
+        target_pks = [obj.pk if hasattr(obj, "pk") else obj for obj in objs]
         conn = self._get_connection()
         through = self._through_table
         src_col, tgt_col = self._through_columns
+        placeholders = ", ".join(["%s"] * len(target_pks))
         sql = self._adapt(
-            f'DELETE FROM "{through}" WHERE "{src_col}" = %s AND "{tgt_col}" = %s',
+            f'DELETE FROM "{through}" WHERE "{src_col}" = %s '
+            f'AND "{tgt_col}" IN ({placeholders})',
             conn,
         )
-        for obj in objs:
-            pk = obj.pk if hasattr(obj, "pk") else obj
-            conn.execute_write(sql, [self.instance.pk, pk])
+        conn.execute_write(sql, [self.instance.pk] + list(target_pks))
 
     def set(
         self,
@@ -173,43 +242,51 @@ class ManyRelatedManager:
         return QuerySet(self._rel_model, self._db).filter(pk__in=pks)
 
     async def aadd(self, *objs: Any, through_defaults: dict | None = None) -> None:
+        """Async counterpart of :meth:`add`. Same 2-query batching."""
+        if not objs:
+            return
+        target_pks = [obj.pk if hasattr(obj, "pk") else obj for obj in objs]
+        seen: set = set()
+        target_pks = [pk for pk in target_pks if pk not in seen and not seen.add(pk)]
+
         conn = self._get_async_connection()
         through = self._through_table
         src_col, tgt_col = self._through_columns
-        extra_cols = ""
-        extra_phs = ""
-        extra_vals: list[Any] = []
-        if through_defaults:
-            cols = list(through_defaults.keys())
-            extra_cols = ", " + ", ".join(f'"{c}"' for c in cols)
-            extra_phs = ", " + ", ".join(["%s"] * len(cols))
-            extra_vals = list(through_defaults.values())
 
-        check_sql = self._adapt(
-            f'SELECT 1 FROM "{through}" WHERE "{src_col}" = %s AND "{tgt_col}" = %s LIMIT 1',
-            conn,
-        )
+        existing = await self._afetch_existing_targets(conn, target_pks)
+        to_add = [pk for pk in target_pks if pk not in existing]
+        if not to_add:
+            return
+
+        extra_cols, extra_phs, extra_vals = self._through_defaults_sql(through_defaults)
+        row_phs = ", ".join([f"(%s, %s{extra_phs})"] * len(to_add))
         ins_sql = self._adapt(
             f'INSERT INTO "{through}" ("{src_col}", "{tgt_col}"{extra_cols}) '
-            f"VALUES (%s, %s{extra_phs})",
+            f"VALUES {row_phs}",
             conn,
         )
-        for obj in objs:
-            pk = obj.pk if hasattr(obj, "pk") else obj
-            if not await conn.execute(check_sql, [self.instance.pk, pk]):
-                await conn.execute_write(ins_sql, [self.instance.pk, pk] + extra_vals)
+        params: list[Any] = []
+        for pk in to_add:
+            params.append(self.instance.pk)
+            params.append(pk)
+            params.extend(extra_vals)
+        await conn.execute_write(ins_sql, params)
 
     async def aremove(self, *objs: Any) -> None:
+        """Async counterpart of :meth:`remove`. Single batched DELETE."""
+        if not objs:
+            return
+        target_pks = [obj.pk if hasattr(obj, "pk") else obj for obj in objs]
         conn = self._get_async_connection()
         through = self._through_table
         src_col, tgt_col = self._through_columns
+        placeholders = ", ".join(["%s"] * len(target_pks))
         sql = self._adapt(
-            f'DELETE FROM "{through}" WHERE "{src_col}" = %s AND "{tgt_col}" = %s',
+            f'DELETE FROM "{through}" WHERE "{src_col}" = %s '
+            f'AND "{tgt_col}" IN ({placeholders})',
             conn,
         )
-        for obj in objs:
-            pk = obj.pk if hasattr(obj, "pk") else obj
-            await conn.execute_write(sql, [self.instance.pk, pk])
+        await conn.execute_write(sql, [self.instance.pk] + list(target_pks))
 
     async def aset(
         self,
