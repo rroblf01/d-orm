@@ -378,7 +378,11 @@ class QuerySet(Generic[_T]):
             stop = k.stop
             qs._query.offset_val = start
             if stop is not None:
-                qs._query.limit_val = stop - start
+                # Python list semantics: ``lst[5:3]`` is empty. Without
+                # the ``max(0, ...)`` clamp we'd compute ``LIMIT -2``,
+                # which SQLite (silently) reads as "no limit" and
+                # PostgreSQL rejects with a syntax error — both wrong.
+                qs._query.limit_val = max(0, stop - start)
             return qs
         if isinstance(k, int):
             qs = self._clone()

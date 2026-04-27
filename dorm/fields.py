@@ -798,9 +798,15 @@ class ForeignKey(RelatedField):
 class OneToOneField(RelatedField):
     def __init__(self, to, on_delete=CASCADE, **kwargs):
         kwargs.setdefault("unique", True)
+        super().__init__(to, on_delete, **kwargs)
+        # ``RelatedField.__init__`` (and ``Field.__init__`` further up)
+        # set ``many_to_one = True`` / ``one_to_one = False`` after
+        # calling super(), so the flag flip MUST happen last —
+        # otherwise an OneToOneField pretends to be a regular FK and
+        # breaks every code path that branches on ``one_to_one``
+        # (cascade rules, select_related single-row hydration, etc.).
         self.one_to_one = True
         self.many_to_one = False
-        super().__init__(to, on_delete, **kwargs)
 
 
 class ManyToManyField(Field[Any]):

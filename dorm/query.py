@@ -268,8 +268,18 @@ class SQLQuery:
             select += order_by_sql
 
         # LIMIT / OFFSET
+        # SQLite's parser rejects ``OFFSET`` without a preceding
+        # ``LIMIT``, so ``qs[N:]`` (offset only) used to crash with
+        # ``near "OFFSET": syntax error``. PostgreSQL accepts the
+        # bare offset but not ``LIMIT -1`` (which SQLite uses as its
+        # "no limit" sentinel). The portable workaround is the
+        # maximum signed 64-bit int — both backends store it cleanly
+        # and treat it as "all remaining rows" in practice.
+        _LIMIT_NONE_SENTINEL = 9223372036854775807  # 2**63 - 1
         if self.limit_val is not None:
             select += f" LIMIT {int(self.limit_val)}"
+        elif self.offset_val is not None:
+            select += f" LIMIT {_LIMIT_NONE_SENTINEL}"
         if self.offset_val is not None:
             select += f" OFFSET {int(self.offset_val)}"
 
