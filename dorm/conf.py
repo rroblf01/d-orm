@@ -90,6 +90,12 @@ def _discover_apps(root: Path) -> list[str]:
         except ValueError:
             continue
 
+        # ``models.py`` at the search root has zero ``parts`` and would
+        # produce an empty app label. The settings loader rejects empty
+        # dotted paths anyway, so skip it here to avoid noise.
+        if not parts:
+            continue
+
         # Skip excluded or hidden directories
         if any(p in _AUTODISCOVER_EXCLUDE or p.startswith(".") for p in parts):
             continue
