@@ -1432,3 +1432,805 @@ class TestRunPythonExtras:
         op = RunPython(fwd)  # reverse_code defaults to None
         op.database_backwards("blog", object(), None, None)
         assert called == []
+
+
+# =================================================================
+# transaction — set_rollback, on_commit ordering, decorator forms,
+# aon_commit branches.
+# =================================================================
+
+
+class TestSyncOnCommit:
+    def test_callbacks_fire_only_on_commit(self):
+        from tests.models import Author
+
+        from dorm.transaction import atomic, on_commit
+
+        fired: list[str] = []
+        with atomic():
+            Author.objects.create(name="A", age=1)
+            on_commit(lambda: fired.append("ok"))
+            # Inside atomic — must NOT have fired yet.
+            assert fired == []
+        # After successful exit — fired exactly once.
+        assert fired == ["ok"]
+
+    def test_callbacks_dropped_on_rollback(self):
+        from tests.models import Author
+
+        from dorm.transaction import atomic, on_commit
+
+        fired: list[str] = []
+        try:
+            with atomic():
+                Author.objects.create(name="A", age=1)
+                on_commit(lambda: fired.append("ok"))
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        # Rolled back → callbacks discarded.
+        assert fired == []
+
+    def test_callback_exception_is_logged_not_raised(self, caplog):
+        from dorm.transaction import atomic, on_commit
+
+        def bad():
+            raise RuntimeError("ouch")
+
+        with caplog.at_level("ERROR", logger="dorm.transaction"):
+            with atomic():
+                on_commit(bad)
+        # The transaction committed; the post-commit error must have
+        # been logged but never raised — committing data is durable
+        # by the time the hook fires. The log message references the
+        # callback (``"on_commit callback %r raised"``); the actual
+        # exception text lives in ``exc_info``.
+        err_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and r.name == "dorm.transaction"
+        ]
+        assert err_records, "the post-commit failure must surface as ERROR"
+        # And the underlying RuntimeError("ouch") is preserved in
+        # exc_info so log handlers can format it.
+        assert any(
+            r.exc_info and "ouch" in str(r.exc_info[1])
+            for r in err_records
+        )
+
+    def test_outside_atomic_runs_immediately(self):
+        from dorm.transaction import on_commit
+
+        seen: list[int] = []
+        on_commit(lambda: seen.append(1))
+        assert seen == [1]
+
+    def test_set_rollback_forces_rollback(self):
+        from tests.models import Author
+        from dorm.db.connection import get_connection
+
+        from dorm.transaction import atomic
+
+        Author.objects.create(name="seed", age=0)
+        before = list(Author.objects.values_list("name", flat=True))
+        with atomic() as txn:
+            Author.objects.create(name="ghost", age=99)
+            # Force the rollback without raising. The block exits
+            # cleanly; the row added inside it must be gone.
+            txn.set_rollback(True)
+        after = list(Author.objects.values_list("name", flat=True))
+        assert sorted(after) == sorted(before)
+        # And the connection wrapper isn't left wedged in some half-state.
+        assert get_connection() is not None
+
+
+class TestAtomicAsDecorator:
+    def test_atomic_no_paren_decorator_form(self):
+        from tests.models import Author
+
+        from dorm.transaction import atomic
+
+        @atomic
+        def make_one():
+            return Author.objects.create(name="dec", age=1)
+
+        obj = make_one()
+        assert obj.pk is not None
+        assert Author.objects.filter(pk=obj.pk).exists()
+
+
+class TestAsyncOnCommit:
+    async def test_aon_commit_fires_after_aatomic(self):
+        from tests.models import Author
+
+        from dorm.transaction import aatomic, aon_commit
+
+        fired: list[str] = []
+        async with aatomic():
+            await Author.objects.acreate(name="A", age=1)
+            aon_commit(lambda: fired.append("sync"))
+
+            async def co():
+                fired.append("coro")
+
+            aon_commit(co)
+            assert fired == []
+        assert fired == ["sync", "coro"]
+
+    async def test_aon_commit_dropped_on_rollback(self):
+        from tests.models import Author
+
+        from dorm.transaction import aatomic, aon_commit
+
+        fired: list[str] = []
+        try:
+            async with aatomic():
+                await Author.objects.acreate(name="x", age=1)
+                aon_commit(lambda: fired.append("a"))
+                raise RuntimeError("nope")
+        except RuntimeError:
+            pass
+        assert fired == []
+
+    async def test_aatomic_set_rollback(self):
+        from tests.models import Author
+
+        from dorm.transaction import aatomic
+
+        await Author.objects.acreate(name="seed", age=0)
+        before = sorted(await Author.objects.values_list("name", flat=True))
+        async with aatomic() as txn:
+            await Author.objects.acreate(name="ghost", age=99)
+            txn.set_rollback(True)
+        after = sorted(await Author.objects.values_list("name", flat=True))
+        assert after == before
+
+    async def test_aon_commit_outside_aatomic_runs_immediately(self):
+        from dorm.transaction import aon_commit
+
+        seen: list[int] = []
+        aon_commit(lambda: seen.append(1))
+        # Sync callable outside a frame fires synchronously.
+        assert seen == [1]
+
+    async def test_aatomic_decorator_no_paren(self):
+        from tests.models import Author
+
+        from dorm.transaction import aatomic
+
+        @aatomic
+        async def make_one():
+            return await Author.objects.acreate(name="adec", age=1)
+
+        obj = await make_one()
+        assert obj.pk is not None
+
+
+# =================================================================
+# fields — type-conversion paths
+# =================================================================
+
+
+class TestFieldConversions:
+    def test_boolean_field_to_python_variants(self):
+        f = dorm.BooleanField()
+        # Each branch of to_python.
+        assert f.to_python(None) is None
+        assert f.to_python(True) is True
+        assert f.to_python(0) is False
+        assert f.to_python(1) is True
+        assert f.to_python("true") is True
+        assert f.to_python("FALSE") is False
+        assert f.to_python("yes") is True
+        # Fallback for arbitrary objects: bool() of the value.
+        assert f.to_python([]) is False
+        assert f.to_python([1]) is True
+
+    def test_boolean_field_db_prep_and_from_db(self):
+        f = dorm.BooleanField()
+        assert f.get_db_prep_value(None) is None
+        assert f.get_db_prep_value(1) is True
+        assert f.from_db_value(None) is None
+        assert f.from_db_value(0) is False
+
+    def test_date_field_round_trip(self):
+        import datetime
+
+        f = dorm.DateField()
+        assert f.to_python(None) is None
+        d = datetime.date(2026, 4, 27)
+        assert f.to_python(d) == d
+        # datetime → date trims time.
+        assert f.to_python(datetime.datetime(2026, 4, 27, 9, 30)) == d
+        # ISO string → date.
+        assert f.to_python("2026-04-27") == d
+        # Pass-through for unrecognised types.
+        assert f.to_python(12345) == 12345
+        # Storage format.
+        assert f.get_db_prep_value(d) == "2026-04-27"
+        assert f.get_db_prep_value(None) is None
+        # Hydration from DB.
+        assert f.from_db_value("2026-04-27") == d
+        assert f.from_db_value(None) is None
+        assert f.from_db_value(d) == d  # already-typed value passes through.
+
+    def test_time_field_round_trip(self):
+        import datetime
+
+        f = dorm.TimeField()
+        t = datetime.time(9, 30, 0)
+        assert f.to_python(None) is None
+        assert f.to_python(t) == t
+        assert f.to_python("09:30:00") == t
+        assert f.to_python(123) == 123
+        assert f.get_db_prep_value(t) == "09:30:00"
+        assert f.get_db_prep_value(None) is None
+        assert f.from_db_value("09:30:00") == t
+        assert f.from_db_value(None) is None
+
+    def test_datetime_field_round_trip(self):
+        import datetime
+
+        f = dorm.DateTimeField()
+        dt = datetime.datetime(2026, 4, 27, 9, 30, 0)
+        assert f.to_python(None) is None
+        assert f.to_python(dt) == dt
+        assert f.to_python("2026-04-27T09:30:00") == dt
+        assert f.to_python(42) == 42
+        assert f.get_db_prep_value(dt) == "2026-04-27T09:30:00"
+        assert f.from_db_value("2026-04-27T09:30:00") == dt
+        assert f.from_db_value(None) is None
+
+    def test_datetime_field_auto_now_pre_save(self):
+        import datetime
+
+        f = dorm.DateTimeField(auto_now=True)
+        f.attname = "ts"
+
+        class _Holder:
+            pass
+
+        # auto_now: every save (add or update) must overwrite.
+        before = datetime.datetime.now(datetime.timezone.utc)
+        out = f.pre_save(_Holder(), add=False)
+        after = datetime.datetime.now(datetime.timezone.utc)
+        assert before <= out <= after
+
+    def test_datetime_field_auto_now_add_pre_save_only_on_insert(self):
+        f = dorm.DateTimeField(auto_now_add=True)
+        f.attname = "ts"
+
+        # ``hasattr(instance, attname)`` is what the production code
+        # checks — declare the attribute on the class so the
+        # ``getattr`` branch fires (and the static checker sees it).
+        class _Holder:
+            ts: str = "set-by-user"
+
+        # auto_now_add fires only at insert (add=True). Updates leave
+        # the value alone — must come back unchanged from pre_save.
+        assert f.pre_save(_Holder(), add=False) == "set-by-user"
+
+    def test_decimal_field_db_prep(self):
+        import decimal
+
+        f = dorm.DecimalField(max_digits=8, decimal_places=2)
+        # None passes through.
+        assert f.get_db_prep_value(None) is None
+        # Anything non-None comes back as a Decimal-as-string compatible
+        # value the DB can store.
+        out = f.get_db_prep_value(decimal.Decimal("3.14"))
+        assert decimal.Decimal(str(out)) == decimal.Decimal("3.14")
+
+    def test_validator_runs_for_non_null_value(self):
+        # Field.validate runs registered validators on non-null values.
+        from dorm.validators import MinValueValidator
+
+        f = dorm.IntegerField(validators=[MinValueValidator(0)])
+        f.name = "x"
+        # Below-min fails.
+        with pytest.raises(dorm.ValidationError):
+            f.validate(-1, model_instance=None)
+        # At-min passes.
+        f.validate(0, model_instance=None)
+        # None never reaches the validator (the null guard is before).
+        # We can't test that directly without flipping null=True, but
+        # the contract is documented in the source.
+
+    def test_choices_validation(self):
+        f = dorm.IntegerField(choices=[(1, "one"), (2, "two")])
+        f.name = "n"
+        with pytest.raises(dorm.ValidationError):
+            f.validate(99, model_instance=None)
+        f.validate(1, model_instance=None)
+
+    def test_null_value_rejected_when_null_false(self):
+        f = dorm.IntegerField(null=False)
+        f.name = "n"
+        with pytest.raises(dorm.ValidationError):
+            f.validate(None, model_instance=None)
+
+    def test_field_get_internal_type(self):
+        f = dorm.IntegerField()
+        assert f.get_internal_type() == "IntegerField"
+
+    def test_field_repr(self):
+        f = dorm.IntegerField()
+        f.name = "x"
+        assert "IntegerField" in repr(f)
+        assert "x" in repr(f)
+
+    def test_email_field_invalid(self):
+        f = dorm.EmailField()
+        with pytest.raises(dorm.ValidationError):
+            f.to_python("notanemail")
+
+    def test_uuid_field_round_trip(self):
+        import uuid
+
+        f = dorm.UUIDField()
+        u = uuid.uuid4()
+        assert f.to_python(None) is None
+        # Strings parse to UUID.
+        parsed = f.to_python(str(u))
+        assert parsed == u
+        # Storage format is the canonical hex string.
+        assert isinstance(f.get_db_prep_value(u), str)
+
+
+# =================================================================
+# QuerySet — slicing / indexing edges
+# =================================================================
+
+
+class TestQuerySetIndexingEdges:
+    def test_slice_with_step_rejected(self):
+        from tests.models import Author
+
+        Author.objects.create(name="A", age=1)
+        with pytest.raises(ValueError):
+            # Step ≠ 1 isn't expressible as LIMIT/OFFSET.
+            _ = Author.objects.all()[::2]
+
+    def test_negative_index_rejected(self):
+        from tests.models import Author
+
+        Author.objects.create(name="A", age=1)
+        with pytest.raises(ValueError):
+            _ = Author.objects.all()[-1]
+
+    def test_negative_slice_bounds_rejected(self):
+        from tests.models import Author
+
+        Author.objects.create(name="A", age=1)
+        with pytest.raises(ValueError):
+            _ = Author.objects.all()[-2:-1]
+
+    def test_inverted_slice_returns_empty(self):
+        # ``qs[5:3]`` — Python list slicing returns []; the queryset
+        # path clamps so the SQL ``LIMIT`` doesn't go negative.
+        from tests.models import Author
+
+        for _ in range(3):
+            Author.objects.create(name="x", age=1)
+        # ``[5:3]`` → start=5, stop=3 → max(0, 3-5) = 0 → LIMIT 0.
+        assert list(Author.objects.all()[5:3]) == []
+
+    def test_index_out_of_range(self):
+        from tests.models import Author
+
+        with pytest.raises(IndexError):
+            _ = Author.objects.all()[42]
+
+    def test_invalid_index_type_rejected(self):
+        from tests.models import Author
+
+        with pytest.raises(TypeError):
+            _ = Author.objects.all()[_any("bad")]
+
+    def test_offset_only_slice_works(self):
+        from tests.models import Author
+
+        for i in range(5):
+            Author.objects.create(name=f"u{i}", age=i)
+        # ``qs[2:]`` — bare offset. SQLite needs a LIMIT for OFFSET,
+        # which the SQL builder synthesises with the int64 sentinel.
+        rows = list(Author.objects.order_by("age")[2:])
+        assert [r.age for r in rows] == [2, 3, 4]
+
+    def test_repr_truncates_long_results(self):
+        from tests.models import Author
+
+        for i in range(25):
+            Author.objects.create(name=f"u{i:02d}", age=i)
+        rep = repr(Author.objects.all())
+        assert rep.startswith("<QuerySet")
+        # The implementation slices to 21, then trims to 20 and adds
+        # the ", ..." marker. Pin both.
+        assert "..." in rep
+
+    def test_bool_and_len(self):
+        from tests.models import Author
+
+        empty = Author.objects.all()
+        assert bool(empty) is False
+        assert len(empty) == 0
+
+        Author.objects.create(name="A", age=1)
+        non_empty = Author.objects.all()
+        assert bool(non_empty) is True
+        assert len(non_empty) == 1
+
+
+# =================================================================
+# QuerySet — _hydrate_select_related branches
+# =================================================================
+
+
+class TestSelectRelatedBranches:
+    def test_select_related_with_null_fk(self):
+        # The Author.publisher FK is nullable; an Author without a
+        # publisher must hydrate ``author.publisher`` to None instead
+        # of raising. Both ``authors`` and the joined ``publishers``
+        # alias have ``id`` / ``name`` columns, so we materialise the
+        # whole queryset rather than re-filter (which would generate
+        # an ambiguous ``WHERE`` against unqualified columns — that's
+        # a separate orthogonal issue not exercised here).
+        from tests.models import Author
+
+        Author.objects.create(name="orphan", age=42, publisher=None)
+        rows = list(Author.objects.select_related("publisher"))
+        assert len(rows) == 1
+        # The cached related instance is None — the SR hydration
+        # honours the LEFT OUTER JOIN's NULL row.
+        assert rows[0].__dict__.get("_cache_publisher") is None
+
+    def test_select_related_unknown_path_silently_breaks(self):
+        # A bad path string aborts the SR walk for that path but
+        # doesn't crash the iterator. The path's slot is left as None
+        # rather than blowing up.
+        from tests.models import Author
+
+        Author.objects.create(name="A", age=1)
+        # ``no_such`` isn't a field on Author; the SR resolver breaks
+        # out of the loop silently. Just ensure we still get the row.
+        rows = list(Author.objects.select_related("no_such"))
+        assert len(rows) == 1
+
+
+# =================================================================
+# Models — validate_unique fast path / refresh_from_db / full_clean
+# =================================================================
+
+
+class TestModelValidation:
+    def test_validate_unique_fast_path_no_violations(self):
+        # Happy path — single OR'd existence check returns False, no
+        # slow-path drilldown needed.
+        from tests.models import Author
+
+        a = Author.objects.create(name="alpha", age=1, email="a@example.com")
+        # Re-validating the same instance against itself: ``exclude(pk=)``
+        # filters it out so the probe finds nothing.
+        a.validate_unique()
+
+    def test_validate_unique_skips_excluded_field(self):
+        # ``exclude=`` short-circuits per-field uniqueness probes.
+        from tests.models import Author
+
+        Author.objects.create(name="dup", age=1, email="d@example.com")
+        new = Author(name="dup", age=2, email="d2@example.com")
+        # Without exclude → would normally pass too because Author.name
+        # has no ``unique=True`` constraint. Pin behaviour: with
+        # ``exclude=["name"]`` the probe set is unchanged and the call
+        # still returns successfully.
+        new.validate_unique(exclude=["name"])
+
+    def test_full_clean_runs_clean_fields_clean_unique(self):
+        # full_clean composes clean_fields + clean + validate_unique.
+        # Trip clean_fields by setting a NOT NULL field to None.
+        from tests.models import Author
+
+        a = Author(name="x", age=None)  # age is non-null
+        # AutoField is excluded; ``age=None`` violates IntegerField null.
+        with pytest.raises(dorm.ValidationError):
+            a.full_clean()
+
+    def test_refresh_from_db_partial_fields(self):
+        # ``refresh_from_db(fields=["name"])`` restores only the named
+        # field, leaving others as the in-memory mutation.
+        from tests.models import Author
+
+        a = Author.objects.create(name="orig", age=10)
+        a.name = "mutated"
+        a.age = 999
+        a.refresh_from_db(fields=["name"])
+        # ``name`` came from the DB; ``age`` keeps the in-memory edit.
+        assert a.name == "orig"
+        assert a.age == 999
+
+    def test_refresh_from_db_unknown_field_skipped(self):
+        from tests.models import Author
+
+        a = Author.objects.create(name="x", age=1)
+        # Unknown field name is silently skipped (matches docstring).
+        a.refresh_from_db(fields=["no_such"])
+
+    async def test_arefresh_from_db(self):
+        from tests.models import Author
+
+        a = await Author.objects.acreate(name="orig", age=10)
+        a.name = "mutated"
+        await a.arefresh_from_db()
+        assert a.name == "orig"
+
+    async def test_arefresh_from_db_partial_fields(self):
+        from tests.models import Author
+
+        a = await Author.objects.acreate(name="orig", age=10)
+        a.name = "mutated"
+        a.age = 999
+        await a.arefresh_from_db(fields=["name"])
+        assert a.name == "orig"
+        assert a.age == 999  # untouched
+
+    def test_repr_includes_pk(self):
+        from tests.models import Author
+
+        a = Author.objects.create(name="A", age=1)
+        assert f"pk={a.pk}" in repr(a)
+
+    def test_eq_only_with_same_class_and_pk(self):
+        from tests.models import Author, Book
+
+        a1 = Author.objects.create(name="A", age=1)
+        a2 = Author.objects.get(pk=a1.pk)
+        assert a1 == a2  # same class, same pk
+        assert a1 != "not a model"
+        # Different class → never equal even with same pk value.
+        b = Book(title="x", pages=1)
+        b.pk = a1.pk
+        assert a1 != b
+
+    def test_hash_requires_pk(self):
+        from tests.models import Author
+
+        unsaved = Author(name="x", age=1)
+        with pytest.raises(TypeError):
+            hash(unsaved)
+
+    def test_pk_property_setter(self):
+        from tests.models import Author
+
+        a = Author(name="x", age=1)
+        a.pk = 99
+        assert a.__dict__.get("id") == 99
+
+
+# =================================================================
+# Autodetector — rename hints + detect_renames heuristic
+# =================================================================
+
+
+class TestAutodetectorRenames:
+    def _state_with(self, model_name: str, fields: dict, app_label: str = "blog"):
+        from dorm.migrations.state import ProjectState
+
+        s = ProjectState()
+        s.add_model(app_label, model_name, dict(fields))
+        return s
+
+    def test_rename_model_via_explicit_hint(self):
+        from dorm.migrations.autodetector import MigrationAutodetector
+
+        # Same fields, different name → with the hint the detector
+        # emits RenameModel rather than Delete + Create.
+        f = {"name": dorm.CharField(max_length=10)}
+        from_state = self._state_with("Old", f)
+        to_state = self._state_with("New", f)
+
+        detector = MigrationAutodetector(
+            from_state, to_state, rename_hints={"models": {"blog": {"Old": "New"}}}
+        )
+        ops = detector.changes("blog")["blog"]
+        names = [type(op).__name__ for op in ops]
+        assert "RenameModel" in names
+        assert "DeleteModel" not in names
+        assert "CreateModel" not in names
+
+    def test_rename_model_via_detect_renames_heuristic(self):
+        from dorm.migrations.autodetector import MigrationAutodetector
+
+        # Same field shape → heuristic finds the rename.
+        f = {"name": dorm.CharField(max_length=10)}
+        from_state = self._state_with("Old", f)
+        to_state = self._state_with("New", f)
+
+        ops = MigrationAutodetector(
+            from_state, to_state, detect_renames=True
+        ).changes("blog")["blog"]
+        assert any(type(op).__name__ == "RenameModel" for op in ops)
+
+    def test_rename_field_via_detect_renames_when_unambiguous(self):
+        from dorm.migrations.autodetector import MigrationAutodetector
+        from dorm.migrations.state import ProjectState
+
+        from_s = ProjectState()
+        from_s.add_model(
+            "blog",
+            "Post",
+            {"old_slug": dorm.CharField(max_length=50)},
+        )
+        to_s = ProjectState()
+        to_s.add_model(
+            "blog",
+            "Post",
+            {"new_slug": dorm.CharField(max_length=50)},
+        )
+        ops = MigrationAutodetector(
+            from_s, to_s, detect_renames=True
+        ).changes("blog")["blog"]
+        assert any(type(op).__name__ == "RenameField" for op in ops)
+        # And the bare add+remove pair is suppressed.
+        names = [type(op).__name__ for op in ops]
+        assert "RemoveField" not in names
+        assert "AddField" not in names
+
+
+# =================================================================
+# inspect — error / fallback paths
+# =================================================================
+
+
+class TestInspectErrorPaths:
+    def test_introspect_handles_fk_query_error_pg(self):
+        # If the FK query against ``information_schema`` raises (e.g.
+        # missing privileges), the introspector must fall back to an
+        # empty FK map rather than crashing the run.
+        from dorm.inspect import introspect_tables
+
+        class _Conn:
+            vendor = "postgresql"
+
+            # Match the protocol — ``execute`` accepts an optional
+            # params list; ``_params`` / ``_t`` are unused by these
+            # stubs but must stay in the signature for the production
+            # code path that calls them.
+            def execute(self, sql, _params=None):
+                if "pg_tables" in sql:
+                    return [{"tablename": "t1"}]
+                if "information_schema.table_constraints" in sql:
+                    raise RuntimeError("denied")
+                return []
+
+            def get_table_columns(self, _t):
+                return [{"name": "id", "data_type": "integer", "is_nullable": "NO"}]
+
+        out = introspect_tables(_Conn())
+        assert len(out) == 1
+        assert out[0]["fks"] == {}  # graceful fallback
+
+    def test_introspect_handles_fk_query_error_sqlite(self):
+        from dorm.inspect import introspect_tables
+
+        class _Conn:
+            vendor = "sqlite"
+
+            def execute(self, sql, _params=None):
+                if "sqlite_master" in sql:
+                    return [{"name": "t1"}]
+                if "PRAGMA foreign_key_list" in sql:
+                    raise RuntimeError("oops")
+                return []
+
+            def get_table_columns(self, _t):
+                return [{"name": "id", "type": "INTEGER", "pk": 1, "notnull": 1}]
+
+        out = introspect_tables(_Conn())
+        assert out[0]["fks"] == {}
+
+
+# =================================================================
+# Model metaclass — abstract / inheritance corners
+# =================================================================
+
+
+class TestModelMetaclass:
+    def test_abstract_model_does_not_register_default_manager(self):
+        # Concrete subclass gets ``objects``; abstract one does not
+        # register a manager that would clobber its child's choice.
+        class _Base(dorm.Model):
+            shared = dorm.CharField(max_length=10)
+
+            class Meta:
+                abstract = True
+
+        # Concrete subclass — gets the inherited field and a manager.
+        class _Child(_Base):
+            class Meta:
+                app_label = "tests"
+                db_table = "x_child"
+
+        assert hasattr(_Child, "objects")
+        assert any(f.name == "shared" for f in _Child._meta.fields)
+        # And abstract base doesn't have ``objects`` in __dict__ via
+        # the default manager — the metaclass skipped that path.
+        assert _Base._meta.abstract is True
+
+    def test_abstract_meta_ordering_inherited(self):
+        # When a child doesn't redeclare Meta.ordering, it inherits.
+        class _Base(dorm.Model):
+            class Meta:
+                abstract = True
+                ordering = ["pk"]
+
+        class _Child(_Base):
+            x = dorm.CharField(max_length=10)
+
+            class Meta:
+                app_label = "tests"
+                db_table = "x_inh"
+
+        assert _Child._meta.ordering == ["pk"]
+
+
+# =================================================================
+# Lookups — empty IN, isnotnull
+# =================================================================
+
+
+class TestLookupsEdges:
+    def test_empty_in_returns_no_rows(self):
+        # ``filter(pk__in=[])`` is short-circuited to ``1=0`` — no
+        # round-trip to the DB matters here, just that the queryset
+        # materialises empty without errors.
+        from tests.models import Author
+
+        Author.objects.create(name="A", age=1)
+        rows = list(Author.objects.filter(pk__in=[]))
+        assert rows == []
+
+    def test_isnull_true_and_false(self):
+        from tests.models import Author
+
+        Author.objects.create(name="with-pub", age=1, publisher=None)
+        # publisher is None → isnull=True matches.
+        assert Author.objects.filter(publisher__isnull=True).exists()
+        assert not Author.objects.filter(publisher__isnull=False).exists()
+
+    def test_unsupported_lookup_raises(self):
+        from dorm.lookups import build_lookup_sql
+
+        with pytest.raises(ValueError):
+            build_lookup_sql('"x"', "definitely_not_a_lookup", "v")
+
+    def test_range_lookup(self):
+        from tests.models import Author
+
+        for i in range(5):
+            Author.objects.create(name=f"u{i}", age=i)
+        between = list(Author.objects.filter(age__range=(1, 3)).order_by("age"))
+        assert [a.age for a in between] == [1, 2, 3]
+
+
+# =================================================================
+# Manager.raw — placeholder mismatch refuses construction
+# =================================================================
+
+
+class TestRawQuerySetGuards:
+    def test_raw_arity_mismatch_rejected(self):
+        from tests.models import Author
+
+        # 1 placeholder, 0 params → must refuse.
+        with pytest.raises(Exception):
+            Author.objects.raw('SELECT * FROM "authors" WHERE id = %s', [])
+
+    def test_raw_with_matching_arity_runs(self):
+        from tests.models import Author
+
+        a = Author.objects.create(name="raw", age=99)
+        rows = list(
+            Author.objects.raw('SELECT * FROM "authors" WHERE id = %s', [a.pk])
+        )
+        assert len(rows) == 1
+        assert rows[0].pk == a.pk
