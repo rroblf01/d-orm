@@ -278,16 +278,30 @@ class MigrationExecutor:
                     label = "Would apply" if dry_run else "Applying"
                     print(f"  {label} {app_label}.{name}...", end=" ")
 
-                to_state = from_state.clone()
-                for op in getattr(module, "operations", []):
-                    op.state_forwards(app_label, to_state)
-                    op.database_forwards(app_label, self.connection, from_state, to_state)
-                    from_state = to_state.clone()
+                # Each migration runs inside a single transaction so that
+                # a failure in op N rolls back ops 1..N-1. Without this,
+                # a partial failure leaves the schema in a half-applied
+                # state and the recorder out of sync — the next run would
+                # try to re-apply ops 1..N-1 and crash on duplicate-table
+                # / duplicate-column. Atomic-DDL is a hard requirement for
+                # safe migrations.
+                #
+                # ``atomic_for_migration`` is a no-op on backends that
+                # don't support transactional DDL (none right now — both
+                # SQLite and PG do — but we keep the indirection so a
+                # future backend can opt out). On dry-run we use the
+                # capture proxy's pass-through atomic().
+                with self.connection.atomic():
+                    to_state = from_state.clone()
+                    for op in getattr(module, "operations", []):
+                        op.state_forwards(app_label, to_state)
+                        op.database_forwards(app_label, self.connection, from_state, to_state)
+                        from_state = to_state.clone()
 
-                if not dry_run:
-                    self.recorder.record_applied(app_label, name)
-                    for rep_app, rep_name in getattr(module, "replaces", []):
-                        self.recorder.record_applied(rep_app, rep_name)
+                    if not dry_run:
+                        self.recorder.record_applied(app_label, name)
+                        for rep_app, rep_name in getattr(module, "replaces", []):
+                            self.recorder.record_applied(rep_app, rep_name)
                 if self.verbosity:
                     print("OK")
         finally:
@@ -335,9 +349,13 @@ class MigrationExecutor:
             for op in getattr(module, "operations", []):
                 op.state_forwards(app_label, from_state)
 
-            for op in reversed(getattr(module, "operations", [])):
-                op.database_backwards(app_label, self.connection, from_state, to_state)
-
-            self.recorder.record_unapplied(app_label, name)
+            # Same atomicity guarantee as forward apply: rollbacks must
+            # not be partially committed. If op M of N fails in
+            # ``database_backwards``, the surrounding transaction is rolled
+            # back so the schema state matches the recorder.
+            with self.connection.atomic():
+                for op in reversed(getattr(module, "operations", [])):
+                    op.database_backwards(app_label, self.connection, from_state, to_state)
+                self.recorder.record_unapplied(app_label, name)
             if self.verbosity:
                 print("OK")

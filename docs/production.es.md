@@ -211,11 +211,50 @@ logging.getLogger("dorm.queries").setLevel(logging.DEBUG)
 logging.getLogger("dorm.signals").addHandler(tu_handler_alerta)
 ```
 
+## Notas de seguridad
+
+Algunos puntos a tener en cuenta en despliegues de producción:
+
+- **El auto-discovery de `settings.py` ejecuta código Python.** Si no
+  pasas `--settings=` ni `DORM_SETTINGS=`, dorm recorre el `cwd` y el
+  directorio de `sys.argv[0]` buscando un `settings.py` y ejecuta
+  el primero que encuentra (`exec_module()`). Es el comportamiento
+  diseñado (imita el de `manage.py` de Django) pero implica que un
+  `settings.py` que termine en tu directorio de trabajo se ejecutará
+  como código. **Pasa explícitamente `--settings=miproyecto.settings`
+  en los runners de producción** para evitar ambigüedad, y revisa tus
+  imágenes de contenedor por archivos `settings.py` espurios.
+- **Los logs DEBUG de queries enmascaran valores ligados a columnas
+  cuyo nombre coincida con `password`, `token`, `api_key`, `secret`…**
+  El resto se imprime literal para ayudar al debugging. Si rediriges
+  los logs DEBUG a un sink compartido (Datadog, Loki), asegúrate de
+  que la lista de redacción cubra tus columnas de credenciales
+  específicas del dominio; si no, extiéndela vía la tupla
+  `dorm.db.utils._SENSITIVE_COLUMN_PATTERNS`, o filtra en el handler
+  del logger. Las señales `pre_query` / `post_query` siempre reciben
+  los params crudos; si los reenvías a sinks externos, sanitiza ahí
+  también.
+- **Las migraciones son atómicas por archivo.** Un fallo en la op N
+  hace rollback de las ops 1..N-1 y la migración *no* queda
+  registrada como aplicada — así un `dorm migrate` reintentado vuelve
+  a aplicar limpiamente. La misma garantía cubre el rollback y
+  `migrate_to`. En SQLite esto requirió forzar un `BEGIN` explícito
+  (el módulo `sqlite3` de Python no auto-inicia transacción antes de
+  DDL); en PostgreSQL todo el DDL pasa por la conexión fijada por el
+  bloque `atomic()` activo.
+- **`execute_streaming()` se niega a correr dentro de `atomic()`.**
+  Los cursores server-side de PostgreSQL necesitan su propia
+  transacción; el fallback silencioso anterior cargaba todo el
+  resultado en memoria. Si necesitas streaming dentro de una
+  transacción, reestructura: lee las PKs a una lista fuera del bloque
+  y luego itera sobre ellas.
+
 ## Checklist
 
 - [ ] `MAX_POOL_SIZE × workers ≤ max_connections de Postgres / 2`
 - [ ] `dorm dbcheck` corre en CI
 - [ ] `dorm migrate --dry-run` corre como gate de deploy en prod
+- [ ] `--settings=` o `DORM_SETTINGS=` explícitos en los runners de producción
 - [ ] `/healthz` cableado a la sonda de readiness
 - [ ] `pre_query` / `post_query` trazado a tu APM
 - [ ] Tests async con event loop session-scoped

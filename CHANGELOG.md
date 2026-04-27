@@ -6,7 +6,63 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Migrations are now atomic per migration file.** A failure in
+  operation N now rolls back operations 1..N-1 *and* prevents the
+  migration from being recorded as applied — previously a partial
+  failure could leave the schema half-applied while the recorder
+  thought the migration succeeded, requiring manual cleanup. The same
+  atomicity now covers `rollback()` and `migrate_to(...)` reverses.
+  - To make this work on SQLite, `atomic()` now issues an explicit
+    `BEGIN` at depth 0 (the legacy-transaction-control mode of
+    `sqlite3` does not auto-begin before DDL or `SELECT`), and
+    `execute_script()` uses `conn.execute()` for single-statement SQL
+    (the common DDL case) so it participates in the active transaction
+    instead of silently committing via `executescript()`'s built-in
+    `COMMIT`.
+  - On PostgreSQL, `execute_script()` (sync and async) now honours the
+    active `atomic()` / `aatomic()` block by reusing its pinned
+    connection. Before, every `execute_script()` checked out a new pool
+    connection and committed independently, so DDL escaped the
+    surrounding transaction.
+- **`prefetch_related()` typos no longer silently fall back to N+1.**
+  The sync and async paths previously caught a bare `Exception` when
+  resolving the prefetch field name, so `prefetch_related("authrs")`
+  (typo) would degrade to running follow-up queries one-per-row with no
+  warning. They now narrow the catch to `FieldDoesNotExist`, and the
+  reverse-FK fallback raises `FieldDoesNotExist` instead of returning
+  silently when no descriptor or registry match is found. Async
+  prefetch additionally wraps the per-relation failure in a message
+  that names the offending relation.
+- **`execute_streaming()` refuses to run inside `atomic()` /
+  `aatomic()`.** PostgreSQL named cursors require their own
+  transaction; the previous fallback to a non-streaming fetch silently
+  materialised the whole result set in memory — exactly what callers
+  used streaming to avoid. Now raises `RuntimeError` with a clear
+  remediation hint.
+- **Async PG pool no longer leaks connections on event-loop switch.**
+  When the running event loop changes (e.g. between `asyncio.run()`
+  invocations), the previously cached pool was abandoned without being
+  closed. The wrapper now schedules `pool.close()` on the old loop via
+  `asyncio.run_coroutine_threadsafe()` if it's still alive, so the
+  underlying sockets are released promptly.
+
+### Added
+- **`Manager.iterator(chunk_size=...)` / `Manager.aiterator(...)` proxies.**
+  `Author.objects.iterator()` now works without going through
+  `.get_queryset().iterator()`, matching the rest of the manager API
+  and Django's surface.
+
 ### Security
+- **DEBUG query logs mask values bound to sensitive columns.** Values
+  bound to columns whose name suggests a credential — `password`,
+  `passwd`, `secret`, `token`, `api_key`, `apikey`, `authorization`,
+  `auth_token`, `access_key`, `private_key` — are replaced with
+  `"***"` in DEBUG / slow-query log lines. Non-sensitive columns are
+  preserved so debugging stays useful. Query observability signals
+  (`pre_query` / `post_query`) still receive the raw params; if you
+  ship them to external sinks, sanitise there too.
+
 - **`Cast(output_field=...)` validated against an allowlist.** Previously
   `output_field` was spliced directly into `CAST(expr AS {output_field})`,
   so an attacker-controlled string could inject SQL. Only the documented

@@ -28,6 +28,45 @@ _JOURNAL_MODE_SQL: dict[str, str] = {
 _VALID_JOURNAL_MODES = frozenset(_JOURNAL_MODE_SQL)
 
 
+def _is_single_statement(sql: str) -> bool:
+    """Return True if ``sql`` contains exactly one SQL statement.
+
+    Used by :meth:`SQLiteDatabaseWrapper.execute_script` to choose
+    between transaction-respecting ``execute()`` and the auto-committing
+    ``executescript()``. The check ignores ``;`` characters that appear
+    inside single- or double-quoted literals — naive ``;`` counting
+    would misclassify e.g. ``INSERT INTO t VALUES ('a;b')``.
+
+    Comments aren't stripped because the migration writer never emits
+    them. If a future caller passes commented SQL, the worst case is a
+    false negative (use executescript, which still works) — never a
+    false positive that would split a single statement.
+    """
+    stripped = sql.strip()
+    if not stripped:
+        return True  # nothing to run; treated as trivially single
+    in_single = False
+    in_double = False
+    semis = 0
+    last_non_ws = -1
+    for i, ch in enumerate(stripped):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == ";" and not in_single and not in_double:
+            semis += 1
+            last_non_ws = i
+            continue
+        if not ch.isspace():
+            last_non_ws = i
+    if semis == 0:
+        return True
+    if semis == 1 and last_non_ws == stripped.rfind(";"):
+        return True  # single statement with trailing semicolon
+    return False
+
+
 def _validate_journal_mode(value: str) -> str:
     """Return *value* uppercased if it's a recognised SQLite journal mode,
     otherwise raise ``ImproperlyConfigured``. The returned string is
@@ -103,7 +142,20 @@ class SQLiteDatabaseWrapper:
     def atomic(self):
         depth = self._atomic_depth
         conn = self.get_connection()
-        if depth > 0:
+        if depth == 0:
+            # Python's sqlite3 module in legacy-transaction-control mode
+            # only auto-BEGINs before DML (INSERT/UPDATE/DELETE), NOT
+            # before DDL or SELECT. That made atomic() useless for
+            # migrations: a ``CREATE TABLE`` ran outside any transaction
+            # and survived a subsequent rollback. Emit BEGIN explicitly
+            # so DDL participates too.
+            #
+            # ``conn.in_transaction`` tells us whether sqlite3 has
+            # already auto-begun a transaction — if it has, BEGIN would
+            # error ("cannot start a transaction within a transaction").
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+        else:
             conn.execute(f"SAVEPOINT _sp{depth}")
         self._atomic_depth = depth + 1
         try:
@@ -185,15 +237,25 @@ class SQLiteDatabaseWrapper:
     def execute_script(self, sql: str):
         """Run a multi-statement SQL script.
 
-        **SQLite limitation:** ``sqlite3.Connection.executescript()`` issues
-        an implicit ``COMMIT`` before the script and another after, so
-        calling this from inside an ``atomic()`` block ends the surrounding
-        transaction. The OS-level file lock still protects against concurrent
-        writers, but the ``atomic()`` rollback guarantee no longer applies to
-        statements that ran before this call. Use single-statement
-        ``execute()`` calls when you need full transactional control.
+        **SQLite gotcha:** ``sqlite3.Connection.executescript()`` issues
+        an implicit ``COMMIT`` before the script and another after — so
+        calling it inside an ``atomic()`` block silently ends the
+        surrounding transaction and breaks the rollback guarantee.
+
+        To keep migrations transactional, we route single-statement SQL
+        (the common case for ``CREATE TABLE`` / ``DROP TABLE`` / ``ALTER
+        TABLE`` produced by the migration ops) through ``conn.execute()``,
+        which DOES participate in the active transaction. Multi-statement
+        scripts still go through ``executescript()`` and remain non-
+        transactional — there's no SQLite primitive that runs multiple
+        statements atomically in one call.
         """
         conn = self.get_connection()
+        if _is_single_statement(sql):
+            conn.execute(sql)
+            if self._atomic_depth == 0 and not self._autocommit:
+                conn.commit()
+            return
         conn.executescript(sql)
         # executescript() already commits; an explicit commit() here would
         # be redundant. Skip it so we don't generate spurious wal-frames.

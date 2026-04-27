@@ -148,13 +148,148 @@ async def awith_transient_retry(
         raise last_exc
 
 
+# Column-name fragments that suggest a value is sensitive. We mask the
+# corresponding parameter in DEBUG logs so credentials don't leak into
+# log aggregators / shared dashboards. Matched against the SQL text
+# (case-insensitive substring on column names appearing immediately
+# before each placeholder), so this only kicks in when the column itself
+# carries the secret — bulk inserts where the secret column is one
+# among many still get masked at that column's position.
+_SENSITIVE_COLUMN_PATTERNS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth_token",
+    "access_key",
+    "private_key",
+)
+
+
+_INSERT_RE = re.compile(
+    r"""
+    \bINSERT \s+ INTO \s+
+    (?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)        # table name
+    \s* \( \s*
+    (?P<cols>[^)]+)                              # column list inside ()
+    \s* \) \s*
+    VALUES \s*
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _columns_from_insert(sql: str) -> list[str] | None:
+    """If ``sql`` is an ``INSERT INTO t (a, b, c) VALUES …`` statement,
+    return ``["a", "b", "c"]`` (lowercased, unquoted). Otherwise None.
+    The column list cycles per VALUES tuple — bulk inserts with N tuples
+    just repeat the same alignment N times in :func:`_placeholder_column_index`.
+    """
+    m = _INSERT_RE.search(sql)
+    if not m:
+        return None
+    cols_raw = m.group("cols")
+    cols: list[str] = []
+    for piece in cols_raw.split(","):
+        piece = piece.strip().strip('"').strip()
+        if not piece:
+            continue
+        cols.append(piece.lower())
+    return cols or None
+
+
+def _placeholder_column_index(sql: str) -> list[str | None]:
+    """For each ``%s`` / ``$N`` / ``?`` placeholder in ``sql``, return the
+    column name that the value is bound to (or ``None`` if we can't
+    figure one out). Used by :func:`_mask_params` to selectively redact
+    values bound to sensitive columns.
+
+    Two forms are handled:
+
+    1. ``WHERE col = ?`` / ``SET col = ?`` / ``col IN (?, ?, …)`` — the
+       column sits right before the placeholder. Handled by walking back
+       from each placeholder position.
+    2. ``INSERT INTO t (a, b, c) VALUES (?, ?, ?), (?, ?, ?)`` — the
+       column list precedes a ``VALUES`` clause; we cycle through it for
+       each tuple of placeholders.
+
+    Best-effort: a real SQL parser would be more accurate, but logging-
+    time redaction doesn't justify pulling one in. We may miss some
+    assignments (false negative → leak), but we never mask the wrong
+    value (false positive → break debugging).
+    """
+    cols: list[str | None] = []
+    insert_cols = _columns_from_insert(sql)
+    insert_idx = 0
+
+    # Find where VALUES starts so we know which placeholders are in the
+    # tuple form (cycle through insert_cols) vs elsewhere in the SQL.
+    values_start: int | None = None
+    if insert_cols:
+        m = re.search(r"\bVALUES\b\s*\(", sql, re.IGNORECASE)
+        if m:
+            values_start = m.end()
+
+    for match in re.finditer(r"\$\d+|%s|\?", sql):
+        pos = match.start()
+        if insert_cols and values_start is not None and pos >= values_start:
+            cols.append(insert_cols[insert_idx % len(insert_cols)])
+            insert_idx += 1
+            continue
+
+        prefix = sql[:pos]
+        # Strip trailing whitespace + operator (=, <, >, !=, IN, etc).
+        m = re.search(
+            r'"?([A-Za-z_][A-Za-z0-9_]*)"?\s*(?:=|<>|!=|<=|>=|<|>|\bIN\b\s*\(?|\bLIKE\b|\bILIKE\b)\s*$',
+            prefix,
+            re.IGNORECASE,
+        )
+        cols.append(m.group(1).lower() if m else None)
+    return cols
+
+
+def _is_sensitive_column(col: str | None) -> bool:
+    if col is None:
+        return False
+    col_l = col.lower()
+    return any(pat in col_l for pat in _SENSITIVE_COLUMN_PATTERNS)
+
+
+def _mask_params(sql: str, params):
+    """Return a copy of ``params`` with values bound to sensitive columns
+    replaced by ``"***"``. Returns ``params`` unchanged if nothing to mask
+    or if the shape isn't a flat list/tuple.
+    """
+    if not params:
+        return params
+    if not isinstance(params, (list, tuple)):
+        return params
+    cols = _placeholder_column_index(sql)
+    if not any(_is_sensitive_column(c) for c in cols):
+        return params
+    masked = list(params)
+    for i, col in enumerate(cols):
+        if i >= len(masked):
+            break
+        if _is_sensitive_column(col):
+            masked[i] = "***"
+    return masked
+
+
 @contextmanager
 def log_query(vendor: str, sql: str, params=None):
     """Time a SQL statement and dispatch query observability signals.
 
     Emits DEBUG for every query, WARNING above ``DORM_SLOW_QUERY_MS``,
     and fires ``dorm.signals.pre_query`` / ``post_query`` so user code can
-    wire metrics or tracing.
+    wire metrics or tracing. Values bound to columns whose name suggests
+    a credential (``password``, ``token``, ``api_key`` …) are redacted
+    in DEBUG / slow-query log lines — see :func:`_mask_params`. Signal
+    receivers still get the raw params; if you ship them to external
+    sinks, you're responsible for additional sanitisation there.
     """
     # Lazy import to avoid the circular dorm.signals → dorm.db at startup.
     from ..signals import pre_query, post_query
@@ -171,7 +306,8 @@ def log_query(vendor: str, sql: str, params=None):
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         log = logging.getLogger(f"dorm.db.backends.{vendor}")
         if log.isEnabledFor(logging.DEBUG):
-            log.debug("(%.2fms) %s; params=%r", elapsed_ms, sql, params)
+            safe_params = _mask_params(sql, params)
+            log.debug("(%.2fms) %s; params=%r", elapsed_ms, sql, safe_params)
         threshold = _slow_query_ms()
         if elapsed_ms >= threshold:
             log.warning(

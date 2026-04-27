@@ -341,8 +341,18 @@ class PostgreSQLDatabaseWrapper:
         return with_transient_retry(_do, in_transaction=in_tx)
 
     def execute_script(self, sql: str):
-        with self._get_pool().connection() as conn:
+        # Honour any active atomic() / autocommit() context so DDL run by
+        # migrations participates in the surrounding transaction. Before
+        # this fix, ``execute_script`` always checked out its own pool
+        # connection, so a CREATE TABLE issued from a migration op
+        # committed independently and survived an atomic() rollback.
+        conn = self._choose_conn()
+        if conn is not None:
             with conn.cursor() as cur:
+                cur.execute(sql)
+            return
+        with self._get_pool().connection() as c:
+            with c.cursor() as cur:
                 cur.execute(sql)
 
     def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
@@ -351,14 +361,19 @@ class PostgreSQLDatabaseWrapper:
         the result set on the server and streams in batches of
         ``chunk_size``.
 
-        Falls back to the regular non-streaming path while inside an
-        ``atomic()`` block: named cursors require their own transaction
-        and we don't want to interfere with the user's current one.
+        Refuses to run inside an ``atomic()`` block: named cursors need
+        their own transaction, and silently falling back to a non-
+        streaming fetch would materialise the whole result set in
+        memory — the exact failure mode the caller used streaming to
+        avoid. Better to fail loudly so the caller can restructure.
         """
         if self._atomic_conn is not None:
-            for row in self._exec(self._atomic_conn, sql, params):
-                yield row
-            return
+            raise RuntimeError(
+                "execute_streaming() cannot be used inside an atomic() block: "
+                "PostgreSQL named cursors require their own transaction. "
+                "Move the streaming read outside the atomic() block, or use "
+                "the non-streaming iterator() if the result set fits in memory."
+            )
 
         sql_adapted = _to_pyformat(sql)
         with log_query("postgresql", sql, params):
@@ -474,12 +489,26 @@ class PostgreSQLAsyncDatabaseWrapper:
         current_loop = asyncio.get_running_loop()
 
         if self._loop is not current_loop and self._pool is not None:
-            # Don't await close() on the old pool — its tasks/connections
-            # belong to a dead loop and awaiting them on the new loop is
-            # unreliable. Drop the reference and let GC handle sockets.
+            # The old pool's tasks/connections belong to a dead loop —
+            # awaiting close() on the new loop is unreliable. We can't
+            # reliably shut down the old pool, but we can at least try
+            # close() on its own loop if it's still alive (avoids leaking
+            # the connections until process exit).
+            old_pool = self._pool
+            old_loop = self._loop
             self._pool = None
             self._loop = None
             self._pool_lock = asyncio.Lock()
+            if old_loop is not None and not old_loop.is_closed():
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        old_pool.close(), old_loop
+                    )
+                except RuntimeError:
+                    # Old loop is shut down or not running — sockets
+                    # will be reclaimed at process exit. Better than the
+                    # alternative of awaiting on the wrong loop.
+                    pass
 
         if self._pool is not None:
             return self._pool
@@ -665,6 +694,14 @@ class PostgreSQLAsyncDatabaseWrapper:
         return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
 
     async def execute_script(self, sql: str):
+        # Same atomic-respecting logic as the sync wrapper: if there's
+        # an active aatomic() block, use that block's pinned connection
+        # so DDL participates in the outer transaction.
+        state = ASYNC_ATOMIC_STATE.get()
+        if state is not None and state[0] is self:
+            async with state[1].cursor() as cur:
+                await cur.execute(sql)
+            return
         async with (await self._get_pool()).connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql)
@@ -675,9 +712,12 @@ class PostgreSQLAsyncDatabaseWrapper:
         version's notes about transaction interactions."""
         state = ASYNC_ATOMIC_STATE.get()
         if state is not None and state[0] is self:
-            for row in await self._aexec(state[1], sql, params):
-                yield row
-            return
+            raise RuntimeError(
+                "execute_streaming() cannot be used inside an aatomic() block: "
+                "PostgreSQL named cursors require their own transaction. "
+                "Move the streaming read outside the aatomic() block, or use "
+                "the non-streaming aiterator() if the result set fits in memory."
+            )
 
         sql_adapted = _to_pyformat(sql)
         with log_query("postgresql", sql, params):

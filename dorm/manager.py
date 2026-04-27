@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Any, AsyncIterator, Generic, Iterator, TypeVar, overload
 
 from .models import Model
 
@@ -140,6 +140,12 @@ class BaseManager(Generic[_T]):
 
     def aggregate(self, **kwargs: Any) -> dict[str, Any]:
         return self.get_queryset().aggregate(**kwargs)
+
+    def iterator(self, chunk_size: int | None = None) -> Iterator[_T]:
+        return self.get_queryset().iterator(chunk_size)
+
+    def aiterator(self, chunk_size: int | None = None) -> AsyncIterator[_T]:
+        return self.get_queryset().aiterator(chunk_size)
 
     # ── Async proxy methods ───────────────────────────────────────────────────
 

@@ -355,11 +355,18 @@ class QuerySet(Generic[_T]):
                     parent_inst.__dict__[cache_key] = created[step_path]
 
     def _do_prefetch_related(self, instances: list[_T]) -> None:
+        from .exceptions import FieldDoesNotExist
+
         for fname in self._query.prefetch_related_fields:
             field = None
             try:
                 field = self.model._meta.get_field(fname)
-            except Exception:
+            except FieldDoesNotExist:
+                # Not a declared field on this model — could still be a
+                # reverse-FK relation discovered via the descriptor scan
+                # in ``_prefetch_reverse_fk``. Fall through with
+                # ``field=None``; the reverse-FK path validates the name
+                # and raises if it doesn't resolve there either.
                 pass
 
             if field is not None and getattr(field, "many_to_many", False):
@@ -520,7 +527,19 @@ class QuerySet(Generic[_T]):
                     break
 
             if target_field is None or target_model is None:
-                return
+                # Neither the descriptor nor the registry scan resolved
+                # ``fname`` to a relation. Previously this silently
+                # returned and the caller assumed the prefetch had run —
+                # so a typo in ``prefetch_related("authrs")`` would just
+                # degrade back to N+1 with no warning. Raise so the
+                # mistake surfaces.
+                from .exceptions import FieldDoesNotExist
+
+                raise FieldDoesNotExist(
+                    f"Cannot resolve {fname!r} on "
+                    f"{self.model.__name__} for prefetch_related(): "
+                    f"no field, reverse-FK descriptor, or registry match."
+                )
 
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
@@ -1034,7 +1053,15 @@ class QuerySet(Generic[_T]):
                     break
 
             if target_field is None or target_model is None:
-                return
+                # Same rationale as :meth:`_prefetch_reverse_fk`: surface
+                # typos instead of degrading to N+1 silently.
+                from .exceptions import FieldDoesNotExist
+
+                raise FieldDoesNotExist(
+                    f"Cannot resolve {fname!r} on "
+                    f"{self.model.__name__} for prefetch_related(): "
+                    f"no field, reverse-FK descriptor, or registry match."
+                )
 
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
@@ -1090,12 +1117,18 @@ class QuerySet(Generic[_T]):
                 fk_val = inst.__dict__.get(field.attname)
                 inst.__dict__[cache_key] = related_objs.get(fk_val)
 
+        from .exceptions import FieldDoesNotExist
+
         coros: list = []
+        names: list[str] = []
         for fname in self._query.prefetch_related_fields:
             field = None
             try:
                 field = self.model._meta.get_field(fname)
-            except Exception:
+            except FieldDoesNotExist:
+                # Same rationale as the sync path: could still resolve as
+                # a reverse-FK descriptor; let that branch validate and
+                # raise if needed.
                 pass
 
             if field is not None and getattr(field, "many_to_many", False):
@@ -1104,9 +1137,21 @@ class QuerySet(Generic[_T]):
                 coros.append(_one_forward_fk(fname, field))
             else:
                 coros.append(self._aprefetch_reverse_fk(instances, fname))
+            names.append(fname)
 
         if coros:
-            await asyncio.gather(*coros)
+            # ``return_exceptions=True`` keeps a single failing prefetch
+            # from cancelling the others mid-flight (psycopg cancellation
+            # can leave the connection in a bad state). We re-raise the
+            # first failure with the relation name attached so the
+            # traceback says *which* prefetch blew up — previously it was
+            # just an opaque exception from somewhere in gather().
+            results = await asyncio.gather(*coros, return_exceptions=True)
+            for fname, result in zip(names, results):
+                if isinstance(result, BaseException):
+                    raise RuntimeError(
+                        f"prefetch_related({fname!r}) failed: {result}"
+                    ) from result
 
     async def _aiterator(self) -> AsyncIterator[_T]:
         conn = self._get_async_connection()
@@ -1233,6 +1278,22 @@ class QuerySet(Generic[_T]):
 
         total_counts: dict[str, int] = {}
 
+        # Two-pass strategy:
+        #   1. PROTECT first — these are guards that abort the whole
+        #      delete. We run them sequentially because the first
+        #      ProtectedError must propagate cleanly (gather + raise
+        #      cancels the others, leaking partial state).
+        #   2. CASCADE / SET_NULL / SET_DEFAULT in parallel via gather().
+        #      Each hits a different table, so there's no row-level race.
+        #      Inside an aatomic() block they share one PG connection,
+        #      so psycopg serialises them anyway — but outside aatomic()
+        #      this fans out to separate pool connections and gives a
+        #      real speedup on wide cascade trees.
+        protect_descs: list[Any] = []
+        cascade_qs: list[QuerySet[Any]] = []
+        set_null_specs: list[tuple[QuerySet[Any], str]] = []
+        set_default_specs: list[tuple[QuerySet[Any], str, Any]] = []
+
         for attr_val in self.model.__dict__.values():
             if not isinstance(attr_val, ReverseFKDescriptor):
                 continue
@@ -1246,20 +1307,43 @@ class QuerySet(Generic[_T]):
             )
 
             if on_delete == PROTECT:
-                if await related_qs.aexists():
-                    raise ProtectedError(
-                        f"Cannot delete {self.model.__name__} objects because related "
-                        f"{attr_val.source_model.__name__} objects exist.",
-                        [obj async for obj in related_qs[:5]],
-                    )
+                protect_descs.append((attr_val, related_qs))
             elif on_delete == CASCADE:
-                sub_count, sub_detail = await related_qs.adelete()
+                cascade_qs.append(related_qs)
+            elif on_delete == SET_NULL:
+                set_null_specs.append((related_qs, fk_field.name))
+            elif on_delete == SET_DEFAULT:
+                set_default_specs.append(
+                    (related_qs, fk_field.name, fk_field.get_default())
+                )
+
+        for attr_val, related_qs in protect_descs:
+            if await related_qs.aexists():
+                raise ProtectedError(
+                    f"Cannot delete {self.model.__name__} objects because related "
+                    f"{attr_val.source_model.__name__} objects exist.",
+                    [obj async for obj in related_qs[:5]],
+                )
+
+        cascade_coros = [qs.adelete() for qs in cascade_qs]
+        update_coros = [
+            qs.aupdate(**{fname: None}) for qs, fname in set_null_specs
+        ] + [
+            qs.aupdate(**{fname: default})
+            for qs, fname, default in set_default_specs
+        ]
+        if cascade_coros or update_coros:
+            # asyncio.gather returns a heterogeneous list (cascade coros
+            # return ``(int, dict)``, update coros return ``int``). The
+            # type hint loses that structure; cast to Any when indexing
+            # so the type checker doesn't block on the union.
+            results: list[Any] = list(
+                await asyncio.gather(*cascade_coros, *update_coros)
+            )
+            for cascade_result in results[: len(cascade_coros)]:
+                sub_detail = cascade_result[1]
                 for label, cnt in sub_detail.items():
                     total_counts[label] = total_counts.get(label, 0) + cnt
-            elif on_delete == SET_NULL:
-                await related_qs.aupdate(**{fk_field.name: None})
-            elif on_delete == SET_DEFAULT:
-                await related_qs.aupdate(**{fk_field.name: fk_field.get_default()})
 
         conn = self._get_async_connection()
         sql, params = self._query.as_delete(conn)

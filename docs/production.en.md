@@ -206,11 +206,47 @@ logging.getLogger("dorm.queries").setLevel(logging.DEBUG)
 logging.getLogger("dorm.signals").addHandler(your_alert_handler)
 ```
 
+## Security notes
+
+A few sharp edges worth keeping in mind for production deployments:
+
+- **`settings.py` auto-discovery executes Python code.** When you don't
+  pass `--settings=` or `DORM_SETTINGS=`, dorm walks `cwd` and the
+  directory of `sys.argv[0]` looking for a `settings.py` and
+  `exec_module()`s the first match. That's by design (it mirrors
+  Django's manage.py behaviour) but it does mean a `settings.py` that
+  ends up in your working directory will run as code. **Pass an
+  explicit `--settings=myproj.settings` in production runners** so
+  there's no ambiguity, and audit your container images for stray
+  `settings.py` files.
+- **DEBUG-level query logs mask values bound to columns whose name
+  matches `password`, `token`, `api_key`, `secret`, …** — the rest is
+  printed verbatim to help debugging. If you forward DEBUG logs to a
+  shared sink (Datadog, Loki), make sure the redaction list covers
+  your domain-specific credential columns; if not, extend it via the
+  `dorm.db.utils._SENSITIVE_COLUMN_PATTERNS` tuple, or filter on the
+  log handler. The `pre_query` / `post_query` signals always receive
+  the raw params; if you fan them out to external sinks, sanitise
+  there too.
+- **Migrations are atomic per file.** A failure in op N rolls back ops
+  1..N-1 and the migration is *not* recorded as applied — so a
+  retried `dorm migrate` will reapply cleanly. The same atomicity
+  covers rollback / `migrate_to`. On SQLite this required forcing an
+  explicit `BEGIN` (Python's `sqlite3` module does not auto-begin
+  before DDL); on PostgreSQL all DDL now goes through the connection
+  pinned by the active `atomic()` block.
+- **`execute_streaming()` refuses inside `atomic()`.** Server-side
+  cursors need their own transaction; the previous silent fallback
+  loaded the whole result set in memory. If you must stream from
+  inside a transaction, restructure the workload (e.g. read PKs into a
+  list outside the block, then iterate them).
+
 ## Checklist
 
 - [ ] `MAX_POOL_SIZE × workers ≤ Postgres max_connections / 2`
 - [ ] `dorm dbcheck` runs in CI
 - [ ] `dorm migrate --dry-run` runs as a deploy gate on prod
+- [ ] Explicit `--settings=` or `DORM_SETTINGS=` in production runners
 - [ ] `/healthz` wired to readiness probe
 - [ ] `pre_query` / `post_query` traced into your APM
 - [ ] Async tests use a session-scoped event loop
