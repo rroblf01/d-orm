@@ -237,7 +237,9 @@ class QuerySet(Generic[_T]):
         parts = []
         for alias, agg in kwargs.items():
             _validate_identifier(alias, "aggregate alias")
-            parts.append(f'{agg.as_sql(table)[0]} AS "{alias}"')
+            # Pass model so ``Count("pk")`` resolves to the actual
+            # PK column. See note in ``Aggregate.as_sql``.
+            parts.append(f'{agg.as_sql(table, model=self.model)[0]} AS "{alias}"')
         sql = f'SELECT {", ".join(parts)} FROM "{table}"'
         where_sql, where_params = self._query._compile_nodes(
             self._query.where_nodes, connection

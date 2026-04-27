@@ -21,6 +21,6 @@ wheels/
 *.db
 example/**/migrations/
 
-.coverage
+.coverage*
 
 site/*

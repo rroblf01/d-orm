@@ -113,7 +113,7 @@ class Func:
         self.expressions = expressions
         self.output_field = output_field
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         parts: list[str] = []
         params: list[Any] = []
         for expr in self.expressions:
@@ -164,7 +164,7 @@ class Now(Func):
     def __init__(self, output_field: Any = None) -> None:
         super().__init__(output_field=output_field)
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         return "CURRENT_TIMESTAMP", []
 
 
@@ -173,7 +173,7 @@ class Concat(Func):
 
     function = "CONCAT"
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         parts: list[str] = []
         params: list[Any] = []
         for expr in self.expressions:
@@ -195,7 +195,7 @@ class Cast(Func):
         self.cast_type = _validate_cast_type(output_field)
         super().__init__(expression, **kwargs)
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         sql, params = _compile_expr(self.expressions[0], table_alias)
         return f"CAST({sql} AS {self.cast_type})", params
 
@@ -209,7 +209,7 @@ class When:
         self.condition = condition
         self.then = then
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         cond_sql, cond_params = _compile_condition(self.condition, table_alias)
         then_sql, then_params = _compile_expr(self.then, table_alias)
         return f"WHEN {cond_sql} THEN {then_sql}", cond_params + then_params
@@ -238,7 +238,7 @@ class Case:
         self.default = default
         self.output_field = output_field
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         parts: list[str] = []
         params: list[Any] = []
         for when in self.whens:

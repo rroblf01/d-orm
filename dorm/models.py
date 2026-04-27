@@ -581,11 +581,34 @@ class Model(metaclass=ModelBase):
         """Override to add model-level validation. Call super().clean() to chain."""
 
     def validate_unique(self, exclude: list[str] | None = None) -> None:
+        """Check that the in-memory state of this instance does not
+        clash with any unique / ``unique_together`` constraint.
+
+        **Optimisation:** the previous implementation issued one
+        ``EXISTS`` query per unique field AND per ``unique_together``
+        combo, so a model with 3 unique fields and 2 combos paid 5
+        round-trips on every ``full_clean()``. The new path runs a
+        single combined ``OR`` query as a fast existence check; only
+        when a violation is detected do we drill in with per-combo
+        queries to produce the specific error messages. The happy path
+        (no violations — by far the common case in API write handlers)
+        now costs **one** query regardless of how many unique
+        constraints the model carries.
+        """
+        from .exceptions import FieldDoesNotExist
         from .fields import AutoField
+        from .expressions import Q
         from .queryset import QuerySet
 
-        errors: dict[str, str] = {}
-        # Per-field unique
+        # ── Build a list of (label, Q) probes for each constraint ──
+        #
+        # ``label`` is the dict key under which the diagnostic message
+        # lands in ``errors`` if this probe matches: the field name for
+        # per-field uniques, ``__all__`` for unique_together combos.
+        # ``message`` is the user-facing string we'll use if the slow-
+        # path query confirms the violation.
+        probes: list[tuple[str, Any, str]] = []
+
         for field in self._meta.fields:
             if not getattr(field, "unique", False) or field.primary_key:
                 continue
@@ -596,15 +619,15 @@ class Model(metaclass=ModelBase):
             value = self.__dict__.get(field.attname)
             if value is None:
                 continue
-            qs: Any = QuerySet(self.__class__).filter(**{field.column: value})
-            if self.pk is not None:
-                qs = qs.exclude(pk=self.pk)
-            if qs.exists():
-                errors[field.name] = (
-                    f"A {self.__class__.__name__} with this {field.verbose_name or field.name} "
-                    "already exists."
+            probes.append(
+                (
+                    field.name,
+                    Q(**{field.column: value}),
+                    f"A {self.__class__.__name__} with this "
+                    f"{field.verbose_name or field.name} already exists.",
                 )
-        # unique_together
+            )
+
         for combo in self._meta.unique_together:
             if exclude and any(f in exclude for f in combo):
                 continue
@@ -618,19 +641,45 @@ class Model(metaclass=ModelBase):
                         skip = True
                         break
                     lookup[fname] = val
-                except Exception:
+                except FieldDoesNotExist:
                     skip = True
                     break
             if skip:
                 continue
-            qs2: Any = QuerySet(self.__class__).filter(**lookup)
-            if self.pk is not None:
-                qs2 = qs2.exclude(pk=self.pk)
-            if qs2.exists():
-                combo_str = ", ".join(combo)
-                errors["__all__"] = (
-                    f"{self.__class__.__name__} with this {combo_str} already exists."
+            combo_str = ", ".join(combo)
+            probes.append(
+                (
+                    "__all__",
+                    Q(**lookup),
+                    f"{self.__class__.__name__} with this {combo_str} "
+                    "already exists.",
                 )
+            )
+
+        if not probes:
+            return
+
+        # ── Fast path: single OR'd existence check ──────────────────
+        combined = probes[0][1]
+        for _, q, _ in probes[1:]:
+            combined = combined | q
+        fast_qs: Any = QuerySet(self.__class__).filter(combined)
+        if self.pk is not None:
+            fast_qs = fast_qs.exclude(pk=self.pk)
+        if not fast_qs.exists():
+            return
+
+        # ── Slow path: re-issue per-probe to pin down which one(s) ──
+        # Only reached on a confirmed violation (rare — typically a
+        # bad request the caller is about to report). We accept the
+        # extra round-trip here for diagnostic precision.
+        errors: dict[str, str] = {}
+        for label, q, message in probes:
+            qs: Any = QuerySet(self.__class__).filter(q)
+            if self.pk is not None:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                errors[label] = message
         if errors:
             raise ValidationError(errors)
 
@@ -640,28 +689,67 @@ class Model(metaclass=ModelBase):
         self.validate_unique(exclude=exclude)
 
     def refresh_from_db(self, using: str = "default", fields=None):
+        """Re-fetch this row from the database, optionally restricting
+        to a subset of columns.
+
+        When ``fields=`` is given, the ``SELECT`` is narrowed to those
+        columns via :meth:`QuerySet.only` so the database transfers
+        only what's actually being refreshed — important on tables
+        with large TEXT/BLOB/JSON columns where the previous
+        ``SELECT *`` paid a real bandwidth cost. Unknown field names
+        are silently skipped (matches the long-standing behaviour
+        callers depend on for partial refreshes after a
+        ``__set_changed`` hook).
+        """
         from .queryset import QuerySet
-        obj = QuerySet(self.__class__, using).get(pk=self.pk)
+        from .exceptions import FieldDoesNotExist
+
+        qs = QuerySet(self.__class__, using)
+        if fields:
+            cols: list[str] = []
+            for fname in fields:
+                try:
+                    cols.append(self._meta.get_field(fname).column)
+                except FieldDoesNotExist:
+                    pass
+            if cols:
+                qs = qs.only(*cols)
+        obj = qs.get(pk=self.pk)
         if fields:
             for fname in fields:
                 try:
                     field = self._meta.get_field(fname)
-                    self.__dict__[field.attname] = obj.__dict__[field.attname]
-                except Exception:
+                    if field.attname in obj.__dict__:
+                        self.__dict__[field.attname] = obj.__dict__[field.attname]
+                except FieldDoesNotExist:
                     pass
         else:
             self.__dict__.update(obj.__dict__)
 
     async def arefresh_from_db(self, using: str = "default", fields=None):
+        """Async counterpart of :meth:`refresh_from_db`. Same
+        ``fields=`` narrowing applies."""
         from .queryset import QuerySet
+        from .exceptions import FieldDoesNotExist
+
         qs = QuerySet(self.__class__, using)
+        if fields:
+            cols: list[str] = []
+            for fname in fields:
+                try:
+                    cols.append(self._meta.get_field(fname).column)
+                except FieldDoesNotExist:
+                    pass
+            if cols:
+                qs = qs.only(*cols)
         obj = await qs.aget(pk=self.pk)
         if fields:
             for fname in fields:
                 try:
                     field = self._meta.get_field(fname)
-                    self.__dict__[field.attname] = obj.__dict__[field.attname]
-                except Exception:
+                    if field.attname in obj.__dict__:
+                        self.__dict__[field.attname] = obj.__dict__[field.attname]
+                except FieldDoesNotExist:
                     pass
         else:
             self.__dict__.update(obj.__dict__)

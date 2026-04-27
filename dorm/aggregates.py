@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 class Aggregate:
     function: str = ""
@@ -11,14 +13,31 @@ class Aggregate:
         self.filter = filter
         self.output_field = output_field
 
-    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+    def as_sql(
+        self,
+        table_alias: str | None = None,
+        *,
+        model: Any = None,
+    ) -> tuple[str, list]:
+        """Compile this aggregate to SQL.
+
+        ``model`` is optional but recommended: when supplied,
+        ``Count("pk")`` resolves to the model's actual primary-key
+        column (e.g. ``"id"``). Without ``model``, ``"pk"`` would fall
+        through verbatim and the database would reject the query with
+        ``no such column: <table>.pk`` — the bug this parameter
+        prevents.
+        """
         distinct = "DISTINCT " if self.distinct else ""
-        if self.expression == "*":
+        expr = self.expression
+        if expr == "pk" and model is not None and model._meta.pk:
+            expr = model._meta.pk.column
+        if expr == "*":
             col = "*"
         elif table_alias:
-            col = f'"{table_alias}"."{self.expression}"'
+            col = f'"{table_alias}"."{expr}"'
         else:
-            col = f'"{self.expression}"'
+            col = f'"{expr}"'
         sql = self.template % {
             "function": self.function,
             "distinct": distinct,

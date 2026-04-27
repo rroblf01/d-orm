@@ -155,7 +155,12 @@ class SQLQuery:
             parts = []
             for alias_name, agg in self.annotations.items():
                 _validate_identifier(alias_name, "annotation alias")
-                agg_sql, agg_p = agg.as_sql(alias)
+                # Pass the model so aggregates can translate ``pk`` to
+                # the actual PK column (e.g. ``Count("pk")`` →
+                # ``COUNT("table"."id")``). Without this, the SQL
+                # references a non-existent ``"pk"`` column and the
+                # query fails with a clear-but-confusing error.
+                agg_sql, agg_p = agg.as_sql(alias, model=self.model)
                 if alias_name in self.alias_only_names:
                     # alias()-only: skip the SELECT projection. We still
                     # compiled the SQL above so any side-effects (joins,
