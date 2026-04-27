@@ -183,6 +183,15 @@ from dorm.migrations.operations import (
 )
 '''
 
+    # AddIndex / RemoveIndex emit ``Index(...)`` literals in their
+    # serialised form; the generated migration is unimportable without
+    # the Index symbol in scope. ``write_squashed_migration`` already
+    # handled this; ``write_migration`` was missing the import — any
+    # auto-generated migration containing a (Add|Remove)Index would
+    # crash at load time with ``NameError: name 'Index' is not defined``.
+    if any(c in op_classes for c in ("AddIndex", "RemoveIndex")):
+        content += "from dorm.indexes import Index\n"
+
     # Add field imports
     field_imports = set()
     for op in operations:

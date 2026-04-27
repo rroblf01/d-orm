@@ -355,6 +355,24 @@ class QuerySet(Generic[_T]):
     def __getitem__(self, k: slice) -> QuerySet[_T]: ...
     def __getitem__(self, k: int | slice) -> _T | QuerySet[_T]:
         if isinstance(k, slice):
+            # ``step`` and negative bounds aren't expressible in SQL
+            # ``LIMIT`` / ``OFFSET``; silently ignoring them (the prior
+            # behaviour) made ``qs[::2]`` return the *same* rows as
+            # ``qs[:]`` — a confusing data-loss-shaped bug. Reject so
+            # the caller learns and can use ``list(qs)[::2]`` if
+            # in-memory step actually is what they wanted.
+            if k.step is not None and k.step != 1:
+                raise ValueError(
+                    "QuerySet slicing does not support a step (got "
+                    f"step={k.step!r}). Materialise with ``list(qs)`` first "
+                    "if you need step-based iteration."
+                )
+            if (k.start is not None and k.start < 0) or (
+                k.stop is not None and k.stop < 0
+            ):
+                raise ValueError(
+                    "QuerySet slicing does not support negative indices."
+                )
             qs = self._clone()
             start = k.start or 0
             stop = k.stop

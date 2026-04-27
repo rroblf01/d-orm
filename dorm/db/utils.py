@@ -233,11 +233,46 @@ def _placeholder_column_index(sql: str) -> list[str | None]:
         if m:
             values_start = m.end()
 
+    # Pre-compute spans of ``<col> IN ( ... )`` clauses so we can carry
+    # the column down to every placeholder inside, not just the first
+    # one. Without this, ``WHERE password IN (?, ?, ?)`` would mask only
+    # the first ``?`` and leak the other two — exactly the kind of
+    # half-redaction that's worse than no redaction.
+    in_spans: list[tuple[int, int, str]] = []  # (start, end, column)
+    for m in re.finditer(
+        r'"?([A-Za-z_][A-Za-z0-9_]*)"?\s*\bIN\s*\(',
+        sql,
+        re.IGNORECASE,
+    ):
+        # Walk forward from the open paren to find the matching close
+        # paren (single-level — no nested parens in IN lists in our SQL).
+        depth = 1
+        j = m.end()
+        while j < len(sql) and depth > 0:
+            ch = sql[j]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            j += 1
+        in_spans.append((m.end(), j, m.group(1).lower()))
+
+    def _col_for_in(pos: int) -> str | None:
+        for start, end, col in in_spans:
+            if start <= pos < end:
+                return col
+        return None
+
     for match in re.finditer(r"\$\d+|%s|\?", sql):
         pos = match.start()
         if insert_cols and values_start is not None and pos >= values_start:
             cols.append(insert_cols[insert_idx % len(insert_cols)])
             insert_idx += 1
+            continue
+
+        in_col = _col_for_in(pos)
+        if in_col is not None:
+            cols.append(in_col)
             continue
 
         prefix = sql[:pos]

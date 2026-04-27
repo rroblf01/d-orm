@@ -32,7 +32,18 @@ dev = [
     "ty>=0.0.32",
     "ruff>=0.15.11",
     "testcontainers[postgres]>=4.14.2",
-    "pytest-xdist>=3.8.0"
+    "pytest-xdist>=3.8.0",
+    # Used by tests for ``dorm.contrib.otel``. The runtime feature is
+    # opt-in (raises ImportError if the user calls ``instrument()``
+    # without installing OTel themselves), but the test suite exercises
+    # the wiring end-to-end to keep that opt-in path from breaking.
+    "opentelemetry-api>=1.30.0",
+    "opentelemetry-sdk>=1.30.0",
+]
+# Standalone group for users who want to wire dorm.contrib.otel — kept
+# separate from ``dev`` so production installs don't pull SDK + exporters.
+otel = [
+    "opentelemetry-api>=1.30.0",
 ]
 # aiosqlite: pinned <0.23 because the daemon-thread fix in
 # dorm/db/backends/sqlite.py reads the private `_thread` attribute on
@@ -55,7 +66,7 @@ docs = [
     "mkdocstrings[python]>=1.0.4",
     "mkdocs-static-i18n>=1.3.1",
 ]
-all = ["djanorm[dev,sqlite,postgresql,pydantic,docs]"]
+all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"

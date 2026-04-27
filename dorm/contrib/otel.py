@@ -44,7 +44,7 @@ _SPAN_BY_QUERY: dict[int, Any] = {}
 
 def _import_otel():
     try:
-        from opentelemetry import trace  # ty: ignore[unresolved-import]
+        from opentelemetry import trace
     except ImportError as exc:  # pragma: no cover — exercised only without OTel
         raise ImportError(
             "dorm.contrib.otel requires opentelemetry-api. "
@@ -103,7 +103,7 @@ def instrument(tracer_name: str = "dorm") -> None:
                 span.set_attribute("db.dorm.error", type(error).__name__)
                 # StatusCode.ERROR is the one we want; pull lazily so
                 # the import is cached.
-                from opentelemetry.trace import (  # ty: ignore[unresolved-import]
+                from opentelemetry.trace import (
                     Status,
                     StatusCode,
                 )
