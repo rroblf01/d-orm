@@ -26,7 +26,9 @@ down a behaviour worth catching if it ever drifts.
 from __future__ import annotations
 
 import io
+import os
 from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -616,37 +618,113 @@ def isolated_dorm_settings():
     reset_connections()
 
 
+def _unique_module_name(prefix: str) -> str:
+    """Generate a fresh module name per test invocation.
+
+    Combines the xdist worker id and a uuid4 fragment so:
+    1. Different workers never collide (parallel runs).
+    2. The same worker re-running the test (parametrised twice for
+       sqlite/postgres) gets a fresh module name each time, avoiding
+       Python's ``sys.modules`` cache returning a stale module from
+       a previous tmp_path. That cache is the root cause of the
+       intermittent ``mig_dir does not exist`` failure on CI.
+    """
+    import uuid
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    return f"{prefix}_{worker}_{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def cli_app_scaffold():
+    """Yield a callable that scaffolds an app + settings on disk under
+    a unique module name, then cleans up ``sys.modules`` and the dorm
+    model registry on teardown so the next test starts from scratch.
+
+    Without this cleanup, two tests that both define a class named
+    ``Widget`` in their respective ``demo_app/models.py`` end up with
+    the *first* one cached in ``sys.modules['demo_app.models']`` and
+    in ``dorm.models._model_registry``. The second test sees stale
+    state and the autodetector decides "no changes" — so no migration
+    file is written. That's the bug the CI flakes were hitting.
+    """
+    import sys
+    from dorm.models import _model_registry
+
+    created: list[tuple[str, str]] = []  # list of (app_name, settings_name)
+    registered_models: set[str] = set()
+
+    def _scaffold(
+        tmp_path: Path,
+        app_prefix: str,
+        settings_prefix: str,
+        models_source: str = "",
+    ) -> tuple[str, str, Path]:
+        app_name = _unique_module_name(app_prefix)
+        settings_name = _unique_module_name(settings_prefix)
+        app_dir = tmp_path / app_name
+        app_dir.mkdir()
+        (app_dir / "__init__.py").write_text("")
+        (app_dir / "models.py").write_text(models_source)
+        settings_file = tmp_path / f"{settings_name}.py"
+        settings_file.write_text(
+            "DATABASES = {'default': {'ENGINE': 'sqlite', 'NAME': ':memory:'}}\n"
+            f"INSTALLED_APPS = ['{app_name}']\n"
+        )
+        # Snapshot the registry keys present BEFORE the test creates
+        # its models so we can prune only what this test added.
+        registered_models.update(_model_registry.keys())
+        created.append((app_name, settings_name))
+        return app_name, settings_name, app_dir
+
+    yield _scaffold
+
+    # ── Teardown ──────────────────────────────────────────────────
+    for app_name, settings_name in created:
+        # Drop every cached submodule under the app, plus the settings
+        # module itself. ``list()`` because we mutate sys.modules.
+        for modname in list(sys.modules):
+            if modname == app_name or modname.startswith(f"{app_name}."):
+                sys.modules.pop(modname, None)
+            if modname == settings_name:
+                sys.modules.pop(modname, None)
+    # Remove dorm models registered by this test from the global
+    # registry. Anything present BEFORE the test stays.
+    new_keys = set(_model_registry.keys()) - registered_models
+    for key in new_keys:
+        _model_registry.pop(key, None)
+
+
 def test_cli_cmd_makemigrations_creates_initial_file(
-    monkeypatch, tmp_path, capsys, isolated_dorm_settings
+    monkeypatch, tmp_path, capsys, isolated_dorm_settings, cli_app_scaffold
 ):
     """``dorm makemigrations <app>`` in a fresh directory must
-    generate ``0001_initial.py`` for that app's models."""
+    generate ``0001_initial.py`` for that app's models.
+
+    Uses unique app+settings module names per invocation to avoid
+    Python's ``sys.modules`` cache returning a stale ``models.py``
+    from a previous test (the source of intermittent CI failures
+    where ``demo_app/migrations`` was never created)."""
     from dorm import cli
 
-    # Build a tiny app on disk: ``demo_app/__init__.py`` +
-    # ``demo_app/models.py``.
-    app_dir = tmp_path / "demo_app"
-    app_dir.mkdir()
-    (app_dir / "__init__.py").write_text("")
-    (app_dir / "models.py").write_text(
-        "import dorm\n\n"
-        "class Widget(dorm.Model):\n"
-        "    name = dorm.CharField(max_length=50)\n"
-        "    class Meta:\n"
-        "        db_table = 'demo_app_widget'\n"
-    )
-    settings_file = tmp_path / "_demo_settings.py"
-    settings_file.write_text(
-        "DATABASES = {'default': {'ENGINE': 'sqlite', 'NAME': ':memory:'}}\n"
-        "INSTALLED_APPS = ['demo_app']\n"
+    app_name, settings_name, app_dir = cli_app_scaffold(
+        tmp_path,
+        app_prefix="demo_app",
+        settings_prefix="_demo_settings",
+        models_source=(
+            "import dorm\n\n"
+            "class Widget(dorm.Model):\n"
+            "    name = dorm.CharField(max_length=50)\n"
+            f"    class Meta:\n"
+            f"        db_table = '{tmp_path.name}_widget'\n"
+        ),
     )
 
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
     args = SimpleNamespace(
-        settings="_demo_settings",
-        apps=["demo_app"],
+        settings=settings_name,
+        apps=[app_name],
         dry_run=False,
         empty=False,
         name=None,
@@ -654,23 +732,25 @@ def test_cli_cmd_makemigrations_creates_initial_file(
     cli.cmd_makemigrations(args)
 
     mig_dir = app_dir / "migrations"
-    assert mig_dir.exists()
+    assert mig_dir.exists(), f"makemigrations did not create {mig_dir}"
     files = sorted(p.name for p in mig_dir.glob("*.py"))
     assert "__init__.py" in files
     assert any(name.startswith("0001_") for name in files)
 
 
 def test_cli_cmd_showmigrations_lists_status(
-    monkeypatch, tmp_path, capsys, isolated_dorm_settings
+    monkeypatch, tmp_path, capsys, isolated_dorm_settings, cli_app_scaffold
 ):
     """``dorm showmigrations`` reports applied vs unapplied migrations
     per app, marking applied with ``[X]`` and unapplied with ``[ ]``."""
     from dorm import cli
 
-    app_dir = tmp_path / "showapp"
-    app_dir.mkdir()
-    (app_dir / "__init__.py").write_text("")
-    (app_dir / "models.py").write_text("")
+    app_name, settings_name, app_dir = cli_app_scaffold(
+        tmp_path,
+        app_prefix="showapp",
+        settings_prefix="_show_settings",
+        models_source="",
+    )
     mig_dir = app_dir / "migrations"
     mig_dir.mkdir()
     (mig_dir / "__init__.py").write_text("")
@@ -680,21 +760,15 @@ def test_cli_cmd_showmigrations_lists_status(
         "dependencies = []\n"
     )
 
-    settings_file = tmp_path / "_show_settings.py"
-    settings_file.write_text(
-        "DATABASES = {'default': {'ENGINE': 'sqlite', 'NAME': ':memory:'}}\n"
-        "INSTALLED_APPS = ['showapp']\n"
-    )
-
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
     buf = io.StringIO()
-    args = SimpleNamespace(settings="_show_settings", apps=["showapp"])
+    args = SimpleNamespace(settings=settings_name, apps=[app_name])
     with redirect_stdout(buf):
         cli.cmd_showmigrations(args)
     out = buf.getvalue()
-    assert "showapp" in out
+    assert app_name in out
     assert "0001_initial" in out
 
 
