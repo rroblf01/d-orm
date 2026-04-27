@@ -6,7 +6,148 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+## [2.1.0] - 2026-04-27
+
+The 2.1 release closes the biggest gap left in 2.0 for "production
+reporting" workloads: querying. It also tightens the migration story
+for tables large enough that an `ALTER TABLE` would page someone.
+
+### Added — Querying
+
+- **`Subquery()` and `Exists()`** with **`OuterRef("...")`** for
+  correlated subqueries. ``filter(Exists(qs))`` and
+  ``annotate(latest=Subquery(qs))`` work end-to-end; subqueries
+  participate in the outer query's placeholder rewrite, so PostgreSQL
+  prepared-statement caches stay efficient.
+
+- **Window functions**: ``Window(expr, partition_by=, order_by=,
+  frame=)`` plus seven canonical ranking / offset functions —
+  ``RowNumber``, ``Rank``, ``DenseRank``, ``NTile``, ``Lag``,
+  ``Lead``, ``FirstValue``, ``LastValue``. Ranking constructors
+  refuse to compile without an ``order_by`` (the SQL would parse but
+  return implementation-defined results — exactly the bug that ships
+  to a dashboard).
+
+- **Non-recursive CTEs**: ``QuerySet.with_cte(name=qs)`` emits the
+  leading ``WITH name AS (sub)`` clause. Multiple CTEs can be chained;
+  parameter binding flows through one rewrite pass.
+
+- **New scalar functions**: ``Greatest`` / ``Least`` (vendor-aware —
+  ``GREATEST``/``LEAST`` on PG, multi-arg ``MAX``/``MIN`` on SQLite),
+  ``Round``, ``Trunc(unit=)``, ``Extract(unit=)``, ``Substr``,
+  ``Replace``, ``StrIndex`` (``STRPOS`` on PG, ``INSTR`` on SQLite).
+  Unit values are validated against an allowlist at queryset build
+  time.
+
+- **`QuerySet.cursor_paginate(after=, order_by=, page_size=)`** —
+  keyset pagination that returns a ``CursorPage(items, next_cursor)``.
+  Stable across writes, O(1) deep-page cost vs ``OFFSET``'s O(N).
+  Async counterpart: ``acursor_paginate``.
+
+- **PostgreSQL full-text search** (``dorm.search``):
+  ``SearchVector(*fields, config=, weight=)``,
+  ``SearchQuery(value, search_type=)`` (``plain`` / ``websearch`` /
+  ``raw``), ``SearchRank(vector, query, cover_density=)``. New
+  ``__search`` lookup wraps the canonical
+  ``to_tsvector('english', col) @@ plainto_tsquery('english', %s)``
+  pattern. SQLite is unsupported (use FTS5 virtual tables).
+
+### Added — Schema
+
+- **`CheckConstraint` and `UniqueConstraint`** (with optional
+  ``condition=``) in ``Meta.constraints``. ``UniqueConstraint(fields=,
+  condition=Q(...))`` becomes a *partial* unique index — the canonical
+  "only one active row per user" pattern. The autodetector emits
+  ``AddConstraint`` / ``RemoveConstraint`` migration ops.
+
+- **`GeneratedField(expression=, output_field=, stored=True)`** for
+  database-computed columns (PG ≥ 12, SQLite ≥ 3.31). Field assignment
+  is rejected at runtime; the database is the source of truth. The
+  expression grammar is allow-listed (alphanumerics, arithmetic,
+  parens, dot, quotes, modulo) — anything more exotic should be issued
+  via a ``RunSQL`` migration.
+
+- **Index extensions**:
+  - ``method=`` parameter accepting ``"btree"`` (default), ``"hash"``,
+    ``"gin"``, ``"gist"``, ``"brin"``, ``"spgist"``, ``"bloom"``.
+    SQLite silently uses B-tree.
+  - ``condition=Q(...)`` for partial indexes
+    (``CREATE INDEX ... WHERE pred``).
+  - ``opclasses=[...]`` per-column operator classes (PostgreSQL).
+  - Expression fields like ``"LOWER(email)"`` validated against a
+    small allow-listed grammar.
+
+### Added — Migration safety
+
+- **`AddIndex(..., concurrently=True)` / `RemoveIndex(...,
+  concurrently=True)`** emit ``CREATE INDEX CONCURRENTLY`` / ``DROP
+  INDEX CONCURRENTLY`` on PostgreSQL — the canonical zero-downtime
+  pattern for hot tables. SQLite ignores the flag.
+
+- **`SetLockTimeout(ms=...)`** sets PostgreSQL's ``lock_timeout`` for
+  the migration window so DDL on a hot table fails fast on contention
+  instead of blocking writers indefinitely. SQLite is a no-op.
+
+- **`ValidateConstraint(table=..., name=...)`** runs ``ALTER TABLE
+  ... VALIDATE CONSTRAINT``. Pair with a ``RunSQL("ALTER TABLE ...
+  ADD CONSTRAINT ... NOT VALID")`` to add foreign keys / CHECK
+  constraints to a billion-row table without an
+  ``AccessExclusiveLock``: the validation pass takes only
+  ``ShareUpdateExclusive`` and runs concurrently with reads/writes.
+
+### Added — Operations / tooling
+
+- **`dorm inspectdb`** — reverse-engineer ``models.py`` from the
+  connected database. Best-effort type recovery (constraints / indexes
+  not introspected); pipe to a file and edit.
+
+- **`dorm doctor`** — audit the running configuration for
+  production-mode footguns (small ``MAX_POOL_SIZE``, missing
+  ``sslmode`` on a remote PG host, FKs without an index, no retry
+  configured for transient errors). Exits non-zero on any warning, so
+  it doubles as a pre-deploy gate.
+
+- **URL/DSN support in `DATABASES`**:
+  ``DATABASES = {"default": "postgres://u:p@host:5432/db?sslmode=require"}``
+  or ``{"default": {"URL": "postgres://...", "MAX_POOL_SIZE": 20}}``.
+  ``parse_database_url(url)`` is also exported so the same parser
+  powers ``DATABASE_URL=...`` env-var deployments. Well-known pool
+  knobs (``MAX_POOL_SIZE``, ``POOL_TIMEOUT``, ``POOL_CHECK``,
+  ``MAX_IDLE``, ``MAX_LIFETIME``, ``PREPARE_THRESHOLD``) are lifted
+  to top-level keys; everything else lands in ``OPTIONS``.
+
+### Changed
+
+- **`QuerySet.alias()` / `annotate()` now thread `connection` to
+  expression `as_sql()` calls.** Required for the new vendor-aware
+  functions (``Greatest``, ``Least``, ``StrIndex``) to pick the right
+  SQL idiom. ``Aggregate.as_sql`` now accepts ``**kwargs`` so legacy
+  custom aggregates keep compiling.
+
+- **`Index.__init__`** now validates each field name (or expression)
+  at construction time. A leading ``-`` is still permitted as the
+  Django-style descending-column hint and surfaces as ``DESC`` in the
+  emitted SQL. Existing ``Index(fields=["col"])`` declarations are
+  unchanged.
+
+### Documentation
+
+- **Bilingual docs (EN + ES)** updated with new sections covering
+  every 2.1 feature, plus a new "Querying recipes" cookbook page that
+  shows running totals, top-N-per-group, deltas, percentiles, and
+  partial-unique patterns.
+
+### Explicitly **not** in 2.1 — tracked for follow-up
+
+- MySQL / MariaDB backend.
+- ``dorm.contrib.audit`` (history-table mixin in the spirit of
+  ``django-simple-history``).
+- ``dorm.contrib.cache`` (signal-driven QuerySet invalidation backed
+  by Redis).
+- Reproducible benchmark harness vs Django ORM and SQLAlchemy 2.0.
+- PostGIS support.
+
+### Fixed (carried in from 2.0.x development)
 - **Migrations are now atomic per migration file.** A failure in
   operation N now rolls back operations 1..N-1 *and* prevents the
   migration from being recorded as applied — previously a partial
@@ -47,7 +188,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `asyncio.run_coroutine_threadsafe()` if it's still alive, so the
   underlying sockets are released promptly.
 
-### Added
+### Added (carried in from 2.0.x development)
 - **`Manager.iterator(chunk_size=...)` / `Manager.aiterator(...)` proxies.**
   `Author.objects.iterator()` now works without going through
   `.get_queryset().iterator()`, matching the rest of the manager API
@@ -126,7 +267,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `dorm.contrib.softdelete` (and any user-written equivalent) work
   out of the box.
 
-### Security
+### Security (carried in from 2.0.x development)
 - **DEBUG query logs mask values bound to sensitive columns.** Values
   bound to columns whose name suggests a credential — `password`,
   `passwd`, `secret`, `token`, `api_key`, `apikey`, `authorization`,
@@ -166,7 +307,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `len(params)` — catches the "I built it with f-strings by mistake"
   pattern before SQL ever leaves the process.
 
-### Changed
+### Changed (carried in from 2.0.x development)
 - **PostgreSQL pool: per-tenant DB / host names logged at DEBUG.** Open
   / close events still emit at INFO so ops keeps boot-time visibility,
   but metadata that could leak tenant identity now requires DEBUG to

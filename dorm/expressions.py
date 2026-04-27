@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 class Q:
     AND = "AND"
@@ -94,5 +96,95 @@ class RawSQL:
         self.sql = sql
         self.params = params
 
-    def as_sql(self):
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         return self.sql, list(self.params)
+
+
+class OuterRef:
+    """Reference to a column on the *outer* queryset, used inside
+    :class:`Subquery` / :class:`Exists` to build correlated subqueries.
+
+    ``OuterRef("pk")`` resolves to the outer model's primary-key column
+    when the subquery is compiled. Any other name is taken as a field
+    name on the outer model::
+
+        # "Authors with at least one published book"
+        Author.objects.filter(
+            Exists(Book.objects.filter(author=OuterRef("pk"), published=True))
+        )
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"OuterRef({self.name!r})"
+
+
+class Subquery:
+    """Embed a QuerySet as a scalar subquery — typically as the
+    expression of an :meth:`annotate` or as the right-hand side of a
+    filter.
+
+    The wrapped queryset's ``SELECT`` list is used as-is; project a single
+    column with ``.values("col")`` (or ``.values_list("col", flat=True)``)
+    when you want a true scalar::
+
+        # Each Author annotated with the title of their latest book.
+        latest = (
+            Book.objects
+                .filter(author=OuterRef("pk"))
+                .order_by("-published_on")
+                .values("title")[:1]
+        )
+        Author.objects.annotate(latest_title=Subquery(latest))
+    """
+
+    def __init__(self, queryset: Any, output_field: Any = None) -> None:
+        self.queryset = queryset
+        self.output_field = output_field
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        outer_model = kwargs.get("model")
+        sub_sql, sub_params = self.queryset._query.as_subquery_sql(
+            outer_alias=table_alias, outer_model=outer_model
+        )
+        return f"({sub_sql})", sub_params
+
+    def __repr__(self) -> str:
+        return f"Subquery({self.queryset!r})"
+
+
+class Exists:
+    """``EXISTS (subquery)`` — boolean test. Negate with ``~Exists(...)``::
+
+        # "Active customers with at least one paid order"
+        Customer.objects.filter(
+            is_active=True,
+            ...
+        ).filter(
+            Exists(Order.objects.filter(customer=OuterRef("pk"), paid=True))
+        )
+
+    The subquery's ``SELECT`` list is irrelevant — the database only
+    looks at row presence — so don't bother projecting columns.
+    """
+
+    def __init__(self, queryset: Any, *, negated: bool = False) -> None:
+        self.queryset = queryset
+        self.negated = negated
+
+    def __invert__(self) -> "Exists":
+        return Exists(self.queryset, negated=not self.negated)
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        outer_model = kwargs.get("model")
+        sub_sql, sub_params = self.queryset._query.as_subquery_sql(
+            outer_alias=table_alias, outer_model=outer_model
+        )
+        prefix = "NOT EXISTS" if self.negated else "EXISTS"
+        return f"{prefix} ({sub_sql})", sub_params
+
+    def __repr__(self) -> str:
+        prefix = "~" if self.negated else ""
+        return f"{prefix}Exists({self.queryset!r})"

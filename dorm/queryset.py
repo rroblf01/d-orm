@@ -19,6 +19,40 @@ from .query import SQLQuery, _validate_identifier
 _T = TypeVar("_T", bound=Model)
 
 
+class CursorPage(Generic[_T]):
+    """One page of keyset-paginated results returned by
+    :meth:`QuerySet.cursor_paginate` / :meth:`QuerySet.acursor_paginate`.
+
+    Attributes:
+        items: list of model instances (or values()-shaped dicts) for
+            this page, ordered as requested.
+        next_cursor: dict to pass as ``after=`` on the next call. ``None``
+            when there are no more rows (last page).
+    """
+
+    __slots__ = ("items", "next_cursor")
+
+    def __init__(self, items: list, next_cursor: dict | None) -> None:
+        self.items = items
+        self.next_cursor = next_cursor
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __bool__(self) -> bool:
+        return bool(self.items)
+
+    @property
+    def has_next(self) -> bool:
+        return self.next_cursor is not None
+
+    def __repr__(self) -> str:
+        return f"CursorPage(items={len(self.items)}, has_next={self.has_next})"
+
+
 def _explain_row_to_str(row: Any) -> str:
     """Render a single ``EXPLAIN`` output row as a string. PG returns one
     column per row containing the plan line; SQLite returns multiple
@@ -325,6 +359,148 @@ class QuerySet(Generic[_T]):
         qs = self._clone()
         qs._db = alias
         return qs
+
+    def with_cte(self, **named_querysets: "QuerySet[Any]") -> QuerySet[_T]:
+        """Attach one or more non-recursive Common Table Expressions to
+        this queryset.
+
+        Each ``name=qs`` pair is emitted as ``WITH name AS (sub)`` ahead
+        of the main ``SELECT``::
+
+            recent = Order.objects.filter(created_at__gte=cutoff)
+            qs = (
+                Customer.objects
+                    .with_cte(recent_orders=recent)
+                    .filter(...)
+            )
+
+        CTE names are validated as SQL identifiers. The CTE bodies see
+        the same backend / parameter dialect as the outer query — the
+        outer query's placeholder rewrite covers them in one pass, so
+        you don't pay double-quoting on PostgreSQL.
+
+        Recursive CTEs (``WITH RECURSIVE ...``) are not supported in
+        this release; reach for :meth:`raw` for tree-walking queries.
+        """
+        qs = self._clone()
+        for name, sub in named_querysets.items():
+            _validate_identifier(name, "CTE name")
+            if not (hasattr(sub, "_query") and hasattr(sub, "model")):
+                raise TypeError(
+                    f"with_cte({name}=...) expects a QuerySet, got {type(sub).__name__}."
+                )
+            qs._query.ctes.append((name, sub))
+        return qs
+
+    def cursor_paginate(
+        self,
+        *,
+        after: dict[str, Any] | None = None,
+        order_by: str = "pk",
+        page_size: int = 50,
+    ) -> "CursorPage[_T]":
+        """Keyset (cursor) pagination — stable across writes and orders
+        of magnitude faster than ``OFFSET`` for deep pages.
+
+        Args:
+            after: an optional cursor dict from the previous page's
+                :attr:`CursorPage.next_cursor`. ``None`` returns the
+                first page.
+            order_by: a single field name. Prefix with ``-`` for
+                descending. Defaults to the model's primary key. The
+                ordering must include something unique (typically the
+                PK) — otherwise ``after`` can't reliably resume across
+                ties.
+            page_size: number of rows to return.
+
+        Example::
+
+            page = Article.objects.cursor_paginate(
+                order_by="-created_at", page_size=20
+            )
+            # Send page.items + page.next_cursor to the client.
+            # On the next request:
+            page = Article.objects.cursor_paginate(
+                order_by="-created_at", page_size=20, after=cursor
+            )
+
+        Implementation: emits ``WHERE col > :v`` (asc) /
+        ``col < :v`` (desc) and ``LIMIT page_size``. ``next_cursor`` is
+        the last row's ``order_by`` field value, or ``None`` when the
+        page wasn't full (no more rows).
+        """
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer.")
+        desc = order_by.startswith("-")
+        fname = order_by[1:] if desc else order_by
+        if fname == "pk" and self.model._meta.pk:
+            fname = self.model._meta.pk.column
+        _validate_identifier(fname)
+
+        qs = self._clone()
+        if after is not None:
+            cursor_value = after.get(fname)
+            if cursor_value is not None:
+                lookup = f"{fname}__{'lt' if desc else 'gt'}"
+                qs = qs.filter(**{lookup: cursor_value})
+        qs = qs.order_by(f"-{fname}" if desc else fname)
+        qs._query.limit_val = page_size
+
+        items = list(qs)
+        next_cursor: dict[str, Any] | None = None
+        if len(items) == page_size:
+            last: Any = items[-1]
+            if isinstance(last, dict):
+                # ty narrows ``last`` to an empty dict shape after the
+                # ``isinstance`` check; cast to a permissive ``Mapping``
+                # so the indexing reads as ``Any``.
+                next_cursor = {fname: dict(last).get(fname)}
+            elif hasattr(last, "__dict__"):
+                try:
+                    f = self.model._meta.get_field(fname)
+                    next_cursor = {fname: last.__dict__.get(f.attname)}
+                except Exception:
+                    next_cursor = {fname: getattr(last, fname, None)}
+        return CursorPage(items=items, next_cursor=next_cursor)
+
+    async def acursor_paginate(
+        self,
+        *,
+        after: dict[str, Any] | None = None,
+        order_by: str = "pk",
+        page_size: int = 50,
+    ) -> "CursorPage[_T]":
+        """Async counterpart of :meth:`cursor_paginate`."""
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer.")
+        desc = order_by.startswith("-")
+        fname = order_by[1:] if desc else order_by
+        if fname == "pk" and self.model._meta.pk:
+            fname = self.model._meta.pk.column
+        _validate_identifier(fname)
+
+        qs = self._clone()
+        if after is not None:
+            cursor_value = after.get(fname)
+            if cursor_value is not None:
+                lookup = f"{fname}__{'lt' if desc else 'gt'}"
+                qs = qs.filter(**{lookup: cursor_value})
+        qs = qs.order_by(f"-{fname}" if desc else fname)
+        qs._query.limit_val = page_size
+
+        items = await qs
+        next_cursor: dict[str, Any] | None = None
+        if len(items) == page_size:
+            last = items[-1]
+            if isinstance(last, dict):
+                next_cursor = {fname: last[fname]}
+            elif hasattr(last, "__dict__"):
+                try:
+                    f = self.model._meta.get_field(fname)
+                    next_cursor = {fname: last.__dict__.get(f.attname)}
+                except Exception:
+                    next_cursor = {fname: getattr(last, fname, None)}
+        return CursorPage(items=items, next_cursor=next_cursor)
 
     # ── Sync execution ────────────────────────────────────────────────────────
 

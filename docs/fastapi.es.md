@@ -6,12 +6,24 @@ para los bodies de request / response de FastAPI.
 
 ## Instalación
 
+Elige el extra de backend que se corresponda con tu base de datos —
+`sqlite` (incluye `aiosqlite` para la ruta async) o `postgresql`
+(incluye `psycopg` con su pool de conexiones). Añade `pydantic` para
+el adaptador de esquemas de Pydantic v2 sobre el que se monta esta
+guía:
+
 ```bash
-uv pip install 'djanorm[pydantic,async]'
+# SQLite + esquemas Pydantic
+uv pip install 'djanorm[sqlite,pydantic]'
+
+# PostgreSQL + esquemas Pydantic
+uv pip install 'djanorm[postgresql,pydantic]'
 ```
 
-El extra `pydantic` añade Pydantic v2; `async` añade
-psycopg/aiosqlite. Una app FastAPI típica necesita los dos.
+No existe un extra `async` separado — los drivers async
+(`aiosqlite`, `psycopg`) viajan dentro de los mismos extras
+`sqlite` / `postgresql` que sus equivalentes síncronos, así que con
+una sola instalación cubres ambos modos.
 
 ## Lifespan de la app
 

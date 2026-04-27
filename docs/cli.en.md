@@ -154,3 +154,27 @@ Every command resolves settings in this order:
 3. A `settings.py` next to the working directory (last-resort)
 
 If none of these resolve, dorm exits with an explanatory error.
+
+## `dorm inspectdb` (2.1+)
+
+Reverse-engineer a `models.py` snippet from the connected database.
+Best-effort recovery of field types, FK references and `db_table`;
+constraints / indexes / `related_name` / validators are *not*
+introspected. Pipe the output into a file and edit::
+
+    dorm inspectdb > legacy/models.py
+
+Use `--database alias` to introspect a non-default `DATABASES` entry.
+
+## `dorm doctor` (2.1+)
+
+Audit the running configuration for production-mode footguns:
+small `MAX_POOL_SIZE`, missing `sslmode` on remote PostgreSQL hosts,
+foreign keys without an index, transient-error retry left disabled.
+Exits non-zero on any warning, so it doubles as a pre-deploy gate::
+
+    dorm doctor
+
+The doctor is conservative — it only warns when the rule of thumb
+is widely accepted. Tune to your workload before treating any single
+warning as gospel.

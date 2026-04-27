@@ -18,6 +18,7 @@ class Aggregate:
         table_alias: str | None = None,
         *,
         model: Any = None,
+        **kwargs: Any,
     ) -> tuple[str, list]:
         """Compile this aggregate to SQL.
 

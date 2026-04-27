@@ -69,6 +69,7 @@ plugins:
             Cookbook: Recetario
             Troubleshooting: Resolución de problemas
             Migration from Django ORM: Migración desde Django ORM
+            What's new in 2.1: Novedades en 2.1
             API Reference: Referencia API
             QuerySet & Manager: QuerySet y Manager
             Signals: Señales
@@ -87,6 +88,7 @@ plugins:
 
 nav:
   - Home: index.md
+  - What's new in 2.1: whats-new-2.1.md
   - Getting started: getting-started.md
   - Tutorial: tutorial.md
   - Guides:

@@ -93,6 +93,31 @@ class BaseManager(Generic[_T]):
     def alias(self, **kwargs: Any) -> QuerySet[_T]:
         return self.get_queryset().alias(**kwargs)
 
+    def with_cte(self, **named_querysets: "QuerySet[Any]") -> QuerySet[_T]:
+        return self.get_queryset().with_cte(**named_querysets)
+
+    def cursor_paginate(
+        self,
+        *,
+        after: dict[str, Any] | None = None,
+        order_by: str = "pk",
+        page_size: int = 50,
+    ) -> Any:
+        return self.get_queryset().cursor_paginate(
+            after=after, order_by=order_by, page_size=page_size
+        )
+
+    async def acursor_paginate(
+        self,
+        *,
+        after: dict[str, Any] | None = None,
+        order_by: str = "pk",
+        page_size: int = 50,
+    ) -> Any:
+        return await self.get_queryset().acursor_paginate(
+            after=after, order_by=order_by, page_size=page_size
+        )
+
     def values(self, *fields: str) -> QuerySet[Any]:
         return self.get_queryset().values(*fields)
 

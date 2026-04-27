@@ -150,7 +150,7 @@ default no-volátil es solo metadata — dorm lo usa cuando puede.
 ## Dónde pedir más ayuda
 
 - Abre una issue en
-  [GitHub](https://github.com/MrFrozen11/djanorm/issues) con el
+  [GitHub](https://github.com/rroblf01/d-orm/issues) con el
   traceback completo, el bloque `DATABASES` (con secretos
   redacted), y la versión (`dorm --version`).
 - Para problemas de migraciones, adjunta la salida de

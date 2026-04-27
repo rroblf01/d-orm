@@ -49,6 +49,15 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "json_has_key": ("{col} ? %s", lambda v: v),       # JSONB
     "json_has_any": ("{col} ?| %s", lambda v: v),      # JSONB, list of keys
     "json_has_all": ("{col} ?& %s", lambda v: v),      # JSONB, list of keys
+    # ── Full-text search (PostgreSQL only) ────────────────────────────────
+    # ``to_tsvector('english', col) @@ plainto_tsquery('english', %s)`` —
+    # the canonical "match this column against the search string"
+    # idiom. SQLite is not supported here (use FTS5 virtual tables).
+    # The lookup name ``search`` matches Django's contrib.postgres.
+    "search": (
+        "to_tsvector('english', {col}) @@ plainto_tsquery('english', %s)",
+        lambda v: v,
+    ),
 }
 
 VALID_LOOKUPS = set(LOOKUPS.keys())

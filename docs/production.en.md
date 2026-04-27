@@ -280,3 +280,29 @@ A few sharp edges worth keeping in mind for production deployments:
 - [ ] `pre_query` / `post_query` traced into your APM
 - [ ] Async tests use a session-scoped event loop
 - [ ] Replica router defined if traffic > 1 box
+
+## URL/DSN configuration (2.1+)
+
+`DATABASES` entries now accept either a URL string or a dict with a
+`URL` key. Use this to pull the connection string straight from
+`DATABASE_URL` without writing ``HOST/PORT/USER/PASSWORD`` plumbing::
+
+    import os, dorm
+
+    dorm.configure(DATABASES={
+        "default": os.environ["DATABASE_URL"],
+        # Or, with overrides:
+        # "default": {"URL": os.environ["DATABASE_URL"], "MAX_POOL_SIZE": 30},
+    })
+
+Recognised query-string knobs (`MAX_POOL_SIZE`, `POOL_TIMEOUT`,
+`POOL_CHECK`, `MAX_IDLE`, `MAX_LIFETIME`, `PREPARE_THRESHOLD`) are
+lifted to top-level `DATABASES` keys. Anything else lands in
+`OPTIONS`.
+
+## Pre-deploy gate: `dorm doctor` (2.1+)
+
+Run `dorm doctor` in CI to fail builds whose configuration trips a
+known production footgun. Examples it catches: small pool size,
+missing `sslmode` on a remote PG host, FKs without an index,
+transient-error retry disabled.

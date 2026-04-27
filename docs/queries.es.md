@@ -413,3 +413,30 @@ Los tipos base permitidos incluyen `INTEGER`, `BIGINT`, `SMALLINT`,
 (`VARCHAR(255)` o `NUMERIC(10, 2)`). Cualquier otro valor levanta
 `ImproperlyConfigured` inmediatamente en construcción del queryset,
 para que un typo o input no saneado nunca llegue al SQL.
+
+## Consultas avanzadas (2.1+)
+
+La release 2.1 añade los bloques para las queries de reporting no
+triviales — lo que de otra forma te obligaría a `RawQuerySet`. En
+[Novedades en 2.1](whats-new-2.1.md) está el set completo; el
+resumen mínimo:
+
+- **`Subquery(qs)` / `Exists(qs)` / `OuterRef("col")`** —
+  subconsultas correlacionadas que componen con `filter()` /
+  `annotate()`.
+- **`Window(expr, partition_by=, order_by=)`** más `RowNumber`,
+  `Rank`, `DenseRank`, `NTile`, `Lag`, `Lead`, `FirstValue`,
+  `LastValue` — ranking, totales acumulados, deltas sin bajar a
+  SQL crudo.
+- **`QuerySet.with_cte(name=qs)`** — CTEs no recursivos.
+- **Funciones escalares nuevas**: `Greatest`, `Least`, `Round`,
+  `Trunc`, `Extract`, `Substr`, `Replace`, `StrIndex`.
+- **Búsqueda full-text (PostgreSQL)** vía
+  `dorm.search.SearchVector` / `SearchQuery` / `SearchRank` y el
+  lookup `__search`.
+- **`QuerySet.cursor_paginate(...)` /
+  `acursor_paginate(...)`** — paginación por cursor con ordenación
+  estable y coste O(1) en páginas profundas.
+
+Cada feature tiene un ejemplo concreto en las [notas de release
+2.1](whats-new-2.1.md).

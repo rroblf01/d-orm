@@ -36,6 +36,63 @@ class _NotProvided:
 
 
 NOT_PROVIDED = _NotProvided()
+
+
+def _inline_literal(sql: str, params: list) -> str:
+    """Replace each ``%s`` placeholder in *sql* with its corresponding
+    ``params`` value, formatted as a SQL literal. Used by constraint
+    DDL where parameter binding isn't available (``ALTER TABLE ... ADD
+    CONSTRAINT ... CHECK (...)`` with bound params is not portable).
+
+    Only handles the value shapes constraints actually produce —
+    integers, floats, booleans, strings, NULL. Strings are
+    single-quoted with the SQL ``''`` escape; other types use ``repr``
+    via ``str()``. Identifier-shaped values must already be quoted by
+    the caller (e.g. ``"col"``).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(sql)
+    pi = 0
+    while i < n:
+        if sql[i] == "%" and i + 1 < n and sql[i + 1] == "s":
+            if pi >= len(params):
+                raise ValueError(
+                    "_inline_literal: more %s placeholders than params"
+                )
+            v = params[pi]
+            pi += 1
+            if v is None:
+                out.append("NULL")
+            elif isinstance(v, bool):
+                out.append("TRUE" if v else "FALSE")
+            elif isinstance(v, (int, float)):
+                out.append(str(v))
+            elif isinstance(v, str):
+                # Escape ``'`` per SQL literal rules. Reject embedded
+                # NULs which can't appear in a SQL literal anyway.
+                if "\x00" in v:
+                    raise ValueError(
+                        "_inline_literal: NUL byte cannot appear in a "
+                        "SQL string literal."
+                    )
+                out.append("'" + v.replace("'", "''") + "'")
+            else:
+                # bytes, decimals, dates → fall back to str() and quote.
+                # The constraint-emit path doesn't really hit this; if
+                # someone needs richer types we'll extend.
+                out.append("'" + str(v).replace("'", "''") + "'")
+            i += 2
+            continue
+        out.append(sql[i])
+        i += 1
+    if pi != len(params):
+        raise ValueError(
+            f"_inline_literal: {len(params) - pi} param(s) left unconsumed"
+        )
+    return "".join(out)
+
+
 CASCADE = "CASCADE"
 PROTECT = "PROTECT"
 SET_NULL = "SET NULL"
@@ -654,6 +711,99 @@ class ArrayField(Field[list]):
         if value is None:
             return None
         return [self.base_field.get_db_prep_value(v) for v in value]
+
+
+class GeneratedField(Field[Any]):
+    """A column whose value is computed from a SQL expression at write
+    time. PostgreSQL ≥ 12 and SQLite ≥ 3.31 both support
+    ``GENERATED ALWAYS AS (...) STORED``; that's the form we emit.
+
+    Example::
+
+        class Order(dorm.Model):
+            quantity = dorm.IntegerField()
+            price    = dorm.DecimalField(max_digits=10, decimal_places=2)
+            total    = dorm.GeneratedField(
+                expression="quantity * price",
+                output_field=dorm.DecimalField(max_digits=12, decimal_places=2),
+            )
+
+    The *expression* is spliced verbatim into the column DDL — it is
+    your responsibility to keep it side-effect-free and to reference
+    only columns of the same table. Field assignment is rejected at
+    runtime: a generated column is computed by the database and any
+    Python-side write would conflict with the underlying engine.
+
+    *output_field* is required and supplies ``db_type`` /
+    ``from_db_value`` / ``to_python``. It is otherwise inert.
+    """
+
+    GENERATED_EXPR_ALLOWED_RE = re.compile(
+        r"^[A-Za-z0-9_+\-*/(),. \"'%]+$"
+    )
+
+    def __init__(
+        self,
+        *,
+        expression: str,
+        output_field: "Field",
+        stored: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        if not isinstance(expression, str) or not expression.strip():
+            raise ValidationError(
+                "GeneratedField(expression=...) must be a non-empty string."
+            )
+        if not self.GENERATED_EXPR_ALLOWED_RE.match(expression):
+            # Whitelist instead of blacklist: we splice this into DDL
+            # without a parameter binding, so any character outside the
+            # documented grammar (alphanumerics, arithmetic, comma,
+            # parens, quotes, percent for modulo / LIKE patterns) is a
+            # potential injection sink. Users with exotic needs can
+            # write a ``RunSQL`` migration instead.
+            raise ValidationError(
+                f"GeneratedField(expression={expression!r}) contains characters "
+                "outside the documented grammar (letters, digits, _, arithmetic, "
+                "(),. and quotes). Use a RunSQL migration for complex generated "
+                "columns."
+            )
+        self.expression = expression
+        self.output_field = output_field
+        self.stored = bool(stored)
+        kwargs.setdefault("editable", False)
+        # Generated columns can't be NULL-checked at the Python layer in
+        # the usual way — defer NOT NULL handling to the database.
+        kwargs.setdefault("null", True)
+        super().__init__(**kwargs)
+
+    def db_type(self, connection) -> str:
+        base_type = self.output_field.db_type(connection)
+        kind = "STORED" if self.stored else "VIRTUAL"
+        return f"{base_type} GENERATED ALWAYS AS ({self.expression}) {kind}"
+
+    def to_python(self, value):
+        return self.output_field.to_python(value)
+
+    def from_db_value(self, value):
+        if hasattr(self.output_field, "from_db_value"):
+            return self.output_field.from_db_value(value)
+        return value
+
+    def get_db_prep_value(self, value):
+        # Generated columns are read-only — never bound on INSERT/UPDATE.
+        return None
+
+    def __set__(self, instance: object, value: Any) -> None:
+        # Reject Python writes outright. Without this, an assignment
+        # like ``order.total = ...`` would silently succeed, then the
+        # next refresh_from_db would overwrite it — confusing.
+        raise AttributeError(
+            f"GeneratedField {self.attname!r} is read-only; the database "
+            "computes it from the expression."
+        )
+
+    def pre_save(self, model_instance: Any, add: bool) -> Any:
+        return None
 
 
 class BinaryField(Field[bytes]):

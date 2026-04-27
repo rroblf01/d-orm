@@ -155,7 +155,115 @@ class Settings:
 settings = Settings()
 
 
+def parse_database_url(url: str) -> dict:
+    """Parse a database URL like ``postgres://user:pass@host:5432/dbname``
+    or ``sqlite:///path/to/db.sqlite3`` into a ``DATABASES`` dict
+    suitable for :func:`configure`.
+
+    Recognised schemes:
+
+    - ``postgres://`` / ``postgresql://`` → ``ENGINE = "postgresql"``
+    - ``sqlite://`` / ``sqlite:///`` → ``ENGINE = "sqlite"``
+
+    Query-string parameters become entries in ``OPTIONS`` so you can
+    embed driver-specific options (``?sslmode=require``,
+    ``?application_name=myapp``) in the connection string. Common
+    aliases (``MIN_POOL_SIZE``, ``MAX_POOL_SIZE``, ``POOL_TIMEOUT``,
+    ``POOL_CHECK``, ``MAX_IDLE``, ``MAX_LIFETIME``,
+    ``PREPARE_THRESHOLD``) are lifted to top-level keys instead.
+
+    Example::
+
+        import os, dorm
+        cfg = dorm.parse_database_url(os.environ["DATABASE_URL"])
+        dorm.configure(DATABASES={"default": cfg})
+    """
+    from urllib.parse import urlparse, parse_qs, unquote
+
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+
+    if scheme in {"sqlite", "sqlite3"}:
+        # ``sqlite:///path`` (3 slashes = absolute path) / ``sqlite://path``
+        # (2 slashes = relative). ``urlparse`` puts the path in
+        # ``parsed.path`` either way; an empty netloc means we're already
+        # at the path. Special-case ``:memory:`` so users can spell it
+        # naturally.
+        from typing import Any as _AnyQ
+        path = parsed.path
+        if path.startswith("/"):
+            # ``sqlite:////tmp/db.sqlite3`` produces path ``//tmp/...``;
+            # collapse one leading slash so the resulting path is the
+            # filesystem absolute path the user intended.
+            if parsed.netloc and not path.startswith("//"):
+                path = parsed.netloc + path
+        if not path or path == "/":
+            path = ":memory:"
+        cfg_sqlite: dict[str, _AnyQ] = {"ENGINE": "sqlite", "NAME": path}
+        for k, vlist in parse_qs(parsed.query).items():
+            cfg_sqlite.setdefault("OPTIONS", {})[k] = vlist[0]
+        return cfg_sqlite
+
+    if scheme in {"postgres", "postgresql", "psql"}:
+        from typing import Any as _Any
+
+        cfg: dict[str, _Any] = {
+            "ENGINE": "postgresql",
+            "NAME": (parsed.path[1:] if parsed.path.startswith("/") else parsed.path),
+            "USER": unquote(parsed.username) if parsed.username else "",
+            "PASSWORD": unquote(parsed.password) if parsed.password else "",
+            "HOST": parsed.hostname or "",
+            "PORT": parsed.port or 5432,
+        }
+        # Lift well-known pool / driver knobs to top-level keys; everything
+        # else lands in OPTIONS so it reaches psycopg.connect() unchanged.
+        _LIFTED = {
+            "MIN_POOL_SIZE": int,
+            "MAX_POOL_SIZE": int,
+            "POOL_TIMEOUT": float,
+            "POOL_CHECK": lambda v: v.lower() in {"1", "true", "yes", "on"},
+            "MAX_IDLE": float,
+            "MAX_LIFETIME": float,
+            "PREPARE_THRESHOLD": int,
+        }
+        options: dict = {}
+        for k, vlist in parse_qs(parsed.query).items():
+            v = vlist[0]
+            up = k.upper()
+            if up in _LIFTED:
+                cfg[up] = _LIFTED[up](v)
+            else:
+                options[k] = v
+        if options:
+            cfg["OPTIONS"] = options
+        return cfg
+
+    raise ImproperlyConfigured(
+        f"Unrecognised database URL scheme {scheme!r}. Supported: "
+        "'postgres', 'postgresql', 'sqlite'."
+    )
+
+
 def configure(**kwargs):
+    # If DATABASES contains a string-shaped entry or a dict with a "URL"
+    # key, expand it through parse_database_url first. This lets users
+    # pass DATABASE_URL straight from the environment without extra
+    # boilerplate.
+    databases = kwargs.get("DATABASES")
+    if isinstance(databases, dict):
+        normalised = {}
+        for alias, cfg in databases.items():
+            if isinstance(cfg, str):
+                normalised[alias] = parse_database_url(cfg)
+            elif isinstance(cfg, dict) and "URL" in cfg and "ENGINE" not in cfg:
+                expanded = parse_database_url(cfg["URL"])
+                # User-supplied keys win over the URL-derived ones —
+                # they're being explicit on purpose.
+                expanded.update({k: v for k, v in cfg.items() if k != "URL"})
+                normalised[alias] = expanded
+            else:
+                normalised[alias] = cfg
+        kwargs["DATABASES"] = normalised
     settings.configure(**kwargs)
 
 

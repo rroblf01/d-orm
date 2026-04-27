@@ -408,3 +408,28 @@ Allowed base types include `INTEGER`, `BIGINT`, `SMALLINT`, `REAL`,
 `NUMERIC(10, 2)`) is accepted. Any other value raises
 `ImproperlyConfigured` immediately at queryset build time, so a
 typo or unsanitised input can never reach the SQL.
+
+
+## Advanced querying (2.1+)
+
+The 2.1 release adds the building blocks for non-trivial reporting
+queries — what you'd otherwise drop to `RawQuerySet` for. See
+[What's new in 2.1](whats-new-2.1.md) for the full set; the
+shortest summary:
+
+- **`Subquery(qs)` / `Exists(qs)` / `OuterRef("col")`** — correlated
+  subqueries that compose with `filter()` / `annotate()`.
+- **`Window(expr, partition_by=, order_by=)`** plus `RowNumber`,
+  `Rank`, `DenseRank`, `NTile`, `Lag`, `Lead`, `FirstValue`,
+  `LastValue` — ranking, running totals, deltas without bailing to
+  raw SQL.
+- **`QuerySet.with_cte(name=qs)`** — non-recursive CTEs.
+- **New scalar functions**: `Greatest`, `Least`, `Round`, `Trunc`,
+  `Extract`, `Substr`, `Replace`, `StrIndex`.
+- **Full-text search (PostgreSQL)** via `dorm.search.SearchVector` /
+  `SearchQuery` / `SearchRank` and the `__search` lookup.
+- **`QuerySet.cursor_paginate(...)` / `acursor_paginate(...)`** —
+  keyset pagination with stable ordering, O(1) deep-page cost.
+
+Each feature has a worked example in [the 2.1 release
+notes](whats-new-2.1.md).

@@ -29,7 +29,7 @@ Quick start:
         author = await Author.objects.aget(name='Bob')
 """
 
-from .conf import configure, settings
+from .conf import configure, parse_database_url, settings
 from . import signals, transaction
 from .db.connection import ahealth_check, health_check, pool_stats
 from .signals import (
@@ -53,7 +53,7 @@ from .exceptions import (
     ProtectedError,
     ValidationError,
 )
-from .expressions import F, Q, Value
+from .expressions import Exists, F, OuterRef, Q, Subquery, Value
 from .aggregates import Avg, Count, Max, Min, StdDev, Sum, Variance
 from .functions import (
     Abs,
@@ -61,12 +61,30 @@ from .functions import (
     Cast,
     Coalesce,
     Concat,
+    DenseRank,
+    Extract,
+    FirstValue,
+    Greatest,
+    Lag,
+    LastValue,
+    Lead,
+    Least,
     Length,
     Lower,
+    NTile,
     Now,
+    Rank,
+    Replace,
+    Round,
+    RowNumber,
+    StrIndex,
+    Substr,
+    Trunc,
     Upper,
     When,
+    Window,
 )
+from .constraints import CheckConstraint, UniqueConstraint
 from .fields import (
     ArrayField,
     AutoField,
@@ -81,6 +99,7 @@ from .fields import (
     EmailField,
     FloatField,
     ForeignKey,
+    GeneratedField,
     GenericIPAddressField,
     IPAddressField,
     IntegerField,
@@ -107,7 +126,7 @@ from .fields import (
 from .models import Model
 from .manager import Manager
 from .indexes import Index
-from .queryset import CombinedQuerySet, QuerySet, RawQuerySet
+from .queryset import CombinedQuerySet, CursorPage, QuerySet, RawQuerySet
 from .validators import (
     EmailValidator,
     MaxLengthValidator,
@@ -118,10 +137,11 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 __all__ = [
     # Config
     "configure",
+    "parse_database_url",
     "settings",
     "transaction",
     "signals",
@@ -141,6 +161,7 @@ __all__ = [
     "Manager",
     "QuerySet",
     "CombinedQuerySet",
+    "CursorPage",
     "RawQuerySet",
     # Fields
     "AutoField",
@@ -169,6 +190,7 @@ __all__ = [
     "JSONField",
     "BinaryField",
     "ArrayField",
+    "GeneratedField",
     "ForeignKey",
     "OneToOneField",
     "ManyToManyField",
@@ -183,6 +205,9 @@ __all__ = [
     "Q",
     "F",
     "Value",
+    "Subquery",
+    "Exists",
+    "OuterRef",
     # Aggregates
     "Count",
     "Sum",
@@ -202,6 +227,27 @@ __all__ = [
     "Lower",
     "Length",
     "Abs",
+    "Greatest",
+    "Least",
+    "Round",
+    "Trunc",
+    "Extract",
+    "Substr",
+    "Replace",
+    "StrIndex",
+    # Window functions
+    "Window",
+    "RowNumber",
+    "Rank",
+    "DenseRank",
+    "NTile",
+    "Lag",
+    "Lead",
+    "FirstValue",
+    "LastValue",
+    # Constraints
+    "CheckConstraint",
+    "UniqueConstraint",
     # Index
     "Index",
     # Validators

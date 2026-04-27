@@ -157,3 +157,30 @@ Cada comando resuelve los settings en este orden:
 3. Un `settings.py` junto al directorio de trabajo (último recurso)
 
 Si nada de esto resuelve, dorm sale con un error explicativo.
+
+## `dorm inspectdb` (2.1+)
+
+Reverse-engineering de un snippet `models.py` desde la base de
+datos conectada. Recupera tipos de campo, referencias FK y
+`db_table` con esfuerzo razonable; constraints, índices,
+`related_name` y validators **no** se introspectan. Redirige la
+salida a un fichero y revísalo::
+
+    dorm inspectdb > legacy/models.py
+
+`--database alias` permite introspectar una entrada no-default de
+`DATABASES`.
+
+## `dorm doctor` (2.1+)
+
+Auditoría de la configuración runtime para detectar footguns de
+producción: `MAX_POOL_SIZE` pequeño, host de PostgreSQL remoto sin
+`sslmode`, foreign keys sin índice, retry de errores transitorios
+desactivado. Sale con código distinto de cero ante cualquier
+warning, así que sirve como puerta pre-despliegue::
+
+    dorm doctor
+
+El doctor es conservador — solo avisa cuando la regla de oro es
+ampliamente aceptada. Ajusta a tu carga antes de tratar un único
+warning como dogma.

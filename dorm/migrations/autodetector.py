@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from .operations import (
+    AddConstraint,
     AddField,
     AddIndex,
     AlterField,
     CreateModel,
     DeleteModel,
+    RemoveConstraint,
     RemoveField,
     RemoveIndex,
     RenameField,
@@ -235,5 +237,30 @@ class MigrationAutodetector:
             for name, idx in from_idx_map.items():
                 if name not in to_idx_map:
                     ops.append(RemoveIndex(model_name=from_m["name"], index=idx))
+
+        # ── Constraint changes ────────────────────────────────────────────────
+        for new_key, from_key in key_map.items():
+            if new_key not in to_models or from_key not in from_models:
+                continue
+            al = self._al(new_key)
+            from_m = from_models[from_key]
+            to_m = to_models[new_key]
+            ops = operations.setdefault(al, [])
+
+            from_constraints = from_m.get("options", {}).get("constraints", []) or []
+            to_constraints = to_m.get("options", {}).get("constraints", []) or []
+
+            from_c_map = {getattr(c, "name", repr(c)): c for c in from_constraints}
+            to_c_map = {getattr(c, "name", repr(c)): c for c in to_constraints}
+
+            for name, c in to_c_map.items():
+                if name not in from_c_map:
+                    ops.append(AddConstraint(model_name=to_m["name"], constraint=c))
+
+            for name, c in from_c_map.items():
+                if name not in to_c_map:
+                    ops.append(
+                        RemoveConstraint(model_name=from_m["name"], constraint=c)
+                    )
 
         return {k: v for k, v in operations.items() if v}

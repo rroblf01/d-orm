@@ -151,7 +151,7 @@ can.
 ## Where to ask for more help
 
 - Open an issue on
-  [GitHub](https://github.com/MrFrozen11/djanorm/issues) with the
+  [GitHub](https://github.com/rroblf01/d-orm/issues) with the
   full traceback, the `DATABASES` block (with secrets redacted),
   and the version (`dorm --version`).
 - For migrations issues, attach the output of `dorm showmigrations`

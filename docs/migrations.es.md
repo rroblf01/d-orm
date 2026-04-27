@@ -47,23 +47,79 @@ dorm makemigrations --empty --name backfill_slugs blog
 Genera un stub con `RunPython` y `RunSQL` para que lo rellenes:
 
 ```python
+from typing import Any
+
 from dorm.migrations.operations import RunPython
 
-def fill_slugs(apps, connection):
-    Article = apps.get_model("blog", "Article")
-    for a in Article.objects.all():
+
+def fill_slugs(app_label: str, registry: dict[str, Any]) -> None:
+    Article = registry[f"{app_label}.Article"]
+    for a in Article.objects.filter(slug=""):
         a.slug = slugify(a.title)
         a.save(update_fields=["slug"])
+
 
 class Migration:
     dependencies = [("blog", "0003_add_slug")]
     operations = [RunPython(fill_slugs, reverse_code=RunPython.noop)]
 ```
 
-`apps.get_model(app, name)` devuelve un modelo *histórico* — es
-decir, el modelo con la forma de campos que tenía **en este punto de
-la cadena de migraciones**. Esto es lo que protege a las data
-migrations de romperse cuando luego edites el modelo en vivo.
+### Contrato del callable de `RunPython`
+
+dorm pasa **exactamente dos argumentos posicionales** a cada
+callable que entregues a `RunPython(code=, reverse_code=)`. Tipa
+ambos para que el editor cace los errores antes de aplicar la
+migración:
+
+```python
+def my_step(app_label: str, registry: dict[str, Any]) -> None: ...
+```
+
+| Posición | Nombre | Tipo | Qué es |
+|---|---|---|---|
+| 1 | `app_label` | `str` | El app label al que pertenece la migración (p.ej. `"blog"`). Úsalo para construir las claves de `registry` en lugar de hardcodear el nombre de la app — así el mismo callable se reusa en forks de la misma app. |
+| 2 | `registry` | `dict[str, type[dorm.Model]]` | El registro **vivo** de modelos. Resuelve clases por su nombre escueto (`registry["Post"]`) o, mejor, por la clave cualificada por app (`registry["blog.Post"]` — preferida porque es inequívoca cuando dos apps declaran la misma clase). |
+
+Lo que **no** recibes (diferencias intencionadas vs. Django):
+
+- **No hay argumento `connection` / `schema_editor`.** Si necesitas
+  SQL en bruto dentro de un paso Python, recoge tú la conexión:
+
+  ```python
+  from dorm.db.connection import get_connection
+  get_connection().execute("UPDATE blog_post SET ...", [...])
+  ```
+
+  La mayor parte del código de data migrations no debería llegar
+  hasta aquí — `Model.objects.filter(...).update(...)` cubre el
+  caso común y es portable.
+
+- **No hay modelo "histórico".** dorm te entrega la clase del
+  modelo *actual*, no una foto congelada de cómo era el modelo en
+  este punto de la cadena de migraciones. Implicación: un callable
+  que referencia una columna eliminada en una migración posterior
+  romperá si reproduces la historia desde cero. Mitigación —
+  mantén los pasos `RunPython` pequeños, ciñe su alcance a las
+  columnas que tocan, y colócalos justo después de la migración de
+  esquema que introdujo esas columnas. Si necesitas defenderte
+  ante cambios de esquema futuros, escribe el paso de datos como
+  `RunSQL`.
+
+### `reverse_code=`
+
+Pásalo siempre. `RunPython` necesita un callable de reverso para
+ser considerado reversible por `dorm migrate <app> <target>`; un
+paso forward sin él se ejecuta, pero la migración se negará a
+hacer rollback y te quedas con la mitad de datos de una migración
+deshecha a medias. Dos patrones:
+
+- Una función real de undo, con la misma signatura
+  `(app_label, registry)`, que revierte lo que hizo el forward
+  (p.ej. limpia la columna que el forward backfilled).
+- `RunPython.noop` — un callable incorporado (con el contrato de
+  dorm) que pasas cuando el forward no tiene inverso significativo.
+  El caso clásico: un backfill one-shot de datos que tolera ser
+  deshecho dejando las filas tal cual.
 
 ## Targets de `dorm migrate`
 
@@ -147,26 +203,47 @@ compitiendo no aplicarán por duplicado ni corromperán el recorder.
 SQLite se serializa con file locking, que tiene el mismo efecto en
 setups pequeños de dev.
 
-## Migraciones manuales: `RunPython` / `RunSQL`
+## Migraciones manuales: `RunPython` + `RunSQL` juntos
+
+Cuando una misma migración mezcla SQL en bruto con un paso de datos
+en Python, declara ambos dentro de `operations`. Los callables de
+`RunPython` siguen el mismo contrato documentado en
+[Migraciones vacías para data migrations](#migraciones-vacias-para-data-migrations)
+arriba — `(app_label: str, registry: dict[str, Any]) -> None`.
 
 ```python
+from typing import Any
+
 from dorm.migrations.operations import RunPython, RunSQL
 
+
+def backfill_slug_lower(app_label: str, registry: dict[str, Any]) -> None:
+    """Forward step: nada que rellenar — el índice lee la columna en vivo."""
+    return None
+
+
+def clear_slug_overrides(app_label: str, registry: dict[str, Any]) -> None:
+    """Reverse step: deshace cualquier efecto de datos del forward."""
+    Post = registry[f"{app_label}.Post"]
+    Post.objects.filter(slug__isnull=False).update(slug="")
+
+
 class Migration:
+    atomic = False  # requerido para CREATE INDEX CONCURRENTLY
     dependencies = [("blog", "0007_add_slug")]
     operations = [
         RunSQL(
             "CREATE INDEX CONCURRENTLY blog_post_slug_lower ON blog_post (LOWER(slug));",
             reverse_sql="DROP INDEX IF EXISTS blog_post_slug_lower;",
         ),
-        RunPython(my_python_function, reverse_code=my_undo_function),
+        RunPython(backfill_slug_lower, reverse_code=clear_slug_overrides),
     ]
 ```
 
 `RunSQL` acepta una sola sentencia o una lista. Para cosas como
-`CREATE INDEX CONCURRENTLY` (que no puede correr dentro de una
-transacción), marca la migración con `atomic = False` a nivel de
-clase.
+`CREATE INDEX CONCURRENTLY` — que **no puede** correr dentro de una
+transacción — fija `atomic = False` a nivel de clase para que el
+ejecutor se salte el wrap atómico de la migración.
 
 ## Pitfalls habituales
 
@@ -180,3 +257,36 @@ clase.
 - **Editar una migración ya aplicada**: no lo hagas. El recorder
   hashea el contenido; si de verdad necesitas hacerlo, borra también
   la fila de `dorm_migrations` en cada entorno.
+
+## Migraciones zero-downtime (2.1+)
+
+Tres operaciones que ayudan a evitar `AccessExclusiveLock` en
+tablas calientes:
+
+- **`AddIndex(..., concurrently=True)`** emite
+  `CREATE INDEX CONCURRENTLY` en PostgreSQL. Debe ser la única DDL
+  del fichero de migración (el executor necesita saltarse el
+  atomic envolvente, ya que `CONCURRENTLY` no puede correr dentro
+  de una transacción).
+- **`SetLockTimeout(ms=...)`** ajusta `lock_timeout` de PG para la
+  ventana de la migración: las DDL que no consigan su lock a
+  tiempo fallan de forma ruidosa en vez de bloquear a los
+  escritores indefinidamente.
+- **`ValidateConstraint(table=, name=)`** ejecuta `ALTER TABLE ...
+  VALIDATE CONSTRAINT` — la segunda mitad del patrón canónico
+  `NOT VALID` + `VALIDATE` para añadir FKs / CHECKs a tablas
+  grandes sin `AccessExclusiveLock`.
+
+Ejemplo trabajado en [Novedades en 2.1 →
+Seguridad de migraciones](whats-new-2.1.md#seguridad-de-migraciones).
+
+## Restricciones y columnas calculadas (2.1+)
+
+`Meta.constraints` acepta ya `CheckConstraint` y
+`UniqueConstraint(condition=...)` (índice único parcial — el patrón
+canónico de "solo una fila activa por usuario"). El autodetector
+emite `AddConstraint` / `RemoveConstraint`.
+
+`GeneratedField` declara una columna calculada por la BD (PG ≥ 12,
+SQLite ≥ 3.31). Ver [Novedades en 2.1 →
+Esquema](whats-new-2.1.md#esquema).

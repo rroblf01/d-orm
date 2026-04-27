@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from .expressions import CombinedExpression, F, Q, Value
+from .expressions import CombinedExpression, Exists, F, OuterRef, Q, Subquery, Value
 from .lookups import build_lookup_sql, parse_lookup_key
 
 if TYPE_CHECKING:
@@ -64,6 +64,17 @@ class SQLQuery:
         self.having_nodes: list = []
         self.select_related_fields: list[str] = []
         self.prefetch_related_fields: list[str] = []
+        # CTEs declared via ``QuerySet.with_cte(name=qs)``. Each entry is
+        # (name, queryset). Compiled into a ``WITH name AS (sub)`` prefix
+        # in :meth:`as_select`.
+        self.ctes: list[tuple[str, Any]] = []
+        # When this SQLQuery is compiled as a *correlated* subquery (used
+        # inside :class:`Subquery` / :class:`Exists`), the outer query's
+        # table alias and model class are stamped here so any
+        # :class:`OuterRef` value resolves to ``"<outer_alias>"."<col>"``
+        # at compile time. ``None`` outside subqueries.
+        self._outer_alias: str | None = None
+        self._outer_model: Any = None
 
     def clone(self) -> "SQLQuery":
         q = SQLQuery(self.model)
@@ -85,6 +96,9 @@ class SQLQuery:
         q.having_nodes = list(self.having_nodes)
         q.select_related_fields = list(self.select_related_fields)
         q.prefetch_related_fields = list(self.prefetch_related_fields)
+        q.ctes = list(self.ctes)
+        q._outer_alias = self._outer_alias
+        q._outer_model = self._outer_model
         return q
 
     # ── SQL builders ──────────────────────────────────────────────────────────
@@ -139,10 +153,37 @@ class SQLQuery:
         concrete = [f for f in self.model._meta.fields if f.column]
         return ", ".join(f'{ta}"{f.column}"' for f in concrete)
 
+    def _compile_ctes(self, connection) -> tuple[str, list]:
+        """Build the leading ``WITH name AS (sub), name2 AS (sub2)`` clause.
+
+        Returns ``("", [])`` when no CTEs were declared. The CTEs are
+        compiled via :meth:`as_subquery_sql` so they're expressed in the
+        same ``%s``-placeholder dialect; the outer
+        :meth:`_adapt_placeholders` pass renumbers everything to ``$N``
+        on PostgreSQL.
+        """
+        if not self.ctes:
+            return "", []
+        parts: list[str] = []
+        params: list[Any] = []
+        for name, qs in self.ctes:
+            _validate_identifier(name, "CTE name")
+            sub_sql, sub_params = qs._query.as_subquery_sql(
+                outer_alias=self.model._meta.db_table,
+                outer_model=self.model,
+            )
+            parts.append(f'"{name}" AS ({sub_sql})')
+            params.extend(sub_params)
+        return "WITH " + ", ".join(parts) + " ", params
+
     def as_select(self, connection) -> tuple[str, list]:
         table = self.get_table()
         alias = table
         distinct = "DISTINCT " if self.distinct_flag else ""
+
+        # CTE prefix (``WITH name AS (...) ...``) appears before the SELECT
+        # clause — its params are the very first in the bound list.
+        cte_prefix, cte_params = self._compile_ctes(connection)
 
         # Annotations — collect SQL and params separately (appear before WHERE in SQL).
         # Names listed in ``alias_only_names`` came from :meth:`QuerySet.alias`
@@ -160,7 +201,13 @@ class SQLQuery:
                 # ``COUNT("table"."id")``). Without this, the SQL
                 # references a non-existent ``"pk"`` column and the
                 # query fails with a clear-but-confusing error.
-                agg_sql, agg_p = agg.as_sql(alias, model=self.model)
+                # Pass the connection so vendor-specific functions
+                # (Greatest/Least, StrIndex) can pick the right SQL
+                # idiom — PG's ``GREATEST`` vs SQLite's variadic ``MAX``,
+                # ``STRPOS`` vs ``INSTR``.
+                agg_sql, agg_p = agg.as_sql(
+                    alias, model=self.model, connection=connection
+                )
                 if alias_name in self.alias_only_names:
                     # alias()-only: skip the SELECT projection. We still
                     # compiled the SQL above so any side-effects (joins,
@@ -172,10 +219,11 @@ class SQLQuery:
                 extra_select = ", " + ", ".join(parts)
 
         params: list = []
+        params.extend(cte_params)  # WITH params come first in SQL
 
         # Compile WHERE first so _resolve_column can populate self.joins via FK traversal
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
-        params.extend(annotation_params)  # SELECT annotations come first in SQL
+        params.extend(annotation_params)  # SELECT annotations come after WITH
         params.extend(where_params)
 
         # select_related: build LEFT OUTER JOINs and prefixed columns (supports nested paths)
@@ -221,7 +269,10 @@ class SQLQuery:
                 sr_extra_cols = ", " + ", ".join(sr_parts)
 
         cols = self.get_columns(alias)
-        select = f'SELECT {distinct}{cols}{extra_select}{sr_extra_cols} FROM "{table}"'
+        select = (
+            f'{cte_prefix}'
+            f'SELECT {distinct}{cols}{extra_select}{sr_extra_cols} FROM "{table}"'
+        )
 
         # ORDER BY — resolve FK traversal paths (may add JOINs) before emitting JOIN clauses
         order_by_sql = ""
@@ -461,6 +512,15 @@ class SQLQuery:
     def _compile_node(self, node, connection) -> tuple[str, list]:
         if isinstance(node, Q):
             return self._compile_q(node, connection)
+        if isinstance(node, (Exists, Subquery)):
+            # Bare ``filter(Exists(...))`` / ``filter(Subquery(...))`` —
+            # treat as a standalone WHERE predicate. Subquery is unusual
+            # here (boolean coercion of a scalar) but matches Django's
+            # behaviour for completeness.
+            sub_sql, sub_params = node.as_sql(
+                table_alias=self.model._meta.db_table, model=self.model
+            )
+            return sub_sql, sub_params
         if isinstance(node, tuple):
             field_path, lookup, value = node
             return self._compile_leaf(field_path, lookup, value, connection)
@@ -472,6 +532,10 @@ class SQLQuery:
         for child in q.children:
             if isinstance(child, Q):
                 sql, p = self._compile_q(child, connection)
+            elif isinstance(child, (Exists, Subquery)):
+                sql, p = child.as_sql(
+                    table_alias=self.model._meta.db_table, model=self.model
+                )
             elif isinstance(child, tuple) and len(child) == 2:
                 key, value = child
                 field_parts, lookup = parse_lookup_key(key)
@@ -501,6 +565,26 @@ class SQLQuery:
             sub_sql, sub_params = self._compile_subquery(value, connection)
             return f"{col} IN ({sub_sql})", sub_params
 
+        # Subquery() / Exists() as a scalar comparison RHS — compile in
+        # place against this query's outer-context state so any
+        # OuterRef resolves correctly.
+        if isinstance(value, (Subquery, Exists)):
+            sub_sql, sub_params = value.as_sql(
+                table_alias=self.model._meta.db_table,
+                model=self.model,
+            )
+            if isinstance(value, Exists):
+                # ``filter(Exists(...))`` → emit just the EXISTS clause;
+                # the column we built above is ignored.
+                return sub_sql, sub_params
+            return f"{col} = {sub_sql}", sub_params
+
+        # OuterRef: compile to a column reference on the outer query
+        # rather than a bound parameter.
+        if isinstance(value, OuterRef):
+            outer_col = self._resolve_outer_ref(value)
+            return f"{col} = {outer_col}", []
+
         # Extract PK from model instances (e.g. filter(author=instance))
         if hasattr(value, "_meta") and hasattr(value, "pk"):
             value = value.pk
@@ -513,6 +597,41 @@ class SQLQuery:
         sql, params = build_lookup_sql(col, lookup, value, vendor=vendor)
         # Return raw %s — outer as_* method adapts placeholders once for the full SQL
         return sql, params
+
+    def _resolve_outer_ref(self, ref: OuterRef) -> str:
+        """Translate :class:`OuterRef` to ``"<outer_alias>"."<col>"``.
+
+        Raises ``ValueError`` if used outside a Subquery/Exists context
+        (i.e. ``_outer_alias`` was never stamped). ``"pk"`` is resolved
+        to the outer model's primary-key column when ``_outer_model`` is
+        known; otherwise ``"pk"`` is left as the literal column name and
+        the database will report it.
+        """
+        if self._outer_alias is None:
+            raise ValueError(
+                "OuterRef can only be used inside Subquery() or Exists(); "
+                "the outer queryset's alias was not propagated."
+            )
+        name = ref.name
+        if name == "pk" and self._outer_model is not None:
+            pk = self._outer_model._meta.pk
+            if pk is not None:
+                name = pk.column
+        else:
+            # If the outer model is known and the name matches a declared
+            # field (e.g. attname ``author_id`` or relation name
+            # ``author``), prefer the underlying column.
+            if self._outer_model is not None:
+                from .exceptions import FieldDoesNotExist
+
+                try:
+                    f = self._outer_model._meta.get_field(name)
+                    if f.column:
+                        name = f.column
+                except FieldDoesNotExist:
+                    pass
+        _validate_identifier(name)
+        return f'"{self._outer_alias}"."{name}"'
 
     def _compile_subquery(self, qs, connection) -> tuple[str, list]:
         """Compile a QuerySet as a SELECT subquery returning the PK column."""
@@ -529,6 +648,98 @@ class SQLQuery:
         if inner.offset_val is not None:
             sql += f" OFFSET {int(inner.offset_val)}"
         return sql, where_params
+
+    def as_subquery_sql(
+        self,
+        outer_alias: str | None = None,
+        outer_model: Any = None,
+    ) -> tuple[str, list]:
+        """Compile this query as a correlated subquery body.
+
+        Used by :class:`~dorm.expressions.Subquery` and
+        :class:`~dorm.expressions.Exists`. The compiled SQL keeps ``%s``
+        placeholders (the outer query's :meth:`_adapt_placeholders` runs
+        once on the full statement, which avoids double-rewriting on
+        PostgreSQL where ``$N`` would otherwise be re-numbered twice).
+
+        ``outer_alias`` and ``outer_model`` propagate the enclosing
+        query's table alias and model so :class:`OuterRef` references
+        resolve to ``"<outer_alias>"."<col>"`` instead of bound
+        parameters.
+        """
+        inner = self.clone()
+        inner._outer_alias = outer_alias
+        inner._outer_model = outer_model
+
+        # Use a sentinel "connection" so vendor-specific behaviour
+        # (currently just ``__in`` → ANY) defaults to the sqlite shape.
+        # The outer ``_adapt_placeholders`` rewrites the full SQL once;
+        # double-rewriting here would break ``$N`` numbering on PG.
+        class _DummyConn:
+            vendor = "sqlite"
+
+        conn = _DummyConn()
+
+        table = inner.get_table()
+        alias = table
+
+        annotation_params: list = []
+        extra_select = ""
+        if inner.annotations:
+            parts = []
+            for alias_name, agg in inner.annotations.items():
+                _validate_identifier(alias_name, "annotation alias")
+                agg_sql, agg_p = agg.as_sql(alias, model=inner.model)
+                if alias_name in inner.alias_only_names:
+                    continue
+                parts.append(f'{agg_sql} AS "{alias_name}"')
+                annotation_params.extend(agg_p)
+            if parts:
+                extra_select = ", " + ", ".join(parts)
+
+        if inner.selected_fields is not None:
+            cols = inner.get_columns(alias)
+            select_list = cols + extra_select
+        else:
+            cols = inner.get_columns(alias)
+            select_list = cols + extra_select
+
+        params: list = []
+        where_sql, where_params = inner._compile_nodes(inner.where_nodes, conn)
+        params.extend(annotation_params)
+        params.extend(where_params)
+
+        sql = f'SELECT {select_list} FROM "{table}"'
+        for join_type, jt, jalias, on_cond in inner.joins:
+            sql += f' {join_type} JOIN "{jt}" AS "{jalias}" ON {on_cond}'
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+
+        if inner.group_by_fields:
+            for f in inner.group_by_fields:
+                _validate_identifier(f)
+            sql += " GROUP BY " + ", ".join(f'"{f}"' for f in inner.group_by_fields)
+
+        if inner.having_nodes:
+            having_sql, having_params = inner._compile_nodes(inner.having_nodes, conn)
+            if having_sql:
+                sql += f" HAVING {having_sql}"
+                params.extend(having_params)
+
+        if inner.order_by_fields:
+            order_parts = []
+            for f in inner.order_by_fields:
+                desc = f.startswith("-")
+                fname = f[1:] if desc else f
+                _validate_identifier(fname)
+                order_parts.append(f'"{fname}" {"DESC" if desc else "ASC"}')
+            sql += " ORDER BY " + ", ".join(order_parts)
+
+        if inner.limit_val is not None:
+            sql += f" LIMIT {int(inner.limit_val)}"
+        if inner.offset_val is not None:
+            sql += f" OFFSET {int(inner.offset_val)}"
+        return sql, params
 
     def _resolve_column(self, field_parts: list[str]) -> str:
         from .exceptions import FieldDoesNotExist

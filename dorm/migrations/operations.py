@@ -43,6 +43,19 @@ class CreateModel(Operation):
         sql = f'CREATE TABLE IF NOT EXISTS "{table}" (\n  {",  ".join(col_defs)}\n)'
         connection.execute_script(sql)
 
+        # Declared indexes: emit ``CREATE INDEX`` per entry.
+        for idx in self.options.get("indexes", []) or []:
+            AddIndex(self.name, idx).database_forwards(
+                app_label, connection, from_state, to_state
+            )
+
+        # Declared constraints (CheckConstraint / UniqueConstraint): emit
+        # the appropriate DDL. The base column DDL already reflects
+        # ``unique=True`` / single-field UNIQUE; this loop covers
+        # composite and conditional constraints.
+        for c in self.options.get("constraints", []) or []:
+            connection.execute_script(c.constraint_sql(table, connection))
+
     def database_backwards(self, app_label: str, connection, from_state, to_state):
         table = self.options.get("db_table") or f"{app_label}_{self.name.lower()}"
         connection.execute_script(f'DROP TABLE IF EXISTS "{table}"')
@@ -236,40 +249,86 @@ class RenameModel(Operation):
 
 
 class AddIndex(Operation):
-    def __init__(self, model_name: str, index) -> None:
+    """Create an index. Pass ``concurrently=True`` for online,
+    non-blocking index creation on PostgreSQL (``CREATE INDEX
+    CONCURRENTLY``) — the canonical zero-downtime pattern.
+
+    ``CONCURRENTLY`` cannot run inside a transaction, so the executor
+    refuses to apply the migration when the surrounding ``atomic()``
+    block would wrap it. The migration must be the only operation in
+    its file (the executor enforces this) so the per-migration atomic
+    can be skipped without affecting others. SQLite ignores the flag.
+    """
+
+    def __init__(self, model_name: str, index, *, concurrently: bool = False) -> None:
         self.model_name = model_name
         self.index = index
+        self.concurrently = bool(concurrently)
 
     def state_forwards(self, app_label: str, state):
         key = f"{app_label}.{self.model_name.lower()}"
         if key in state.models:
             state.models[key].setdefault("options", {}).setdefault("indexes", []).append(self.index)
 
+    def _create_sql(self, table: str, connection) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if hasattr(self.index, "create_sql"):
+            forward, _ = self.index.create_sql(table, vendor=vendor)
+        else:
+            # Legacy index objects without create_sql — best-effort.
+            unique = "UNIQUE " if getattr(self.index, "unique", False) else ""
+            cols = ", ".join(f'"{f}"' for f in self.index.fields)
+            idx_name = self.index.get_name(self.model_name)
+            forward = (
+                f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{table}" ({cols})'
+            )
+        if self.concurrently and vendor == "postgresql":
+            forward = forward.replace("CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
+            forward = forward.replace(
+                "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1
+            )
+            # ``CONCURRENTLY`` is incompatible with ``IF NOT EXISTS`` on
+            # older PG; on PG 9.5+ ``IF NOT EXISTS`` is fine. Keep both;
+            # if a target install rejects, the migration error names the
+            # offending statement and the user can drop the IF NOT EXISTS
+            # by hand. (Defensive choice: silent strip would mask a
+            # genuine "already exists" case.)
+        return forward
+
     def database_forwards(self, app_label: str, connection, from_state, to_state):
         model_state = to_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
-        table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
-        idx_name = self.index.get_name(self.model_name)
-        unique = "UNIQUE " if self.index.unique else ""
-        cols = ", ".join(f'"{f}"' for f in self.index.fields)
-        connection.execute_script(
-            f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}" ({cols})'
+        table = (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
         )
+        connection.execute_script(self._create_sql(table, connection))
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
         idx_name = self.index.get_name(self.model_name)
-        connection.execute_script(f'DROP INDEX IF EXISTS "{idx_name}"')
+        # DROP INDEX CONCURRENTLY mirrors the forward path on PG.
+        vendor = getattr(connection, "vendor", "sqlite")
+        if self.concurrently and vendor == "postgresql":
+            connection.execute_script(
+                f'DROP INDEX CONCURRENTLY IF EXISTS "{idx_name}"'
+            )
+        else:
+            connection.execute_script(f'DROP INDEX IF EXISTS "{idx_name}"')
 
     def describe(self) -> str:
-        return f"Add index {self.index!r} to {self.model_name}"
+        c = " CONCURRENTLY" if self.concurrently else ""
+        return f"Add index{c} {self.index!r} to {self.model_name}"
 
     def __repr__(self) -> str:
-        return f"AddIndex(model_name={self.model_name!r}, index={self.index!r})"
+        c = ", concurrently=True" if self.concurrently else ""
+        return f"AddIndex(model_name={self.model_name!r}, index={self.index!r}{c})"
 
 
 class RemoveIndex(Operation):
-    def __init__(self, model_name: str, index) -> None:
+    def __init__(self, model_name: str, index, *, concurrently: bool = False) -> None:
         self.model_name = model_name
         self.index = index
+        self.concurrently = bool(concurrently)
 
     def state_forwards(self, app_label: str, state):
         key = f"{app_label}.{self.model_name.lower()}"
@@ -282,23 +341,238 @@ class RemoveIndex(Operation):
 
     def database_forwards(self, app_label: str, connection, from_state, to_state):
         idx_name = self.index.get_name(self.model_name)
-        connection.execute_script(f'DROP INDEX IF EXISTS "{idx_name}"')
+        vendor = getattr(connection, "vendor", "sqlite")
+        if self.concurrently and vendor == "postgresql":
+            connection.execute_script(
+                f'DROP INDEX CONCURRENTLY IF EXISTS "{idx_name}"'
+            )
+        else:
+            connection.execute_script(f'DROP INDEX IF EXISTS "{idx_name}"')
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
-        model_state = from_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
-        table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
-        idx_name = self.index.get_name(self.model_name)
-        unique = "UNIQUE " if self.index.unique else ""
-        cols = ", ".join(f'"{f}"' for f in self.index.fields)
-        connection.execute_script(
-            f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}" ({cols})'
+        model_state = from_state.models.get(
+            f"{app_label}.{self.model_name.lower()}", {}
         )
+        table = (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+        if hasattr(self.index, "create_sql"):
+            forward, _ = self.index.create_sql(
+                table, vendor=getattr(connection, "vendor", "sqlite")
+            )
+        else:
+            unique = "UNIQUE " if getattr(self.index, "unique", False) else ""
+            cols = ", ".join(f'"{f}"' for f in self.index.fields)
+            idx_name = self.index.get_name(self.model_name)
+            forward = (
+                f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{table}" ({cols})'
+            )
+        connection.execute_script(forward)
 
     def describe(self) -> str:
         return f"Remove index {self.index!r} from {self.model_name}"
 
     def __repr__(self) -> str:
-        return f"RemoveIndex(model_name={self.model_name!r}, index={self.index!r})"
+        c = ", concurrently=True" if self.concurrently else ""
+        return (
+            f"RemoveIndex(model_name={self.model_name!r}, "
+            f"index={self.index!r}{c})"
+        )
+
+
+class AddConstraint(Operation):
+    """Add a :class:`~dorm.constraints.BaseConstraint` to a model.
+
+    Emitted by the autodetector when a new entry appears in
+    ``Meta.constraints``. The constraint's :meth:`constraint_sql`
+    decides the exact DDL (``ALTER TABLE ... ADD CONSTRAINT`` for plain
+    UNIQUE / CHECK; ``CREATE UNIQUE INDEX`` for partial unique
+    constraints and for SQLite's UNIQUE).
+    """
+
+    def __init__(self, model_name: str, constraint) -> None:
+        self.model_name = model_name
+        self.constraint = constraint
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.model_name.lower()}"
+        if key in state.models:
+            constraints = state.models[key].setdefault("options", {}).setdefault(
+                "constraints", []
+            )
+            constraints.append(self.constraint)
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        model_state = to_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
+        table = (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+        connection.execute_script(self.constraint.constraint_sql(table, connection))
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        model_state = from_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
+        table = (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+        connection.execute_script(self.constraint.remove_sql(table, connection))
+
+    def describe(self) -> str:
+        return f"Add constraint {self.constraint.describe()} to {self.model_name}"
+
+    def __repr__(self) -> str:
+        return (
+            f"AddConstraint(model_name={self.model_name!r}, "
+            f"constraint={self.constraint!r})"
+        )
+
+
+class RemoveConstraint(Operation):
+    """Inverse of :class:`AddConstraint` — drops a named constraint."""
+
+    def __init__(self, model_name: str, constraint) -> None:
+        self.model_name = model_name
+        self.constraint = constraint
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.model_name.lower()}"
+        if key in state.models:
+            constraints = state.models[key].get("options", {}).get("constraints", [])
+            state.models[key].setdefault("options", {})["constraints"] = [
+                c for c in constraints if getattr(c, "name", None) != self.constraint.name
+            ]
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        model_state = from_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
+        table = (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+        connection.execute_script(self.constraint.remove_sql(table, connection))
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        model_state = to_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
+        table = (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+        connection.execute_script(self.constraint.constraint_sql(table, connection))
+
+    def describe(self) -> str:
+        return f"Remove constraint {self.constraint.describe()} from {self.model_name}"
+
+    def __repr__(self) -> str:
+        return (
+            f"RemoveConstraint(model_name={self.model_name!r}, "
+            f"constraint={self.constraint!r})"
+        )
+
+
+class SetLockTimeout(Operation):
+    """Set ``lock_timeout`` for the duration of the migration, then
+    restore the previous value on the way out.
+
+    PostgreSQL only. ``ms`` is the maximum time (milliseconds) any DDL
+    in this migration will wait to acquire its lock before bailing out
+    with ``LockNotAvailable``. Pair with ``RunSQL("ALTER TABLE ...")``
+    when you need to add a NOT NULL or a FK on a hot table without
+    risking an indefinite wait — the migration fails fast and you can
+    retry off-peak.
+
+    On SQLite this is a no-op (SQLite serialises writers via the
+    file-level lock; there is no per-statement lock timeout).
+    """
+
+    reversible = True
+
+    def __init__(self, ms: int) -> None:
+        if not isinstance(ms, int) or ms < 0:
+            raise ValueError("SetLockTimeout(ms=...) must be a non-negative integer.")
+        self.ms = ms
+
+    def state_forwards(self, app_label: str, state):
+        # Schema is unchanged; the lock_timeout is purely runtime.
+        return None
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            connection.execute_script(f"SET lock_timeout = '{int(self.ms)}ms'")
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            connection.execute_script("RESET lock_timeout")
+
+    def describe(self) -> str:
+        return f"Set lock_timeout = {self.ms}ms"
+
+    def __repr__(self) -> str:
+        return f"SetLockTimeout(ms={self.ms!r})"
+
+
+class ValidateConstraint(Operation):
+    """Run ``ALTER TABLE ... VALIDATE CONSTRAINT`` on PostgreSQL.
+
+    Combine with ``RunSQL("ALTER TABLE ... ADD CONSTRAINT ... NOT VALID")``
+    to add foreign keys / CHECK constraints to a billion-row table
+    without an ``AccessExclusiveLock`` for the validation pass:
+
+    .. code-block:: python
+
+        operations = [
+            RunSQL(
+                "ALTER TABLE orders ADD CONSTRAINT fk_orders_user "
+                "FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID"
+            ),
+            ValidateConstraint(table="orders", name="fk_orders_user"),
+        ]
+
+    The first statement takes a short ``ShareRowExclusive`` lock; the
+    ``VALIDATE`` step takes only a ``ShareUpdateExclusive`` lock and
+    runs concurrently with reads and writes. Total downtime: zero.
+
+    SQLite has no separate validation step — this raises
+    ``NotImplementedError`` so the migration can't be applied silently
+    against the wrong backend.
+    """
+
+    reversible = False
+
+    def __init__(self, *, table: str, name: str) -> None:
+        from ..conf import _validate_identifier
+
+        _validate_identifier(table, kind="table")
+        _validate_identifier(name, kind="constraint name")
+        self.table = table
+        self.name = name
+
+    def state_forwards(self, app_label: str, state):
+        return None
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                "ValidateConstraint is PostgreSQL-only. SQLite validates "
+                "constraints at insert / update time and has no equivalent."
+            )
+        connection.execute_script(
+            f'ALTER TABLE "{self.table}" VALIDATE CONSTRAINT "{self.name}"'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        # Validation is one-way — there's no "unvalidate".
+        return None
+
+    def describe(self) -> str:
+        return f"Validate constraint {self.name} on {self.table}"
+
+    def __repr__(self) -> str:
+        return f"ValidateConstraint(table={self.table!r}, name={self.name!r})"
 
 
 class RunSQL(Operation):
@@ -325,6 +599,30 @@ class RunSQL(Operation):
 
 
 class RunPython(Operation):
+    """Run an arbitrary Python callable as a migration step.
+
+    Both *code* and *reverse_code* are called with
+    ``(app_label: str, registry: dict[str, type[Model]])``. The
+    registry is the live model registry, keyed by class name (and by
+    ``"app_label.ClassName"``) — use it to fetch the model classes
+    rather than importing them, so the migration keeps working after
+    a future model rename / move.
+
+    Pass :attr:`RunPython.noop` as ``reverse_code`` when the forward
+    step has no meaningful inverse (e.g. a one-shot data backfill that
+    tolerates being undone by simply leaving the rows in place).
+    """
+
+    @staticmethod
+    def noop(app_label: str, registry: dict) -> None:
+        """A reusable no-op callable safe to pass as ``code=`` or
+        ``reverse_code=``. Mirrors Django's ``migrations.RunPython.noop``
+        so users porting code don't need to redefine it. The signature
+        matches the contract :class:`RunPython` expects, so swapping it
+        in for an undo-step won't TypeError at apply time.
+        """
+        return None
+
     def __init__(self, code, reverse_code=None, hints=None):
         self.code = code
         self.reverse_code = reverse_code

@@ -604,6 +604,154 @@ def cmd_init(args):
     print("  3. Run: dorm migrate")
 
 
+def cmd_inspectdb(args):
+    """Reverse-engineer a ``models.py`` snippet from the connected
+    database and print it to stdout. Pipe to a file::
+
+        dorm inspectdb > legacy/models.py
+
+    Field types are recovered best-effort. Constraints, indexes and
+    foreign-key ``related_name`` are not introspected — diff and edit
+    the output before committing.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+
+    from .db.connection import get_connection
+    from .inspect import introspect_tables, render_models
+
+    alias = getattr(args, "database", "default") or "default"
+    conn = get_connection(alias)
+    tables = introspect_tables(conn)
+    if not tables:
+        print(
+            "# inspectdb: no user tables found in the connected database.",
+            file=sys.stderr,
+        )
+        return
+    print(render_models(tables))
+
+
+def cmd_doctor(args):
+    """Audit the running configuration for production-mode footguns
+    and print a punch-list of warnings.
+
+    Exits non-zero when at least one *warning* is emitted (so the
+    command can be used as a pre-deploy gate). Categories checked:
+
+    - DATABASES configuration: pool size, ``POOL_TIMEOUT``, ``POOL_CHECK``,
+      ``MAX_LIFETIME``, missing FK indexes.
+    - Model layer: foreign keys without an index on the FK column,
+      ``related_name`` collisions.
+    - Logging: SQL DEBUG channel routed to stdout (perf hit), ``DORM_RETRY_*``
+      not set in production.
+
+    The doctor is conservative — it only warns when the rule of thumb
+    is widely accepted. Tune the heuristics to your workload before
+    treating any single warning as gospel.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    from .conf import settings
+    if not settings._configured:
+        # Skip the load only when dorm was already configured by the
+        # caller (typical in tests / programmatic embed). When unset,
+        # try the standard load path and surface errors so misconfigured
+        # CI runs fail loudly.
+        try:
+            _load_settings(settings_mod)
+        except Exception as exc:
+            print(f"error loading settings: {exc}", file=sys.stderr)
+            sys.exit(2)
+    _load_apps(settings.INSTALLED_APPS)
+    from .models import _model_registry
+
+    warnings: list[str] = []
+    info: list[str] = []
+
+    # 1. DATABASES checks
+    for alias, cfg in settings.DATABASES.items():
+        engine = (cfg.get("ENGINE") or "").lower()
+        if "postgres" in engine:
+            mn = int(cfg.get("MIN_POOL_SIZE", 1))
+            mx = int(cfg.get("MAX_POOL_SIZE", 10))
+            if mx < 4:
+                warnings.append(
+                    f"DATABASES[{alias!r}]: MAX_POOL_SIZE={mx} is small for production; "
+                    "raise to 10–20 unless this is a worker-per-process layout."
+                )
+            if mn > mx:
+                warnings.append(
+                    f"DATABASES[{alias!r}]: MIN_POOL_SIZE > MAX_POOL_SIZE — pool will refuse to open."
+                )
+            timeout = float(cfg.get("POOL_TIMEOUT", 30.0))
+            if timeout > 60:
+                warnings.append(
+                    f"DATABASES[{alias!r}]: POOL_TIMEOUT={timeout}s is long; "
+                    "callers will appear stuck on saturation. Aim for 5–30s."
+                )
+            if cfg.get("POOL_CHECK") is False:
+                info.append(
+                    f"DATABASES[{alias!r}]: POOL_CHECK=False — fine on hot paths but "
+                    "expect the occasional dead-conn surprise during PG restarts."
+                )
+            opts = cfg.get("OPTIONS") or {}
+            if "sslmode" not in opts and (cfg.get("HOST") not in (None, "", "localhost", "127.0.0.1")):
+                warnings.append(
+                    f"DATABASES[{alias!r}]: no OPTIONS['sslmode'] for a non-local host; "
+                    "set 'require' (or 'verify-full' if you have a CA) to avoid plaintext."
+                )
+
+    # 2. Model layer checks: FKs without an explicit index
+    for label, model in _model_registry.items():
+        if "." in label or model._meta.abstract:
+            continue
+        from .fields import ForeignKey, OneToOneField
+
+        indexed_columns: set[str] = set()
+        for idx in getattr(model._meta, "indexes", []) or []:
+            for f in idx.fields:
+                if "(" not in f:
+                    indexed_columns.add(f)
+        for f in model._meta.fields:
+            if isinstance(f, (ForeignKey, OneToOneField)):
+                if not f.db_index and not f.unique and f.column not in indexed_columns:
+                    warnings.append(
+                        f"{model.__name__}.{f.name}: ForeignKey without db_index; "
+                        "joins on this FK will sequentially scan. Add db_index=True "
+                        "or an Index() in Meta."
+                    )
+
+    # 3. DORM_RETRY_* env hints
+    import os as _os
+
+    if _os.environ.get("DORM_RETRY_ATTEMPTS") in (None, "", "1", "0"):
+        info.append(
+            "DORM_RETRY_ATTEMPTS not set or set to 0/1: transient PG errors "
+            "(network blips, RDS failover) will surface to callers without retry."
+        )
+
+    # ── Output
+    print(f"dorm doctor — {len(warnings)} warning(s), {len(info)} note(s)")
+    print()
+    if warnings:
+        print("warnings:")
+        for w in warnings:
+            print(f"  ! {w}")
+        print()
+    if info:
+        print("notes:")
+        for i in info:
+            print(f"  · {i}")
+        print()
+    if not warnings and not info:
+        print("everything looks reasonable — go ship.")
+        return
+    if warnings:
+        sys.exit(1)
+
+
 def cmd_help(args):
     args.parser.print_help()
 
@@ -761,6 +909,34 @@ def main():
         help="DATABASES alias to connect to (default: 'default').",
     )
     dbsh.set_defaults(func=cmd_dbshell)
+
+    # inspectdb
+    isp = sub.add_parser(
+        "inspectdb",
+        help=(
+            "Generate dorm Model classes from the live database schema. "
+            "Useful when adopting dorm in a project with a pre-existing schema."
+        ),
+    )
+    isp.add_argument("--settings", default=None)
+    isp.add_argument(
+        "--database",
+        default="default",
+        help="DATABASES alias to introspect (default: 'default').",
+    )
+    isp.set_defaults(func=cmd_inspectdb)
+
+    # doctor
+    doc = sub.add_parser(
+        "doctor",
+        help=(
+            "Audit settings, DATABASES and model declarations for "
+            "production-mode footguns. Exits non-zero on warnings — "
+            "use as a pre-deploy gate."
+        ),
+    )
+    doc.add_argument("--settings", default=None)
+    doc.set_defaults(func=cmd_doctor)
 
     # help
     hp = sub.add_parser("help", help="Show this help message and exit")

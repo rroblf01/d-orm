@@ -288,3 +288,30 @@ Algunos puntos a tener en cuenta en despliegues de producción:
 - [ ] `pre_query` / `post_query` trazado a tu APM
 - [ ] Tests async con event loop session-scoped
 - [ ] Router de réplica definido si el tráfico supera una caja
+
+## Configuración por URL/DSN (2.1+)
+
+Las entradas de `DATABASES` aceptan ahora un string URL o un dict
+con clave `URL`. Útil para sacar la cadena de conexión directamente
+de `DATABASE_URL` sin escribir el cableado de
+``HOST/PORT/USER/PASSWORD``::
+
+    import os, dorm
+
+    dorm.configure(DATABASES={
+        "default": os.environ["DATABASE_URL"],
+        # O con overrides:
+        # "default": {"URL": os.environ["DATABASE_URL"], "MAX_POOL_SIZE": 30},
+    })
+
+Los parámetros conocidos del query string (`MAX_POOL_SIZE`,
+`POOL_TIMEOUT`, `POOL_CHECK`, `MAX_IDLE`, `MAX_LIFETIME`,
+`PREPARE_THRESHOLD`) se elevan como claves top-level de
+`DATABASES`. El resto cae en `OPTIONS`.
+
+## Puerta pre-despliegue: `dorm doctor` (2.1+)
+
+Ejecuta `dorm doctor` en CI para fallar builds cuya configuración
+tropiece con un footgun conocido de producción. Ejemplos que pilla:
+tamaño de pool pequeño, falta de `sslmode` en host PG remoto, FKs
+sin índice, retry de errores transitorios desactivado.

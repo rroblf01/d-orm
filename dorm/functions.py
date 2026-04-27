@@ -254,3 +254,407 @@ class Case:
 
     def __repr__(self) -> str:
         return f"Case({', '.join(repr(w) for w in self.whens)}, default={self.default!r})"
+
+
+# ── Extra scalar functions ────────────────────────────────────────────────────
+
+
+class Greatest(Func):
+    """``GREATEST(a, b, ...)`` — largest non-null argument.
+
+    Emits PostgreSQL's ``GREATEST(a, b, ...)`` when the connection is
+    PostgreSQL; on SQLite — which has no ``GREATEST`` but accepts a
+    multi-arg scalar ``MAX(a, b, ...)`` — falls back to ``MAX``.
+
+    NULL handling differs: PostgreSQL ignores NULLs, SQLite returns
+    NULL if any argument is NULL.
+    """
+
+    function = "GREATEST"
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        connection = kwargs.get("connection")
+        vendor = getattr(connection, "vendor", "postgresql") if connection else "postgresql"
+        fn = "GREATEST" if vendor == "postgresql" else "MAX"
+        parts: list[str] = []
+        params: list[Any] = []
+        for expr in self.expressions:
+            sql, p = _compile_expr(expr, table_alias)
+            parts.append(sql)
+            params.extend(p)
+        return f"{fn}({', '.join(parts)})", params
+
+
+class Least(Func):
+    """``LEAST(a, b, ...)`` — smallest non-null argument.
+
+    Mirrors :class:`Greatest`; emits ``LEAST`` on PostgreSQL and the
+    multi-arg ``MIN`` on SQLite.
+    """
+
+    function = "LEAST"
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        connection = kwargs.get("connection")
+        vendor = getattr(connection, "vendor", "postgresql") if connection else "postgresql"
+        fn = "LEAST" if vendor == "postgresql" else "MIN"
+        parts: list[str] = []
+        params: list[Any] = []
+        for expr in self.expressions:
+            sql, p = _compile_expr(expr, table_alias)
+            parts.append(sql)
+            params.extend(p)
+        return f"{fn}({', '.join(parts)})", params
+
+
+class Round(Func):
+    """``ROUND(expr [, places])`` — round half-to-even on PostgreSQL,
+    half-away-from-zero on SQLite. Pass ``places`` as a second argument."""
+
+    function = "ROUND"
+
+
+class Trunc(Func):
+    """Date / time truncation. *unit* is one of ``"year"``, ``"month"``,
+    ``"day"``, ``"hour"``, ``"minute"``, ``"second"``, ``"week"``::
+
+        # Group orders by month
+        Order.objects.annotate(month=Trunc("created_at", "month"))
+
+    Compiles to ``DATE_TRUNC('unit', expr)`` on PostgreSQL. SQLite has
+    no native equivalent; this raises ``ImproperlyConfigured`` if the
+    unit is unknown but emits the same SQL on both backends — SQLite
+    will reject it at execute time. For SQLite-portable truncation use
+    a vendor-specific raw expression.
+    """
+
+    function = "DATE_TRUNC"
+
+    _UNITS = frozenset(
+        {"year", "quarter", "month", "week", "day", "hour", "minute", "second"}
+    )
+
+    def __init__(self, expression: Any, unit: str, output_field: Any = None) -> None:
+        if unit not in self._UNITS:
+            raise ImproperlyConfigured(
+                f"Trunc(unit=...) must be one of {sorted(self._UNITS)}, got {unit!r}."
+            )
+        self.unit = unit
+        super().__init__(expression, output_field=output_field)
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        sql, params = _compile_expr(self.expressions[0], table_alias)
+        return f"DATE_TRUNC('{self.unit}', {sql})", params
+
+
+class Extract(Func):
+    """``EXTRACT(unit FROM expr)`` — pull a component out of a date/time.
+
+    *unit* is one of ``"year"``, ``"month"``, ``"day"``, ``"hour"``,
+    ``"minute"``, ``"second"``, ``"dow"`` (day of week), ``"doy"``
+    (day of year), ``"week"``, ``"epoch"``. Compiles to
+    ``EXTRACT(UNIT FROM expr)`` — supported by PostgreSQL natively.
+    SQLite does not support ``EXTRACT``; use ``strftime`` directly via
+    a custom :class:`Func` for those cases.
+    """
+
+    function = "EXTRACT"
+
+    _UNITS = frozenset(
+        {"year", "month", "day", "hour", "minute", "second",
+         "dow", "doy", "week", "epoch", "quarter"}
+    )
+
+    def __init__(self, expression: Any, unit: str, output_field: Any = None) -> None:
+        if unit not in self._UNITS:
+            raise ImproperlyConfigured(
+                f"Extract(unit=...) must be one of {sorted(self._UNITS)}, got {unit!r}."
+            )
+        self.unit = unit
+        super().__init__(expression, output_field=output_field)
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        sql, params = _compile_expr(self.expressions[0], table_alias)
+        return f"EXTRACT({self.unit.upper()} FROM {sql})", params
+
+
+class Substr(Func):
+    """``SUBSTR(expr, pos, length)`` — 1-indexed (matches both backends)."""
+
+    function = "SUBSTR"
+
+
+class Replace(Func):
+    """``REPLACE(expr, old, new)`` — substring replacement."""
+
+    function = "REPLACE"
+
+
+class StrIndex(Func):
+    """1-based position of *needle* within *haystack*; returns ``0`` when
+    not found::
+
+        Article.objects.annotate(
+            tag_pos=StrIndex(F("title"), Value("[done]"))
+        ).filter(tag_pos__gt=0)
+
+    Vendor-aware: emits ``STRPOS(haystack, needle)`` on PostgreSQL and
+    ``INSTR(haystack, needle)`` on SQLite. Both return 1-based offsets
+    with 0 for "not found".
+    """
+
+    function = "STRPOS"
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        connection = kwargs.get("connection")
+        vendor = getattr(connection, "vendor", "postgresql") if connection else "postgresql"
+        fn = "STRPOS" if vendor == "postgresql" else "INSTR"
+        parts: list[str] = []
+        params: list[Any] = []
+        for expr in self.expressions:
+            sql, p = _compile_expr(expr, table_alias)
+            parts.append(sql)
+            params.extend(p)
+        return f"{fn}({', '.join(parts)})", params
+
+
+# ── Window functions ──────────────────────────────────────────────────────────
+
+
+class WindowExpression:
+    """Base class for window-function expressions used as the first
+    argument to :class:`Window`. ``frame_required`` flags whether the
+    function needs an ``ORDER BY`` clause to be well-defined (e.g.
+    ranking functions); :class:`Window` validates this at queryset
+    build time.
+    """
+
+    function: str = ""
+    frame_required: bool = False
+
+    def __init__(self, *expressions: Any) -> None:
+        self.expressions = expressions
+
+    def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:
+        parts: list[str] = []
+        params: list[Any] = []
+        for expr in self.expressions:
+            sql, p = _compile_expr(expr, table_alias)
+            parts.append(sql)
+            params.extend(p)
+        return f"{self.function}({', '.join(parts)})", params
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"{', '.join(repr(e) for e in self.expressions)})"
+        )
+
+
+class RowNumber(WindowExpression):
+    """``ROW_NUMBER() OVER (...)`` — unique sequential integer per partition."""
+
+    function = "ROW_NUMBER"
+    frame_required = True
+
+
+class Rank(WindowExpression):
+    """``RANK() OVER (...)`` — ties share a rank; gaps after ties."""
+
+    function = "RANK"
+    frame_required = True
+
+
+class DenseRank(WindowExpression):
+    """``DENSE_RANK() OVER (...)`` — ties share a rank; no gaps."""
+
+    function = "DENSE_RANK"
+    frame_required = True
+
+
+class NTile(WindowExpression):
+    """``NTILE(buckets) OVER (...)`` — equal-size buckets across the
+    partition (quartiles → ``NTile(4)``, deciles → ``NTile(10)``)."""
+
+    function = "NTILE"
+    frame_required = True
+
+    def __init__(self, buckets: int) -> None:
+        if not isinstance(buckets, int) or buckets <= 0:
+            raise ValueError("NTile(buckets) requires a positive integer.")
+        super().__init__(Value(buckets))
+
+
+class Lag(WindowExpression):
+    """``LAG(expr [, offset [, default]]) OVER (...)`` — value from the
+    *previous* row in the partition. Useful for delta calculations."""
+
+    function = "LAG"
+    frame_required = True
+
+    def __init__(self, expression: Any, offset: int = 1, default: Any = None) -> None:
+        args: list[Any] = [expression, Value(offset)]
+        if default is not None:
+            args.append(Value(default))
+        super().__init__(*args)
+
+
+class Lead(WindowExpression):
+    """``LEAD(expr [, offset [, default]]) OVER (...)`` — value from a
+    *later* row in the partition."""
+
+    function = "LEAD"
+    frame_required = True
+
+    def __init__(self, expression: Any, offset: int = 1, default: Any = None) -> None:
+        args: list[Any] = [expression, Value(offset)]
+        if default is not None:
+            args.append(Value(default))
+        super().__init__(*args)
+
+
+class FirstValue(WindowExpression):
+    """``FIRST_VALUE(expr) OVER (...)`` — value at the first row of the
+    window frame."""
+
+    function = "FIRST_VALUE"
+    frame_required = True
+
+
+class LastValue(WindowExpression):
+    """``LAST_VALUE(expr) OVER (...)`` — value at the last row of the
+    window frame.
+
+    Note: the default frame on PostgreSQL is ``RANGE BETWEEN UNBOUNDED
+    PRECEDING AND CURRENT ROW``, so ``LAST_VALUE`` returns the *current*
+    row by default. Pass an explicit ``frame=`` to :class:`Window`
+    (e.g. ``"ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"``)
+    when you mean "the actual last value in the partition".
+    """
+
+    function = "LAST_VALUE"
+    frame_required = True
+
+
+class Window:
+    """Wrap a :class:`WindowExpression` (or aggregate / scalar function)
+    as a SQL window: ``<expr>() OVER (PARTITION BY ... ORDER BY ...)``.
+
+    Example — running balance per account::
+
+        Transaction.objects.annotate(
+            running_balance=Window(
+                Sum("amount"),
+                partition_by=["account_id"],
+                order_by="date",
+            )
+        )
+
+    Args:
+        expression: a :class:`WindowExpression` (``RowNumber``, ``Lag``,
+            ...), an aggregate (``Sum``, ``Avg``, ...), or any
+            :class:`Func` that produces a value per row.
+        partition_by: field names that define the partition. Empty
+            means "the whole result set is one partition".
+        order_by: a single field name, an ``F``/``Value`` expression,
+            or a list. Prefix with ``-`` to sort descending. Required
+            for ranking functions; the constructor raises
+            :class:`ImproperlyConfigured` if you pass ``RowNumber``,
+            ``Rank``, ``DenseRank``, ``Lag``, ``Lead`` etc. without
+            ``order_by=`` because the ranking would be undefined.
+        frame: optional explicit frame clause appended after
+            ``ORDER BY`` (e.g. ``"ROWS BETWEEN UNBOUNDED PRECEDING AND
+            CURRENT ROW"``). Don't pass a frame to ranking functions —
+            it has no effect and confuses readers.
+    """
+
+    def __init__(
+        self,
+        expression: Any,
+        *,
+        partition_by: list[str] | tuple[str, ...] | None = None,
+        order_by: str | list[Any] | tuple[Any, ...] | None = None,
+        frame: str | None = None,
+        output_field: Any = None,
+    ) -> None:
+        self.expression = expression
+        self.partition_by = list(partition_by) if partition_by else []
+        if order_by is None:
+            self.order_by: list[Any] = []
+        elif isinstance(order_by, str):
+            self.order_by = [order_by]
+        else:
+            self.order_by = list(order_by)
+        self.frame = frame
+        self.output_field = output_field
+
+        # Ranking functions are ill-defined without ORDER BY — most
+        # databases accept the SQL but return implementation-defined
+        # results, which is the worst kind of bug for a reporting query
+        # because it ships and silently corrupts dashboards. Raise at
+        # queryset build time so the mistake never reaches production.
+        if (
+            isinstance(expression, WindowExpression)
+            and expression.frame_required
+            and not self.order_by
+        ):
+            raise ImproperlyConfigured(
+                f"{type(expression).__name__} requires an explicit "
+                "order_by= on its Window — ranking is undefined "
+                "without one."
+            )
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        from .query import _validate_identifier  # noqa: PLC0415
+
+        # Inner expression (Sum / RowNumber / scalar Func)
+        if hasattr(self.expression, "as_sql"):
+            try:
+                # Aggregate.as_sql signature accepts ``model=`` kwarg.
+                expr_sql, expr_params = self.expression.as_sql(
+                    table_alias, model=kwargs.get("model")
+                )
+            except TypeError:
+                expr_sql, expr_params = self.expression.as_sql(table_alias)
+        else:
+            expr_sql, expr_params = _compile_expr(self.expression, table_alias)
+
+        clauses: list[str] = []
+
+        if self.partition_by:
+            cols: list[str] = []
+            for f in self.partition_by:
+                _validate_identifier(f)
+                if table_alias:
+                    cols.append(f'"{table_alias}"."{f}"')
+                else:
+                    cols.append(f'"{f}"')
+            clauses.append("PARTITION BY " + ", ".join(cols))
+
+        if self.order_by:
+            order_parts: list[str] = []
+            for entry in self.order_by:
+                if isinstance(entry, str):
+                    desc = entry.startswith("-")
+                    fname = entry[1:] if desc else entry
+                    _validate_identifier(fname)
+                    col = (
+                        f'"{table_alias}"."{fname}"' if table_alias else f'"{fname}"'
+                    )
+                    order_parts.append(f"{col} {'DESC' if desc else 'ASC'}")
+                else:
+                    sql, _ = _compile_expr(entry, table_alias)
+                    order_parts.append(sql)
+            clauses.append("ORDER BY " + ", ".join(order_parts))
+
+        if self.frame:
+            clauses.append(self.frame)
+
+        over = " ".join(clauses)
+        return f"{expr_sql} OVER ({over})", expr_params
+
+    def __repr__(self) -> str:
+        return (
+            f"Window({self.expression!r}, partition_by={self.partition_by!r}, "
+            f"order_by={self.order_by!r}, frame={self.frame!r})"
+        )
