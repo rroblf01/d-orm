@@ -193,12 +193,17 @@ Useful loggers:
 | Logger | What it emits |
 |---|---|
 | `dorm.db.pool` | INFO on pool open/close, WARNING on exhaustion |
+| `dorm.db.lifecycle.postgresql` | INFO on PG pool open/close (size/timeout); DB name + host at DEBUG only, so per-tenant metadata never reaches an INFO sink unless you explicitly enable it |
 | `dorm.migrations` | INFO per applied migration |
 | `dorm.queries` | DEBUG per executed SQL (off by default) |
+| `dorm.signals` | ERROR per receiver exception (with full traceback) — wire this to Sentry / your alert pipeline so a broken `post_save` hook is observable |
+| `dorm.conf` | INFO when a `settings.py` is autodiscovered (audit trail for which file shaped the config) |
 
 ```python
 import logging
 logging.getLogger("dorm.queries").setLevel(logging.DEBUG)
+# Route signal failures to your alerting handler:
+logging.getLogger("dorm.signals").addHandler(your_alert_handler)
 ```
 
 ## Checklist

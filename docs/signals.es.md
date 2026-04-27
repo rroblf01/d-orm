@@ -197,20 +197,51 @@ dorm en sí **no** se suscribe a sus propias señales — existen
 - Desactivar una señal (p.ej. `disconnect`-eando todos los
   receivers) nunca rompe operaciones del ORM.
 - Un handler que lance no bloquea un save / delete / query — la
-  excepción se traga (mira más abajo).
+  excepción se loggea a `ERROR` en el logger `dorm.signals`, pero
+  el código que llama continúa (mira más abajo).
+
+## Manejo de fallos en receivers
+
+Por defecto, una excepción lanzada por un receiver se loggea vía el
+logger `dorm.signals` a nivel `ERROR` (con traceback completo) y
+luego se suprime, así un único handler roto no puede tumbar un
+camino de save/delete. Para conectarlo a tu stack de observabilidad:
+
+```python
+import logging
+
+# Manda los fallos de señales de dorm a Sentry / DataDog / tu handler
+logging.getLogger("dorm.signals").addHandler(tu_handler_alerta)
+```
+
+Si prefieres que la excepción propague — útil en tests, o para
+señales personalizadas donde un handler fallido debería fallar la
+operación — construye la señal con `raise_exceptions=True`:
+
+```python
+from dorm.signals import Signal
+
+evento_estricto = Signal(raise_exceptions=True)
+evento_estricto.connect(handler)
+evento_estricto.send(sender=obj)   # cualquier error en un handler se relanza
+```
+
+Las señales internas (`pre_save`, `post_save`, `pre_delete`,
+`post_delete`, `pre_query`, `post_query`) mantienen el
+comportamiento legacy "loggear y suprimir" para preservar
+compatibilidad.
 
 ## Pitfalls
 
-- **Las excepciones de los handlers se tragan en silencio en
-  `Signal.send()`.** Es deliberado — un listener `post_save` con
-  bug no debería tumbar un request. Pero significa que *tú* eres
-  responsable de loggear los fallos dentro del handler. Envuelve
-  el cuerpo en `try` / `except` y loggea a tu stack de
-  observabilidad.
+- **Las excepciones de los handlers se loggean, no se tragan en
+  silencio.** Un listener `post_save` con bug ya no desaparece en
+  el vacío; queda registrado en el logger `dorm.signals` para que
+  puedas enrutarlo a Sentry / tu alerta. Si quieres propagación
+  estricta, usa una `Signal(raise_exceptions=True)` (ver arriba).
 - **`pre_save` no puede abortar el save.** Lanzar dentro de
-  `pre_save` se traga; el INSERT/UPDATE igual corre. Si necesitas
-  vetar una operación, hazlo en `Model.clean()` (lo invoca
-  `full_clean()`) o antes de llamar a `save()`.
+  `pre_save` se loggea pero el INSERT/UPDATE igual corre. Si
+  necesitas vetar una operación, hazlo en `Model.clean()` (lo
+  invoca `full_clean()`) o antes de llamar a `save()`.
 - **Recursión.** Un handler `post_save` que llame a
   `instance.save()` re-dispara `pre_save` / `post_save` y puede
   buclear infinitamente. Usa `update_fields` para limitar el nuevo

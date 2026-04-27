@@ -6,6 +6,52 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **`Cast(output_field=...)` validated against an allowlist.** Previously
+  `output_field` was spliced directly into `CAST(expr AS {output_field})`,
+  so an attacker-controlled string could inject SQL. Only the documented
+  base types (`INTEGER`, `TEXT`, `VARCHAR(N)`, `NUMERIC(N, M)`, …) are
+  accepted now; anything else raises `ImproperlyConfigured` at queryset
+  build time. **Behaviour change:** misspelled type names that happened to
+  work before (e.g. `VARCHA`) now fail loudly.
+- **`Signal.send()` no longer silently swallows receiver exceptions.**
+  Failures are logged on the `dorm.signals` logger at `ERROR` (with
+  traceback) so a broken `post_save` hook is observable. Pass
+  `Signal(raise_exceptions=True)` to re-raise instead. Built-in signals
+  keep the legacy log-and-suppress semantics for compatibility.
+- **CLI / settings paths validated as Python dotted paths.**
+  `--settings`, the `DORM_SETTINGS` env var and CLI app labels reject
+  filesystem-shaped values (`../etc/passwd`, `foo/bar`, etc.) before
+  they reach `importlib`. `_find_migrations_dir()` now uses
+  `Path.cwd().joinpath(*app.split("."))` instead of string concatenation.
+- **`_resolve_column()` narrowed to `FieldDoesNotExist`.** It used to
+  catch `Exception`, masking bugs in custom field implementations and
+  silently returning a stale column reference. Other errors now bubble
+  up; the literal-fallback branch still re-validates the identifier.
+- **PRAGMA `journal_mode` selected from a hard-coded SQL mapping.** Even
+  if a future change weakened `_validate_journal_mode`, the SQL we
+  execute can only ever be one of the six literals in
+  `_JOURNAL_MODE_SQL`. Defence-in-depth, not a behaviour change.
+- **`RawQuerySet` placeholder-arity check.** Construction fails fast
+  when the count of `%s` / `$N` placeholders disagrees with
+  `len(params)` — catches the "I built it with f-strings by mistake"
+  pattern before SQL ever leaves the process.
+
+### Changed
+- **PostgreSQL pool: per-tenant DB / host names logged at DEBUG.** Open
+  / close events still emit at INFO so ops keeps boot-time visibility,
+  but metadata that could leak tenant identity now requires DEBUG to
+  surface.
+- **SQLite streaming cursors closed on early break.** `execute_streaming`
+  and its async counterpart wrap iteration in `try / finally` so a
+  caller that stops iterating early or raises mid-loop no longer leaks
+  cursor state.
+- **Auto-discovery distinguishes "missing app" from "broken import".**
+  `dorm.conf` re-raises `ModuleNotFoundError` when the missing module
+  isn't the app itself (i.e. the app's `models.py` has a real
+  dependency error), and re-raises any `SyntaxError` it hits — both
+  used to be swallowed.
+
 ## [2.0.1] - 2026-04-26
 
 ### Performance

@@ -6,9 +6,12 @@ import os
 import sys
 from pathlib import Path
 
+from .conf import _validate_dotted_path
+
 
 def _load_settings(settings_module: str):
     """Import a Python settings module and configure dorm."""
+    _validate_dotted_path(settings_module, kind="settings module")
     module = importlib.import_module(settings_module)
     # Add both the directory containing settings.py *and* its parent to
     # sys.path so apps are importable regardless of layout:
@@ -73,13 +76,20 @@ def _load_apps(installed_apps: list):
 
 
 def _find_migrations_dir(app_module: str) -> Path:
+    # Reject anything that isn't a dotted Python path before falling back to
+    # ``Path.cwd() / app_module``. Without this check, ``app_module="../etc"``
+    # would resolve outside the project root, and ``app_module="foo/bar"``
+    # would break path semantics on Windows.
+    _validate_dotted_path(app_module, kind="app label")
     try:
         mod = importlib.import_module(app_module)
         if mod.__file__ is None:
             raise TypeError
         base = Path(mod.__file__).parent
     except (ImportError, TypeError):
-        base = Path.cwd() / app_module
+        # Translate dots to OS separators so ``my_proj.users`` maps to the
+        # nested directory layout users expect.
+        base = Path.cwd().joinpath(*app_module.split("."))
     return base / "migrations"
 
 

@@ -369,6 +369,8 @@ class SQLQuery:
         return sql, where_params
 
     def _resolve_column(self, field_parts: list[str]) -> str:
+        from .exceptions import FieldDoesNotExist
+
         model = self.model
         current_alias = model._meta.db_table
         parts = list(field_parts)
@@ -377,9 +379,13 @@ class SQLQuery:
             parts[0] = model._meta.pk.column
         while len(parts) > 1:
             fname = parts.pop(0)
+            # Catch only "field not declared on this model" — anything else
+            # (broken descriptors, runtime AttributeError in custom fields,
+            # etc.) should propagate so users see the real bug instead of
+            # silently getting a stale column reference.
             try:
                 field = model._meta.get_field(fname)
-            except Exception:
+            except FieldDoesNotExist:
                 break
             if hasattr(field, "remote_field_to"):
                 rel_model = field._resolve_related_model()
@@ -400,7 +406,9 @@ class SQLQuery:
         try:
             field = model._meta.get_field(fname)
             col_name = field.column
-        except Exception:
+        except FieldDoesNotExist:
+            # Falling back to a literal column name — re-validate so a
+            # user-supplied raw identifier can never reach the SQL.
             _validate_identifier(fname)
             col_name = fname
 

@@ -9,16 +9,30 @@ from ...exceptions import ImproperlyConfigured
 from ..utils import ASYNC_ATOMIC_STATE, log_query, normalize_db_exception
 
 
-# SQLite's PRAGMA syntax doesn't accept bound parameters, so the value goes
-# straight into SQL via f-string. To prevent injection from a misconfigured
-# settings.py (or one populated from env vars), accept only the documented
-# values for `journal_mode`. See https://sqlite.org/pragma.html#pragma_journal_mode
-_VALID_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+# SQLite's PRAGMA syntax doesn't accept bound parameters, so the value has
+# to be spliced into SQL. We guard against injection from a misconfigured
+# settings.py (or one populated from env vars) by mapping each documented
+# journal_mode to a hard-coded SQL literal: ``_validate_journal_mode`` only
+# ever returns a key from this table, so the f-string at the call site can
+# never contain attacker-controlled bytes — even if a future change to the
+# regex below loosens validation. See
+# https://sqlite.org/pragma.html#pragma_journal_mode
+_JOURNAL_MODE_SQL: dict[str, str] = {
+    "DELETE": "PRAGMA journal_mode = DELETE",
+    "TRUNCATE": "PRAGMA journal_mode = TRUNCATE",
+    "PERSIST": "PRAGMA journal_mode = PERSIST",
+    "MEMORY": "PRAGMA journal_mode = MEMORY",
+    "WAL": "PRAGMA journal_mode = WAL",
+    "OFF": "PRAGMA journal_mode = OFF",
+}
+_VALID_JOURNAL_MODES = frozenset(_JOURNAL_MODE_SQL)
 
 
 def _validate_journal_mode(value: str) -> str:
     """Return *value* uppercased if it's a recognised SQLite journal mode,
-    otherwise raise ``ImproperlyConfigured``."""
+    otherwise raise ``ImproperlyConfigured``. The returned string is
+    guaranteed to be a key in :data:`_JOURNAL_MODE_SQL`, so callers should
+    look up the SQL there rather than building it themselves."""
     if not isinstance(value, str):
         raise ImproperlyConfigured(
             f"DATABASES['default']['OPTIONS']['journal_mode'] must be a string, "
@@ -49,7 +63,10 @@ class SQLiteDatabaseWrapper:
         journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
         if journal_mode:
             mode = _validate_journal_mode(journal_mode)
-            conn.execute(f"PRAGMA journal_mode = {mode}")
+            # SQL is selected from a hard-coded mapping, not concatenated
+            # from ``mode``, so even a future change that weakens the
+            # validator can't reach this execute() with attacker bytes.
+            conn.execute(_JOURNAL_MODE_SQL[mode])
         if self._autocommit:
             conn.isolation_level = None
         return conn
@@ -187,6 +204,10 @@ class SQLiteDatabaseWrapper:
         SQLite's default cursor already streams from disk in arraysize
         chunks, so we just expose its iterator. ``chunk_size`` tunes
         ``cursor.arraysize``.
+
+        The cursor is closed in a ``finally`` block so a caller that breaks
+        out of the loop early (or hits an exception while iterating) doesn't
+        leave a half-consumed result set holding read locks.
         """
         conn = self.get_connection()
         with log_query("sqlite", sql, params):
@@ -196,8 +217,14 @@ class SQLiteDatabaseWrapper:
                 normalize_db_exception(exc)
                 raise
             cursor.arraysize = chunk_size
-        for row in cursor:
-            yield row
+        try:
+            for row in cursor:
+                yield row
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
     def table_exists(self, table_name: str) -> bool:
         rows = self.execute(
@@ -294,7 +321,7 @@ class SQLiteAsyncDatabaseWrapper:
         journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
         if journal_mode:
             mode = _validate_journal_mode(journal_mode)
-            await conn.execute(f"PRAGMA journal_mode = {mode}")
+            await conn.execute(_JOURNAL_MODE_SQL[mode])
         return conn
 
     async def _get_conn(self):
@@ -437,7 +464,10 @@ class SQLiteAsyncDatabaseWrapper:
             # here would just be a no-op round-trip.
 
     async def execute_streaming(self, sql: str, params=None, chunk_size: int = 1000):
-        """Async equivalent of :meth:`SQLiteDatabaseWrapper.execute_streaming`."""
+        """Async equivalent of :meth:`SQLiteDatabaseWrapper.execute_streaming`.
+
+        See the sync version's note about closing the cursor on early exit;
+        the same guarantee applies here via the ``finally`` block."""
         async with self._operation_conn() as conn:
             with log_query("sqlite", sql, params):
                 try:
@@ -446,8 +476,14 @@ class SQLiteAsyncDatabaseWrapper:
                     normalize_db_exception(exc)
                     raise
             cursor.arraysize = chunk_size
-            async for row in cursor:
-                yield row
+            try:
+                async for row in cursor:
+                    yield row
+            finally:
+                try:
+                    await cursor.close()
+                except Exception:
+                    pass
 
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(

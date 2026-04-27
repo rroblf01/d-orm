@@ -15,8 +15,10 @@ from ..utils import (
     with_transient_retry,
 )
 
-# Lifecycle (pool open/close, autocommit toggle, etc.) at INFO so ops can
-# trace boot / shutdown without DEBUG-level per-query noise.
+# Lifecycle (pool open/close, autocommit toggle, etc.). Connection metadata
+# (db name, host) is emitted at DEBUG so an INFO-level log routed to a
+# shared sink doesn't leak per-tenant database names. Open/close events
+# themselves stay at INFO so ops can still spot boot/shutdown.
 _lifecycle = logging.getLogger("dorm.db.lifecycle.postgresql")
 
 @functools.lru_cache(maxsize=4096)
@@ -143,6 +145,13 @@ class PostgreSQLDatabaseWrapper:
         return getattr(self._local, "atomic_depth", 0)
 
     def _get_pool(self):
+        # Double-checked locking: the unsynchronised fast-path read is safe
+        # under CPython because attribute writes are atomic with respect to
+        # the GIL — a thread either sees ``None`` or the fully-constructed
+        # pool, never a half-built object. The lock-protected slow path
+        # ensures only one thread builds the pool. Free-threaded / no-GIL
+        # builds (PEP 703) would need a memory barrier here; revisit when
+        # we drop GIL-only support.
         if self._pool is not None:
             return self._pool
         with self._pool_lock:
@@ -174,13 +183,18 @@ class PostgreSQLDatabaseWrapper:
                     **pool_kwargs,
                 )
                 _lifecycle.info(
-                    "sync pool opened: db=%s host=%s min=%d max=%d timeout=%.1fs check=%s",
-                    self._dsn.get("dbname"),
-                    self._dsn.get("host"),
+                    "sync pool opened: min=%d max=%d timeout=%.1fs check=%s",
                     self._min_size,
                     self._max_size,
                     self._pool_timeout,
                     self._pool_check,
+                )
+                # Per-tenant identifying metadata only at DEBUG so a default
+                # INFO-level deployment doesn't leak it.
+                _lifecycle.debug(
+                    "sync pool target: db=%s host=%s",
+                    self._dsn.get("dbname"),
+                    self._dsn.get("host"),
                 )
         return self._pool
 
@@ -430,7 +444,8 @@ class PostgreSQLDatabaseWrapper:
         if self._pool is not None:
             self._pool.close()
             self._pool = None
-            _lifecycle.info("sync pool closed: db=%s", self._dsn.get("dbname"))
+            _lifecycle.info("sync pool closed")
+            _lifecycle.debug("sync pool closed: db=%s", self._dsn.get("dbname"))
 
 
 class PostgreSQLAsyncDatabaseWrapper:
@@ -501,13 +516,16 @@ class PostgreSQLAsyncDatabaseWrapper:
                 self._pool = pool
                 self._loop = current_loop
                 _lifecycle.info(
-                    "async pool opened: db=%s host=%s min=%d max=%d timeout=%.1fs check=%s",
-                    self._dsn.get("dbname"),
-                    self._dsn.get("host"),
+                    "async pool opened: min=%d max=%d timeout=%.1fs check=%s",
                     self._min_size,
                     self._max_size,
                     self._pool_timeout,
                     self._pool_check,
+                )
+                _lifecycle.debug(
+                    "async pool target: db=%s host=%s",
+                    self._dsn.get("dbname"),
+                    self._dsn.get("host"),
                 )
         return self._pool
 
@@ -737,4 +755,5 @@ class PostgreSQLAsyncDatabaseWrapper:
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
-            _lifecycle.info("async pool closed: db=%s", self._dsn.get("dbname"))
+            _lifecycle.info("async pool closed")
+            _lifecycle.debug("async pool closed: db=%s", self._dsn.get("dbname"))

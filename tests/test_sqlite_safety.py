@@ -212,3 +212,93 @@ def test_journal_mode_error_mentions_setting_path():
     # The validator mentions either the setting key or the journal_mode name
     # so a beginner can grep their config.
     assert "journal_mode" in msg or "string" in msg
+
+
+# ── PRAGMA journal_mode mapping (defence-in-depth) ───────────────────────────
+
+
+def test_journal_mode_sql_mapping_only_holds_static_strings():
+    """The SQL we run for each journal_mode is a hard-coded string. If
+    someone refactors and starts splicing the validator's return value
+    back into a string, this test catches it: every value must be one of
+    the literal entries in the mapping table."""
+    from dorm.db.backends.sqlite import _JOURNAL_MODE_SQL, _VALID_JOURNAL_MODES
+
+    # Both views must agree on the canonical key set so a future addition
+    # can't update only one of them.
+    assert set(_JOURNAL_MODE_SQL) == set(_VALID_JOURNAL_MODES)
+    # Each value is a complete PRAGMA statement, not a fragment that gets
+    # concatenated — so even if the validator returned attacker bytes,
+    # they wouldn't reach .execute().
+    for mode, sql in _JOURNAL_MODE_SQL.items():
+        assert sql == f"PRAGMA journal_mode = {mode}"
+        # No interpolation markers slipped in.
+        assert "{" not in sql and "%" not in sql
+
+
+# ── execute_streaming closes the cursor on early exit ────────────────────────
+
+
+def test_sync_streaming_cursor_closed_on_break():
+    """Pre-fix bug: breaking out of execute_streaming() left the cursor
+    open (still holding read-side state). With the ``finally`` block, the
+    cursor is closed even when the caller stops iterating early."""
+    if not _is_sqlite():
+        pytest.skip("SQLite-only behaviour")
+    from dorm.db.connection import get_connection
+
+    conn = get_connection()
+    conn.execute_script('DROP TABLE IF EXISTS "stream_close"')
+    conn.execute_script(
+        'CREATE TABLE "stream_close" (id INTEGER PRIMARY KEY)'
+    )
+    try:
+        for i in range(20):
+            conn.execute('INSERT INTO "stream_close" (id) VALUES (?)', [i])
+
+        gen = conn.execute_streaming('SELECT id FROM "stream_close"')
+        first = next(iter(gen))
+        # Close the generator early — the finally block must run and not
+        # raise. Before the fix, this still "worked" but leaked cursor state.
+        gen.close()
+        assert first[0] == 0
+
+        # Sanity: a fresh streaming call after the early exit still works,
+        # i.e. we didn't leave the connection in a wedged state.
+        rows = list(conn.execute_streaming('SELECT id FROM "stream_close" LIMIT 3'))
+        assert [r[0] for r in rows] == [0, 1, 2]
+    finally:
+        conn.execute_script('DROP TABLE IF EXISTS "stream_close"')
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_cursor_closed_on_break():
+    """Async counterpart of the sync test above."""
+    if not _is_sqlite():
+        pytest.skip("SQLite-only behaviour")
+    from dorm.db.connection import get_async_connection
+
+    conn = get_async_connection()
+    await conn.execute_script('DROP TABLE IF EXISTS "stream_close_a"')
+    await conn.execute_script(
+        'CREATE TABLE "stream_close_a" (id INTEGER PRIMARY KEY)'
+    )
+    try:
+        for i in range(20):
+            await conn.execute('INSERT INTO "stream_close_a" (id) VALUES (?)', [i])
+
+        gen = conn.execute_streaming('SELECT id FROM "stream_close_a"')
+        async for row in gen:
+            assert row[0] == 0
+            break  # finally must run on early exit
+        await gen.aclose()
+
+        # Subsequent streaming call still succeeds.
+        rows = []
+        async for row in conn.execute_streaming(
+            'SELECT id FROM "stream_close_a" LIMIT 3'
+        ):
+            rows.append(row[0])
+        assert rows == [0, 1, 2]
+    finally:
+        await conn.execute_script('DROP TABLE IF EXISTS "stream_close_a"')

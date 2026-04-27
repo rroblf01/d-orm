@@ -192,17 +192,48 @@ purely for user code. That means:
 - Disabling a signal (e.g. by `disconnect`-ing all receivers) never
   breaks ORM operations.
 - A handler that raises does not block a save / delete / query — the
-  exception is swallowed (see below).
+  exception is logged at `ERROR` on the `dorm.signals` logger, but
+  the calling code continues (see below).
+
+## Receiver failure handling
+
+By default, an exception raised by a receiver is logged via the
+`dorm.signals` logger at `ERROR` level (with full traceback) and
+then suppressed so a single broken handler can't take down a save
+or delete path. To wire that into your observability stack:
+
+```python
+import logging
+
+# Send dorm signal failures to Sentry / DataDog / your handler
+logging.getLogger("dorm.signals").addHandler(your_alert_handler)
+```
+
+If you'd rather have the exception propagate — useful in tests, or
+for custom signals where a failed handler should fail the operation
+— construct the signal with `raise_exceptions=True`:
+
+```python
+from dorm.signals import Signal
+
+strict_event = Signal(raise_exceptions=True)
+strict_event.connect(handler)
+strict_event.send(sender=obj)   # any handler error is re-raised
+```
+
+The built-in signals (`pre_save`, `post_save`, `pre_delete`,
+`post_delete`, `pre_query`, `post_query`) keep the legacy
+log-and-suppress behaviour to preserve compatibility.
 
 ## Gotchas
 
-- **Handler exceptions are silently swallowed by `Signal.send()`.**
-  This is deliberate — a buggy `post_save` listener shouldn't take
-  down a request. But it means *you* are responsible for logging
-  failures inside the handler. Wrap the body in `try` / `except`
-  and log to your own observability stack.
+- **Handler exceptions are logged, not silently swallowed.** A buggy
+  `post_save` listener no longer disappears into the void; it's
+  recorded on the `dorm.signals` logger so you can route it to
+  Sentry / your alerting pipeline. If you want strict propagation,
+  use a custom `Signal(raise_exceptions=True)` (see above).
 - **`pre_save` cannot abort the save.** Raising inside `pre_save`
-  is swallowed; the INSERT/UPDATE still runs. If you need to veto
+  is logged but the INSERT/UPDATE still runs. If you need to veto
   an operation, do it in `Model.clean()` (called by
   `full_clean()`) or before calling `save()` at all.
 - **Recursion.** A `post_save` handler that calls `instance.save()`

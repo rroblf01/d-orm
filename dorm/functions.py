@@ -1,8 +1,58 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
+from .exceptions import ImproperlyConfigured
 from .expressions import F, Q, Value
+
+# Allowlist for ``Cast(output_field=...)``. ``cast_type`` is spliced into SQL
+# (no bind parameter exists for type names), so accepting an arbitrary string
+# would be a SQL injection sink — e.g. ``Cast(F("x"), "INTEGER); DROP TABLE--")``.
+# The set covers the SQL-92 / SQLite / PostgreSQL types the ORM emits today;
+# add new entries here rather than loosening the regex.
+_BASE_CAST_TYPES = frozenset({
+    "INTEGER", "BIGINT", "SMALLINT",
+    "REAL", "DOUBLE PRECISION", "FLOAT",
+    "NUMERIC", "DECIMAL",
+    "TEXT", "VARCHAR", "CHAR",
+    "BLOB", "BYTEA",
+    "BOOLEAN", "BOOL",
+    "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "DATETIME",
+    "JSON", "JSONB", "UUID",
+})
+
+# Allow optional ``(N)`` or ``(N, M)`` length / precision spec, e.g.
+# ``VARCHAR(255)`` or ``NUMERIC(10, 2)``. The base name still has to be
+# in ``_BASE_CAST_TYPES`` after stripping the parenthesised tail.
+_CAST_TYPE_RE = re.compile(
+    r"^([A-Z][A-Z ]*[A-Z]|[A-Z]+)(\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?$"
+)
+
+
+def _validate_cast_type(value: str) -> str:
+    """Return *value* normalized (uppercased, single-spaced) if it matches the
+    allowlist; raise :class:`ImproperlyConfigured` otherwise. The base type
+    name (everything before the optional ``(N)`` / ``(N, M)`` modifier) must
+    be in :data:`_BASE_CAST_TYPES`."""
+    if not isinstance(value, str) or not value.strip():
+        raise ImproperlyConfigured(
+            f"Cast(output_field=...) must be a non-empty string, got {value!r}."
+        )
+    normalized = " ".join(value.strip().upper().split())
+    match = _CAST_TYPE_RE.match(normalized)
+    if not match:
+        raise ImproperlyConfigured(
+            f"Invalid Cast type {value!r}. Allowed base types: "
+            f"{sorted(_BASE_CAST_TYPES)} optionally followed by ``(N)`` or "
+            "``(N, M)``."
+        )
+    base = match.group(1)
+    if base not in _BASE_CAST_TYPES:
+        raise ImproperlyConfigured(
+            f"Invalid Cast base type {base!r}. Allowed: {sorted(_BASE_CAST_TYPES)}."
+        )
+    return normalized
 
 
 def _compile_expr(expr: Any, table_alias: str | None = None) -> tuple[str, list]:
@@ -139,7 +189,10 @@ class Cast(Func):
     function = "CAST"
 
     def __init__(self, expression: Any, output_field: str, **kwargs: Any) -> None:
-        self.cast_type = output_field
+        # Validate eagerly so a bad type triggers at queryset build time, not
+        # halfway through SQL emission. ``_validate_cast_type`` returns the
+        # normalised (upper-cased, single-spaced) form.
+        self.cast_type = _validate_cast_type(output_field)
         super().__init__(expression, **kwargs)
 
     def as_sql(self, table_alias: str | None = None) -> tuple[str, list]:

@@ -271,3 +271,51 @@ for a in authors:
 `raw()` devuelve un `RawQuerySet` que hidrata filas a instancias del
 modelo. Para resultados que no mapean a un modelo, baja a
 `get_connection().execute(...)`.
+
+!!! danger "Usa placeholders, nunca f-strings"
+
+    `raw()` envía `raw_sql` a la base de datos tal cual — los valores
+    se ligan vía la lista `params`, **nunca** interpolados dentro de
+    la propia cadena SQL:
+
+    ```python
+    # SEGURO — el valor pasa por el binding de psycopg / sqlite3
+    Author.objects.raw("SELECT * FROM authors WHERE id = %s", [user_id])
+
+    # INSEGURO — convierte input de usuario en SQL
+    Author.objects.raw(f"SELECT * FROM authors WHERE id = {user_id}")
+    ```
+
+    Como red de seguridad, dorm cuenta los placeholders (`%s` y `$N`,
+    saltando los que estén dentro de literales entrecomillados) y
+    rechaza construir el `RawQuerySet` si el número no coincide con
+    `len(params)`. Eso pilla el desliz más habitual — construir el
+    SQL con `f""` y olvidar pasar los valores — en tiempo de
+    construcción en vez de aparecer como un error confuso del
+    motor.
+
+    Para identificadores dinámicos (nombres de tabla o columna que no
+    están fijos a coding time), valídalos contra una allowlist antes
+    de interpolarlos — los placeholders ligan valores, no
+    identificadores.
+
+### `Cast(...)` acepta un conjunto fijo de tipos SQL
+
+`Cast(expr, output_field=...)` interpola su segundo argumento dentro
+del SQL (no existe binding para nombres de tipo), así que
+`output_field` se valida contra una allowlist:
+
+```python
+from dorm import Cast, F
+
+Author.objects.annotate(age_str=Cast(F("age"), output_field="TEXT"))
+```
+
+Los tipos base permitidos incluyen `INTEGER`, `BIGINT`, `SMALLINT`,
+`REAL`, `DOUBLE PRECISION`, `FLOAT`, `NUMERIC`, `DECIMAL`, `TEXT`,
+`VARCHAR`, `CHAR`, `BLOB`, `BYTEA`, `BOOLEAN`, `BOOL`, `DATE`,
+`TIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `DATETIME`, `JSON`, `JSONB`,
+`UUID`. Se acepta una especificación opcional de longitud/precisión
+(`VARCHAR(255)` o `NUMERIC(10, 2)`). Cualquier otro valor levanta
+`ImproperlyConfigured` inmediatamente en construcción del queryset,
+para que un typo o input no saneado nunca llegue al SQL.

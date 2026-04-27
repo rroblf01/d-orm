@@ -271,3 +271,48 @@ for a in authors:
 `raw()` returns a `RawQuerySet` that hydrates rows back into model
 instances. For results that don't map to a model, drop down to
 `get_connection().execute(...)`.
+
+!!! danger "Use placeholders, never f-strings"
+
+    `raw()` sends `raw_sql` to the database verbatim — values must be
+    bound via the `params` list, never spliced into the SQL string:
+
+    ```python
+    # SAFE — value goes through psycopg / sqlite3 binding
+    Author.objects.raw("SELECT * FROM authors WHERE id = %s", [user_id])
+
+    # UNSAFE — turns user input into SQL
+    Author.objects.raw(f"SELECT * FROM authors WHERE id = {user_id}")
+    ```
+
+    As a defensive check, dorm counts the placeholders (`%s` and `$N`,
+    skipping ones inside quoted literals) and refuses to construct the
+    `RawQuerySet` if the number doesn't match `len(params)`. That
+    catches the most common slip — building the SQL with `f""` and
+    forgetting to pass values — at construction time instead of
+    surfacing as a confusing database error.
+
+    For dynamic identifiers (table or column names that aren't fixed
+    at coding time), validate them against an allowlist before
+    splicing — placeholders only bind values, not identifiers.
+
+### `Cast(...)` accepts a fixed set of SQL types
+
+`Cast(expr, output_field=...)` splices its second argument into SQL
+(no bind exists for type names), so `output_field` is validated
+against an allowlist:
+
+```python
+from dorm import Cast, F
+
+Author.objects.annotate(age_str=Cast(F("age"), output_field="TEXT"))
+```
+
+Allowed base types include `INTEGER`, `BIGINT`, `SMALLINT`, `REAL`,
+`DOUBLE PRECISION`, `FLOAT`, `NUMERIC`, `DECIMAL`, `TEXT`,
+`VARCHAR`, `CHAR`, `BLOB`, `BYTEA`, `BOOLEAN`, `BOOL`, `DATE`,
+`TIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `DATETIME`, `JSON`, `JSONB`,
+`UUID`. An optional length / precision spec (`VARCHAR(255)` or
+`NUMERIC(10, 2)`) is accepted. Any other value raises
+`ImproperlyConfigured` immediately at queryset build time, so a
+typo or unsanitised input can never reach the SQL.

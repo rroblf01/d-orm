@@ -1567,11 +1567,90 @@ class CombinedQuerySet(QuerySet[_T]):
 
 # ── RawQuerySet ────────────────────────────────────────────────────────────────
 
+
+def _count_placeholders(sql: str) -> int | None:
+    """Count ``%s`` and ``$N`` placeholders outside quoted literals.
+
+    Returns ``None`` if a ``%(name)s`` named placeholder is detected — those
+    are valid for psycopg/sqlite3 but they take a dict of params so a
+    positional length check would give a false alarm.
+
+    Both ``%s`` and ``$N`` are counted as positional placeholders. Each
+    ``$N`` becomes a separate ``%s`` after :func:`_to_pyformat`, so reusing
+    the same ``$N`` index needs one bound value per occurrence — that
+    matches what psycopg expects on the wire.
+    """
+    count = 0
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'" and i + 1 < n and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                if sql[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n:
+                if sql[i] == '"' and i + 1 < n and sql[i + 1] == '"':
+                    i += 2
+                    continue
+                if sql[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == "%" and i + 1 < n:
+            nxt = sql[i + 1]
+            if nxt == "s":
+                count += 1
+                i += 2
+                continue
+            if nxt == "(":
+                # Named placeholder — bail out of the count.
+                return None
+            if nxt == "%":
+                # Escaped percent — not a placeholder.
+                i += 2
+                continue
+        if c == "$" and i + 1 < n and sql[i + 1].isdigit():
+            j = i + 1
+            while j < n and sql[j].isdigit():
+                j += 1
+            count += 1
+            i = j
+            continue
+        i += 1
+    return count
+
+
 class RawQuerySet(Generic[_T]):
     """
     Executes a raw SQL query and hydrates the results as model instances.
     Columns returned by the query are mapped to field attnames; unknown columns
     are stored as plain attributes on the instance.
+
+    .. warning::
+       ``raw_sql`` is sent to the database verbatim. **Never** build it by
+       string-interpolating user input — use placeholders (``%s`` for
+       PostgreSQL / SQLite, or ``$1`` / ``$2`` for the dorm builder, which
+       this class adapts) and pass values via ``params``::
+
+           # SAFE
+           Author.objects.raw("SELECT * FROM authors WHERE id = %s", [user_id])
+
+           # UNSAFE — direct string concatenation defeats parameterisation
+           Author.objects.raw(f"SELECT * FROM authors WHERE id = {user_id}")
+
+       For dynamic identifiers (table or column names that aren't fixed at
+       coding time), validate them against an allowlist before splicing.
     """
 
     def __init__(
@@ -1581,9 +1660,27 @@ class RawQuerySet(Generic[_T]):
         params: list[Any] | None = None,
         using: str = "default",
     ) -> None:
+        if not isinstance(raw_sql, str) or not raw_sql.strip():
+            raise ValueError("raw_sql must be a non-empty string.")
+        params_list = list(params) if params is not None else []
+        # Cheap parameter-count sanity check: detects the most common raw()
+        # mistake — building the SQL with f-strings and passing no ``params``,
+        # or copy-pasting a query with ``%s`` placeholders without binding
+        # values for them. We count ``%s`` and ``$N`` placeholders outside
+        # of quoted literals; if the totals disagree with len(params), warn
+        # eagerly so the bug surfaces at construction time rather than as a
+        # confusing DB-side error.
+        expected = _count_placeholders(raw_sql)
+        if expected is not None and expected != len(params_list):
+            raise ValueError(
+                f"RawQuerySet: SQL has {expected} placeholder(s) but "
+                f"{len(params_list)} param(s) were provided. Did you forget "
+                "to pass values via the ``params`` kwarg, or interpolate "
+                "user input into the SQL string by mistake?"
+            )
         self.model = model
         self.raw_sql = raw_sql
-        self.params = params or []
+        self.params = params_list
         self._db = using
         self._result_cache: list[_T] | None = None
 

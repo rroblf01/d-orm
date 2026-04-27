@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import logging
 import weakref
 from typing import Any, Callable
+
+# Receivers that raise are logged here at ERROR level. Apps can route this
+# logger to Sentry / their alert pipeline so a broken ``post_save`` hook
+# doesn't fail silently. Set ``raise_exceptions=True`` on a Signal to
+# propagate instead — useful in tests, where silently-swallowed errors
+# mask broken receivers.
+_logger = logging.getLogger("dorm.signals")
 
 
 class Signal:
     """Minimal signal/event dispatcher (pre/post save/delete)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, raise_exceptions: bool = False) -> None:
         self._receivers: list[tuple[Any, Any, type | None, bool]] = []
+        # When True, ``send()`` re-raises any exception a receiver throws
+        # after logging it. The default (False) preserves the historical
+        # behaviour where one bad receiver doesn't break the save path,
+        # but exceptions are now logged instead of silently swallowed.
+        self.raise_exceptions = raise_exceptions
 
     # ── Registration ─────────────────────────────────────────────────────────
 
@@ -63,7 +76,19 @@ class Signal:
             try:
                 responses.append((fn, fn(sender=sender, **kwargs)))
             except Exception:
-                pass
+                # Always log the receiver failure so it isn't lost. Most
+                # production Signals (pre/post_save, etc.) keep the legacy
+                # "one bad receiver doesn't sink the whole save" semantics
+                # by leaving ``raise_exceptions=False``; opt in to re-raise
+                # for stricter dispatchers (tests, custom user signals).
+                _logger.exception(
+                    "Signal receiver %r raised while handling sender=%r",
+                    fn,
+                    sender,
+                )
+                if self.raise_exceptions:
+                    self._receivers = live
+                    raise
         self._receivers = live
         return responses
 
