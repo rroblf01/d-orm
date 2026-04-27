@@ -616,7 +616,12 @@ def cmd_inspectdb(args):
     """
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
-    _load_settings(settings_mod)
+    from .conf import settings
+    if not settings._configured:
+        # Skip the load only when dorm was already configured by the
+        # caller (typical in tests / programmatic embedding). Symmetric
+        # with ``cmd_doctor``.
+        _load_settings(settings_mod)
 
     from .db.connection import get_connection
     from .inspect import introspect_tables, render_models
