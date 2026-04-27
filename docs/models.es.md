@@ -56,13 +56,73 @@ implícita (un `BigAutoField`).
 | `DateField()` | `DATE` |
 | `TimeField()` | `TIME` |
 | `DateTimeField(auto_now_add=False, auto_now=False)` | `TIMESTAMP` |
+| `DurationField()` | `INTERVAL` (PG) / `BIGINT` µs (SQLite) |
 
 `auto_now_add` rellena al insertar; `auto_now` reescribe en cada save.
+
+`DurationField` almacena un `datetime.timedelta`. En PostgreSQL mapea
+a `INTERVAL` nativo (psycopg adapta `timedelta` directamente). SQLite
+no tiene tipo intervalo, así que dorm registra un adaptador de
+sqlite3 que guarda la duración como microsegundos enteros en un
+`BIGINT` — el valor Python siempre es un `timedelta`, la codificación
+es invisible.
+
+```python
+import datetime
+
+class Job(dorm.Model):
+    timeout = dorm.DurationField()
+    grace = dorm.DurationField(null=True, blank=True)
+
+Job.objects.create(timeout=datetime.timedelta(minutes=5))
+```
 
 ### Booleanos
 
 `BooleanField()` — `BOOLEAN` (PG) / `INTEGER 0|1` (SQLite). Los defaults
 se emiten conscientes del vendor (`DEFAULT TRUE` vs `DEFAULT 1`).
+
+### Enumeraciones
+
+`EnumField(enum_cls, max_length=None)` almacena un miembro de
+`enum.Enum`. El tipo de columna se deriva del tipo subyacente del
+enum: enums con valores string mapean a `VARCHAR(max_length)`, enums
+con valores int a `INTEGER`. La instancia Python siempre lleva el
+*miembro* del enum; las lecturas desde BD rehidratan vía
+`enum_cls(value)`. `choices` se autopobla para capas de admin /
+formularios.
+
+```python
+import enum
+
+class Status(enum.Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+class Article(dorm.Model):
+    status = dorm.EnumField(Status, default=Status.ACTIVE)
+
+Article.objects.filter(status=Status.ACTIVE)   # miembro
+Article.objects.filter(status="active")        # también acepta valor crudo
+```
+
+### Texto case-insensitive
+
+`CITextField()` — columna de texto case-insensitive. Mapea a `CITEXT`
+de PostgreSQL (la BD necesita la extensión `citext`; instálala con
+`RunSQL("CREATE EXTENSION IF NOT EXISTS citext")` desde una
+migración). En SQLite cae a `TEXT COLLATE NOCASE` para que las
+comparaciones de igualdad / `LIKE` se comporten igual sin la
+extensión.
+
+```python
+class User(dorm.Model):
+    email = dorm.CITextField(unique=True)
+
+# las dos triunfan y encuentran la misma fila:
+User.objects.get(email="Alice@example.com")
+User.objects.get(email="alice@example.com")
+```
 
 ### Datos estructurados
 
@@ -71,6 +131,45 @@ se emiten conscientes del vendor (`DEFAULT TRUE` vs `DEFAULT 1`).
 | `JSONField()` | `JSONB` (PG) / `TEXT` (SQLite) |
 | `BinaryField()` | `BYTEA` / `BLOB` |
 | `ArrayField(base_field)` | `<inner>[]` (solo PG — falla en SQLite) |
+
+### Tipos de rango (solo PostgreSQL)
+
+| Campo | Tipo BD |
+|---|---|
+| `IntegerRangeField()` | `int4range` |
+| `BigIntegerRangeField()` | `int8range` |
+| `DecimalRangeField()` | `numrange` |
+| `DateRangeField()` | `daterange` |
+| `DateTimeRangeField()` | `tstzrange` |
+
+El tipo de valor Python es `dorm.Range(lower, upper, bounds="[)")`.
+`bounds` son dos caracteres con la inclusividad de los extremos:
+`"[)"` (el por defecto), `"(]"`, `"[]"` o `"()"`. Cualquiera de los
+dos extremos puede ser `None` para indicar "sin cota por ese lado".
+
+```python
+import datetime
+
+class Reservation(dorm.Model):
+    during = dorm.DateTimeRangeField()
+    seats = dorm.IntegerRangeField(null=True, blank=True)
+
+Reservation.objects.create(
+    during=dorm.Range(
+        datetime.datetime(2026, 1, 1, 9, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 1, 1, 17, tzinfo=datetime.timezone.utc),
+    ),
+    seats=dorm.Range(1, 10),
+)
+```
+
+PostgreSQL canoniza los rangos *discretos* (`int4range`, `int8range`,
+`daterange`) al salir — `(1, 5]` siempre vuelve como `[2, 6)`. Los
+rangos continuos (`numrange`, `tstzrange`) preservan los bounds
+escritos. SQLite no tiene tipo de rango nativo; usar uno de estos
+campos contra una conexión SQLite levanta `NotImplementedError` desde
+`db_type()` para que la limitación aparezca al hacer migrate, no en
+la primera query.
 
 ### Relaciones
 

@@ -158,31 +158,71 @@ A few hard rules:
   before classifying the call as "slow query" — failed queries
   often look fast because they short-circuit.
 
-## Async caveat
+## Async receivers
 
-Signals are **synchronous**. They fire for both sync and async
-operations, but the handler is invoked with a plain function call —
-you cannot `await` inside it.
+Receivers can be `async def` coroutine functions. Connect them the
+same way as a regular handler — dorm detects coroutines via
+`inspect.iscoroutinefunction` at dispatch time:
 
 ```python
-# Wrong — the coroutine is created and immediately dropped
-async def bad(sender, **kw):
-    await something_async()
+import asyncio
+from dorm.signals import post_save
 
-post_save.connect(bad)   # nothing awaits the coroutine; warnings everywhere
+async def index_in_search(sender, instance, created, **kw):
+    await search_client.upsert(instance)
 
-# Right — schedule it on the running loop
-def good(sender, instance, **kw):
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return       # we're in a sync context, fall back to sync work
-    loop.create_task(do_something_async(instance))
+post_save.connect(index_in_search, sender=Article, weak=False)
 ```
 
-For most observability cases, a non-blocking enqueue is enough; the
-real I/O happens in a background task you control.
+The dispatch path is split in two:
+
+- **`Model.asave()` / `Model.adelete()`** call `Signal.asend()` under
+  the hood. Sync receivers are called directly; async receivers are
+  awaited *sequentially*, in the order they were connected. This
+  matches Django's behaviour and keeps shared-state handlers
+  predictable. If you want concurrency, fan out to `asyncio.gather`
+  *inside* one receiver.
+- **`Model.save()` / `Model.delete()`** stay on the synchronous path.
+  An async receiver registered there has no event loop to run on, so
+  dorm logs a single `WARNING` on `dorm.signals` and skips it instead
+  of silently dropping work or deadlocking on `asyncio.run`.
+
+```python
+# Will fire from asave / adelete:
+async def audit(sender, instance, **kw):
+    await audit_log.append(instance.pk, "saved")
+
+post_save.connect(audit, sender=Order, weak=False)
+
+await Order(...).asave()   # audit() runs
+Order(...).save()          # audit() skipped + warning logged
+```
+
+You can also call `Signal.asend()` directly for custom signals:
+
+```python
+from dorm.signals import Signal
+
+deployed = Signal()
+
+async def notify_slack(sender, **kw):
+    await slack.post(f"deployed {sender}")
+
+deployed.connect(notify_slack, weak=False)
+await deployed.asend(sender="prod-v2.1")
+```
+
+`asend()` returns the same `[(receiver, return_value), …]` shape as
+`send()`. A coroutine returned by a *sync* receiver is awaited
+transparently, so wrapping helpers don't drop pending work.
+
+### Query signals stay synchronous
+
+`pre_query` / `post_query` are dispatched from inside the SQL log
+context manager, which is shared by the sync and async backends.
+Async receivers connected to them are skipped with a warning — wire
+async tracing through `post_save` / `post_delete` (or schedule a task
+from a thin sync receiver).
 
 ## Built-in side effects
 

@@ -442,7 +442,7 @@ class Model(metaclass=ModelBase):
         meta = self._meta
         adding = force_insert or self.pk is None
 
-        pre_save.send(
+        await pre_save.asend(
             self.__class__,
             instance=self,
             raw=False,
@@ -453,7 +453,7 @@ class Model(metaclass=ModelBase):
             await self._ado_insert(conn, meta)
         else:
             await self._ado_update(conn, meta, update_fields)
-        post_save.send(
+        await post_save.asend(
             self.__class__,
             instance=self,
             created=adding,
@@ -529,7 +529,7 @@ class Model(metaclass=ModelBase):
         self._handle_on_delete(using=using)
 
         conn = get_async_connection(using)
-        pre_delete.send(self.__class__, instance=self, using=using)
+        await pre_delete.asend(self.__class__, instance=self, using=using)
 
         query = SQLQuery(self.__class__)
         pk_field = self._meta.pk
@@ -537,7 +537,7 @@ class Model(metaclass=ModelBase):
         sql, params = query.as_delete(conn)
         count = await conn.execute_write(sql, params)
 
-        post_delete.send(self.__class__, instance=self, using=using)
+        await post_delete.asend(self.__class__, instance=self, using=using)
         self.pk = None
         return count, {f"{self._meta.app_label}.{self.__class__.__name__}": count}
 

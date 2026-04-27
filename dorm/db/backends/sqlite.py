@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import sqlite3
 import threading
 from contextlib import asynccontextmanager, contextmanager
 
 from ...exceptions import ImproperlyConfigured
 from ..utils import ASYNC_ATOMIC_STATE, log_query, normalize_db_exception
+
+
+# SQLite has no native interval type, so :class:`dorm.DurationField`
+# stores the value as a number of microseconds in a ``BIGINT`` column.
+# Registering a process-wide adapter lets ``DurationField.get_db_prep_value``
+# return the raw :class:`datetime.timedelta` (which PostgreSQL binds
+# natively as INTERVAL); the SQLite cursor converts it on the way out.
+# This is a global side effect — but it only attaches a converter for a
+# type the standard library doesn't know about, so it can't override an
+# existing user-registered adapter, and the value semantics (microseconds
+# round-tripped) match what :meth:`DurationField.from_db_value` expects.
+def _adapt_timedelta_to_microseconds(td: datetime.timedelta) -> int:
+    return td.days * 86_400 * 10 ** 6 + td.seconds * 10 ** 6 + td.microseconds
+
+
+sqlite3.register_adapter(datetime.timedelta, _adapt_timedelta_to_microseconds)
 
 
 # SQLite's PRAGMA syntax doesn't accept bound parameters, so the value has

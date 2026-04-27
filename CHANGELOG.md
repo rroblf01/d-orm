@@ -6,6 +6,64 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Field types
+- **`DurationField`** stores `datetime.timedelta`. Native ``INTERVAL``
+  on PostgreSQL; on SQLite a process-wide ``sqlite3.register_adapter``
+  encodes durations as integer microseconds in a ``BIGINT`` column so
+  the same Python value round-trips on both backends.
+- **`EnumField(enum_cls)`** stores an `enum.Enum` member. Column type
+  is derived from the value type (string → ``VARCHAR``, int →
+  ``INTEGER``); ``choices`` is auto-populated from the enum so admin /
+  form layers see every member without restating them in ``Meta``.
+- **`CITextField`** — case-insensitive text. Maps to PostgreSQL's
+  ``CITEXT`` (extension required) and falls back to
+  ``TEXT COLLATE NOCASE`` on SQLite.
+- **Range fields** — ``IntegerRangeField``, ``BigIntegerRangeField``,
+  ``DecimalRangeField``, ``DateRangeField``, ``DateTimeRangeField``.
+  The Python value is ``dorm.Range(lower, upper, bounds="[)")``;
+  SQLite raises ``NotImplementedError`` from ``db_type()`` so the
+  limitation surfaces at migrate time, not at first query.
+
+### Added — Async signals
+- **`Signal.asend(...)`** — async dispatch entry point. Awaits
+  coroutine receivers sequentially (in the order they were connected)
+  and calls sync receivers directly. ``Model.asave`` /
+  ``Model.adelete`` now route through ``asend`` so an
+  ``async def post_save`` receiver fires from the async path.
+- **Sync `Signal.send` skips coroutine receivers with a `WARNING`** on
+  the ``dorm.signals`` logger instead of silently dropping them or
+  deadlocking on ``asyncio.run``. Connect the same receiver and dorm
+  picks the right dispatch automatically based on whether the caller
+  used the sync or async ORM path.
+
+### Added — Fixtures CLI
+- **`dorm dumpdata`** — serialise model rows to JSON. Format mirrors
+  Django's (`{model, pk, fields}` records); FKs as the target's PK,
+  M2M as a list of related PKs. Custom envelopes preserve types JSON
+  can't represent natively (decimals, UUIDs, datetimes, durations,
+  ranges, bytes).
+- **`dorm loaddata`** — load JSON fixtures back. Each file runs in a
+  single ``atomic()`` block; M2M relations restore in a second phase
+  after all parent rows land. ``save()`` and signals are bypassed for
+  performance — use ``Model.save()`` when you do want pre-save hooks
+  to fire.
+- **`dorm.serialize`** module exposes the same operations
+  programmatically: ``serialize``, ``dumps``, ``deserialize`` and
+  ``load``.
+
+### Changed
+- **`SQLQuery._compile_leaf` now routes the bound value through the
+  resolved field's `get_db_prep_value`** before reaching the cursor.
+  Custom field types (``EnumField``, ``DurationField``,
+  ``RangeField`` …) bind in their wire form rather than as opaque
+  Python objects. ``__in`` lookups coerce element-by-element; lookups
+  whose value is structural (``isnull``, ``range``, ``regex``) bypass
+  the coercion as before.
+- **`dorm sql --all` skips models whose fields have no SQL on the
+  active backend** (typical case: a ``RangeField`` while introspecting
+  against SQLite). The skip is reported on stderr; previously the
+  whole dump aborted on the first incompatible model.
+
 ## [2.1.0] - 2026-04-27
 
 The 2.1 release closes the biggest gap left in 2.0 for "production
@@ -137,15 +195,6 @@ for tables large enough that an `ALTER TABLE` would page someone.
   shows running totals, top-N-per-group, deltas, percentiles, and
   partial-unique patterns.
 
-### Explicitly **not** in 2.1 — tracked for follow-up
-
-- MySQL / MariaDB backend.
-- ``dorm.contrib.audit`` (history-table mixin in the spirit of
-  ``django-simple-history``).
-- ``dorm.contrib.cache`` (signal-driven QuerySet invalidation backed
-  by Redis).
-- Reproducible benchmark harness vs Django ORM and SQLAlchemy 2.0.
-- PostGIS support.
 
 ### Fixed (carried in from 2.0.x development)
 - **Migrations are now atomic per migration file.** A failure in

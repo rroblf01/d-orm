@@ -162,32 +162,73 @@ Algunas reglas duras:
   lenta" — las queries fallidas suelen verse rápidas porque cortan
   el camino.
 
-## Aviso sobre async
+## Receivers asíncronos
 
-Las señales son **síncronas**. Disparan para operaciones sync y
-async, pero el handler se invoca con una llamada de función plana
-— **no** puedes `await` dentro.
+Los receivers pueden ser funciones `async def`. Se conectan igual
+que un handler normal — dorm detecta corrutinas con
+`inspect.iscoroutinefunction` en el momento del dispatch:
 
 ```python
-# Mal — la corrutina se crea y se descarta inmediatamente
-async def bad(sender, **kw):
-    await something_async()
+import asyncio
+from dorm.signals import post_save
 
-post_save.connect(bad)   # nadie awaitea la corrutina; warnings por todas partes
+async def index_in_search(sender, instance, created, **kw):
+    await search_client.upsert(instance)
 
-# Bien — agéndala en el loop corriendo
-def good(sender, instance, **kw):
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return       # estamos en contexto sync, cae a trabajo síncrono
-    loop.create_task(do_something_async(instance))
+post_save.connect(index_in_search, sender=Article, weak=False)
 ```
 
-Para la mayoría de casos de observabilidad, un encolado
-no-bloqueante es suficiente; la I/O real ocurre en una task de
-fondo que controlas.
+El despacho se divide en dos caminos:
+
+- **`Model.asave()` / `Model.adelete()`** llaman a `Signal.asend()`
+  por dentro. Los receivers síncronos se invocan directamente; los
+  asíncronos se *awaitan secuencialmente*, en el orden en que se
+  conectaron. Esto coincide con Django y mantiene predecibles los
+  handlers que comparten estado. Si quieres concurrencia, abre un
+  `asyncio.gather` *dentro* de un receiver.
+- **`Model.save()` / `Model.delete()`** se quedan en la ruta
+  síncrona. Un receiver async ahí no tiene loop donde correr, así
+  que dorm registra un `WARNING` en `dorm.signals` y lo salta — sin
+  perder trabajo en silencio ni hacer deadlock en `asyncio.run`.
+
+```python
+# Dispara desde asave / adelete:
+async def audit(sender, instance, **kw):
+    await audit_log.append(instance.pk, "saved")
+
+post_save.connect(audit, sender=Order, weak=False)
+
+await Order(...).asave()   # audit() corre
+Order(...).save()          # audit() se salta + warning
+```
+
+También puedes invocar `Signal.asend()` directamente para señales
+propias:
+
+```python
+from dorm.signals import Signal
+
+deployed = Signal()
+
+async def notify_slack(sender, **kw):
+    await slack.post(f"deployed {sender}")
+
+deployed.connect(notify_slack, weak=False)
+await deployed.asend(sender="prod-v2.1")
+```
+
+`asend()` devuelve la misma forma `[(receiver, valor), …]` que
+`send()`. Una corrutina devuelta por un receiver *síncrono* se
+awaitéa de forma transparente, así que helpers que envuelvan no
+dejan trabajo pendiente.
+
+### `pre_query` / `post_query` siguen siendo síncronas
+
+Se despachan desde el context manager de log SQL, compartido entre
+backends sync y async. Los receivers async conectados ahí se saltan
+con un warning — instrumenta el tracing async vía
+`post_save` / `post_delete` (o agenda una task desde un receiver
+síncrono ligero).
 
 ## Efectos colaterales internos
 

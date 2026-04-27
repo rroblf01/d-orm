@@ -324,11 +324,23 @@ def cmd_sql(args):
 
     for label, model in targets:
         table = model._meta.db_table
-        cols = [
-            _field_to_column_sql(f.name, f, conn)
-            for f in model._meta.fields
-            if f.db_type(conn)
-        ]
+        try:
+            cols = [
+                _field_to_column_sql(f.name, f, conn)
+                for f in model._meta.fields
+                if f.db_type(conn)
+            ]
+        except NotImplementedError as exc:
+            # A field on this model has no SQL representation on the
+            # active backend (typical case: PG-only ``RangeField`` /
+            # ``ArrayField`` while introspecting against SQLite). Note
+            # it on stderr and move on rather than aborting the dump
+            # for every other model.
+            print(
+                f"-- skipping {label}: {exc}",
+                file=sys.stderr,
+            )
+            continue
         cols = [c for c in cols if c]
         ddl = (
             f'-- {model.__name__} ({label})\n'
@@ -757,6 +769,95 @@ def cmd_doctor(args):
         sys.exit(1)
 
 
+def cmd_dumpdata(args):
+    """Serialize model rows to JSON on stdout (or ``--output FILE``).
+
+    With no positional argument, dumps every concrete model in
+    ``INSTALLED_APPS``. Pass ``app_label`` to scope to one app, or
+    ``app_label.ModelName`` to scope to a single model. The output is
+    a JSON array of ``{model, pk, fields}`` records, matching Django's
+    ``dumpdata`` shape so existing fixtures load with ``dorm loaddata``.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
+    _load_apps(installed_apps)
+
+    from .models import _model_registry
+    from .serialize import dumps as serialize_dumps
+
+    targets: list = []
+    if not args.targets:
+        targets = [
+            model for label, model in _model_registry.items()
+            if "." not in label and not model._meta.abstract
+        ]
+    else:
+        for spec in args.targets:
+            if "." in spec:
+                # ``app.Model`` form — exact match against registry.
+                if spec not in _model_registry:
+                    print(f"Error: model {spec!r} not found.", file=sys.stderr)
+                    sys.exit(1)
+                targets.append(_model_registry[spec])
+            else:
+                # Either a bare model name, or an app label.
+                if spec in _model_registry and "." not in spec:
+                    targets.append(_model_registry[spec])
+                    continue
+                app_models = [
+                    m for label, m in _model_registry.items()
+                    if "." not in label and m._meta.app_label == spec
+                    and not m._meta.abstract
+                ]
+                if not app_models:
+                    print(
+                        f"Error: {spec!r} matched no models or app labels.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                targets.extend(app_models)
+
+    text = serialize_dumps(targets, indent=args.indent)
+    if args.output and args.output != "-":
+        Path(args.output).write_text(text + "\n")
+        print(f"Wrote {len(targets)} model(s) to {args.output}")
+    else:
+        print(text)
+
+
+def cmd_loaddata(args):
+    """Load JSON fixtures from one or more files into the database.
+
+    Each file is read as a JSON array of ``{model, pk, fields}``
+    records. The whole load runs in a single transaction per file —
+    a malformed record rolls back to the file's start instead of
+    leaving a partial restore.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+    installed_apps = settings.INSTALLED_APPS
+    _load_apps(installed_apps)
+
+    from .serialize import load as serialize_load
+
+    total = 0
+    for fixture in args.fixtures:
+        path = Path(fixture)
+        if not path.exists():
+            print(f"Error: fixture {fixture!r} not found.", file=sys.stderr)
+            sys.exit(1)
+        text = path.read_text()
+        loaded = serialize_load(text, using=args.database)
+        total += loaded
+        print(f"  {fixture}: loaded {loaded} row(s)")
+    print(f"Total: {total} row(s) loaded.")
+
+
 def cmd_help(args):
     args.parser.print_help()
 
@@ -942,6 +1043,58 @@ def main():
     )
     doc.add_argument("--settings", default=None)
     doc.set_defaults(func=cmd_doctor)
+
+    # dumpdata
+    dd = sub.add_parser(
+        "dumpdata",
+        help=(
+            "Dump model rows as JSON. With no argument dumps every "
+            "concrete model in INSTALLED_APPS; pass an app label or "
+            "'app.Model' to scope. Pipe to a file or use --output."
+        ),
+    )
+    dd.add_argument(
+        "targets",
+        nargs="*",
+        help="App labels or app.ModelName to dump (default: all).",
+    )
+    dd.add_argument(
+        "--indent",
+        type=int,
+        default=None,
+        help="Indent level for pretty-printing the JSON output.",
+    )
+    dd.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        metavar="FILE",
+        help="Write the JSON to FILE (default: stdout). Use '-' for stdout explicitly.",
+    )
+    dd.add_argument("--settings", default=None)
+    dd.set_defaults(func=cmd_dumpdata)
+
+    # loaddata
+    ld = sub.add_parser(
+        "loaddata",
+        help=(
+            "Load JSON fixtures into the database. Each file is loaded "
+            "in a single transaction; M2M relations are restored after "
+            "all parent rows."
+        ),
+    )
+    ld.add_argument(
+        "fixtures",
+        nargs="+",
+        help="Path(s) to fixture JSON file(s).",
+    )
+    ld.add_argument(
+        "--database",
+        default="default",
+        help="DATABASES alias to load into (default: 'default').",
+    )
+    ld.add_argument("--settings", default=None)
+    ld.set_defaults(func=cmd_loaddata)
 
     # help
     hp = sub.add_parser("help", help="Show this help message and exit")

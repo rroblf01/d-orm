@@ -593,6 +593,29 @@ class SQLQuery:
                 v.pk if hasattr(v, "_meta") and hasattr(v, "pk") else v
                 for v in value
             ]
+
+        # Route through the field's own binding adapter so custom types
+        # (``EnumField`` → enum value, ``DurationField`` on PG, etc.)
+        # reach the cursor in their wire form. Skipped for lookups that
+        # imply scalar / structural values the field shouldn't transform
+        # (range tuples, NULL checks, regex patterns).
+        leaf_field = self._resolve_field(field_parts)
+        if leaf_field is not None and lookup not in (
+            "isnull", "in", "range", "regex", "iregex"
+        ):
+            try:
+                value = leaf_field.get_db_prep_value(value)
+            except Exception:
+                # Custom adapters that don't accept lookup-shaped values
+                # (e.g. partial datetimes for ``__date``) shouldn't break
+                # the query — leave the raw value for the lookup builder.
+                pass
+        elif leaf_field is not None and lookup == "in" and isinstance(value, (list, tuple)):
+            try:
+                value = [leaf_field.get_db_prep_value(v) for v in value]
+            except Exception:
+                pass
+
         vendor = getattr(connection, "vendor", "sqlite")
         sql, params = build_lookup_sql(col, lookup, value, vendor=vendor)
         # Return raw %s — outer as_* method adapts placeholders once for the full SQL
@@ -740,6 +763,39 @@ class SQLQuery:
         if inner.offset_val is not None:
             sql += f" OFFSET {int(inner.offset_val)}"
         return sql, params
+
+    def _resolve_field(self, field_parts: list[str]) -> Any | None:
+        """Walk *field_parts* through FK relations and return the leaf
+        :class:`Field`, or ``None`` if no field of that name exists on
+        the resolved model. Used by :meth:`_compile_leaf` to route the
+        bound value through ``field.get_db_prep_value`` so custom field
+        types (``EnumField``, ``DurationField``, ``RangeField`` …) are
+        bound in their wire form rather than as opaque Python objects.
+
+        This walks the relation chain *without* mutating ``self.joins``;
+        :meth:`_resolve_column` is still the source of truth for the SQL
+        column reference.
+        """
+        from .exceptions import FieldDoesNotExist
+
+        model = self.model
+        parts = list(field_parts)
+        if parts and parts[0] == "pk" and model._meta.pk:
+            parts[0] = model._meta.pk.column
+        while len(parts) > 1:
+            fname = parts.pop(0)
+            try:
+                field = model._meta.get_field(fname)
+            except FieldDoesNotExist:
+                return None
+            if hasattr(field, "remote_field_to"):
+                model = field._resolve_related_model()
+            else:
+                return None
+        try:
+            return model._meta.get_field(parts[0])
+        except FieldDoesNotExist:
+            return None
 
     def _resolve_column(self, field_parts: list[str]) -> str:
         from .exceptions import FieldDoesNotExist

@@ -303,6 +303,74 @@ Well-known pool knobs (`MAX_POOL_SIZE`, `POOL_TIMEOUT`, `POOL_CHECK`,
 `MAX_IDLE`, `MAX_LIFETIME`, `PREPARE_THRESHOLD`) are lifted to top-level
 keys; everything else lands in `OPTIONS`.
 
+## New field types
+
+Four field types fill in long-standing gaps in the type catalogue:
+
+```python
+import datetime, enum
+
+class Priority(enum.Enum):
+    LOW, MEDIUM, HIGH = "low", "medium", "high"
+
+class Job(dorm.Model):
+    name = dorm.CharField(max_length=100)
+    timeout = dorm.DurationField()                       # INTERVAL / BIGINT µs
+    priority = dorm.EnumField(Priority, default=Priority.LOW)
+    owner_email = dorm.CITextField(unique=True)          # CITEXT / TEXT NOCASE
+    seats = dorm.IntegerRangeField(null=True, blank=True)  # PG int4range
+```
+
+- **`DurationField`** stores `datetime.timedelta`. Native `INTERVAL`
+  on PostgreSQL; SQLite registers a sqlite3 adapter so the same
+  `timedelta` round-trips as integer microseconds in a `BIGINT`.
+- **`EnumField(enum_cls)`** stores an `enum.Enum` member. Column type
+  is derived from the underlying value type (string → `VARCHAR`,
+  int → `INTEGER`); `choices` is auto-populated from the enum.
+- **`CITextField`** maps to PostgreSQL's `CITEXT` (requires the
+  extension) and falls back to `TEXT COLLATE NOCASE` on SQLite.
+- **Range fields** — `IntegerRangeField`, `BigIntegerRangeField`,
+  `DecimalRangeField`, `DateRangeField`, `DateTimeRangeField`. The
+  Python value is `dorm.Range(lower, upper, bounds="[)")`. SQLite
+  raises `NotImplementedError` from `db_type()` so the limitation
+  surfaces at migrate time.
+
+## Async signal receivers
+
+Signals now accept `async def` receivers. Connect them the same way:
+
+```python
+async def reindex(sender, instance, **kw):
+    await search_client.upsert(instance)
+
+dorm.signals.post_save.connect(reindex, sender=Article, weak=False)
+
+await Article(...).asave()        # async receiver awaited sequentially
+Article(...).save()               # async receiver skipped + WARNING logged
+```
+
+`Signal.asend()` is the new entry point used by `Model.asave` /
+`Model.adelete`. Sync receivers stay sync; coroutine receivers are
+awaited sequentially in connect order. Sync `send()` keeps its
+existing semantics — async receivers connected to it are skipped
+with a single `WARNING` on `dorm.signals` so missed work is visible.
+
+## `dorm dumpdata` / `dorm loaddata`
+
+JSON fixtures, compatible with Django's shape:
+
+```bash
+dorm dumpdata blog.Author > fixtures/authors.json
+dorm dumpdata --output fixtures/seed.json --indent 2
+dorm loaddata fixtures/authors.json
+```
+
+The output is `[{"model": "<app.Model>", "pk": <pk>, "fields": {...}}, …]`.
+FKs serialise as the target's PK; M2M as a list of related PKs. The
+loader inserts inside an `atomic()` block, so a malformed record
+rolls back the whole file. `save()` and signals are bypassed so
+seeding stays deterministic and fast.
+
 ## Migration from 2.0.x
 
 Almost every 2.1 feature is additive — no code changes are needed

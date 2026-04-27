@@ -138,6 +138,53 @@ than the connection string so it doesn't end up in your shell
 history or `ps` output. The child process inherits your terminal —
 exit it (`\q` for psql, `.exit` for sqlite3) to come back.
 
+## `dorm dumpdata` (2.1+)
+
+Serialise model rows to JSON. With no positional argument every
+concrete model in `INSTALLED_APPS` is dumped. Pass an app label or
+`app.ModelName` to scope.
+
+```bash
+dorm dumpdata                              # everything → stdout
+dorm dumpdata blog                         # only models in app "blog"
+dorm dumpdata blog.Post users.User         # specific models
+dorm dumpdata --output fixtures/seed.json --indent 2
+```
+
+Output format (compatible with Django's `dumpdata`):
+
+```json
+[
+  {"model": "blog.Author", "pk": 1, "fields": {"name": "Alice"}},
+  {"model": "blog.Article", "pk": 7, "fields": {
+      "title": "Hello", "author": 1, "tags": [3, 5]
+  }}
+]
+```
+
+Foreign keys serialise as the target's primary-key value. M2M
+relations serialise as a list of related PKs. Non-JSON-native types
+(decimals, UUIDs, datetimes, durations, ranges, bytes) round-trip
+through dedicated envelopes — the loader rebuilds the right Python
+type via the field's `to_python`.
+
+## `dorm loaddata` (2.1+)
+
+Load one or more JSON fixture files into the database.
+
+```bash
+dorm loaddata fixtures/seed.json
+dorm loaddata fixtures/users.json fixtures/posts.json
+dorm loaddata fixtures/seed.json --database replica
+```
+
+Each file is loaded inside a single transaction — a malformed record
+rolls back to that file's start instead of leaving a partial restore.
+M2M relations are inserted in a second phase, after every parent row
+has landed. **`save()` and signals are bypassed** for performance;
+`Model.save()` is the right path when you do want pre-save hooks to
+fire.
+
 ## `dorm help`
 
 ```bash

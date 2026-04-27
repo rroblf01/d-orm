@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import enum
 import ipaddress
 import json
 import re
@@ -819,6 +820,507 @@ class BinaryField(Field[bytes]):
         if backend == "postgresql":
             return "BYTEA"
         return "BLOB"
+
+
+class DurationField(Field[datetime.timedelta]):
+    """Stores a :class:`datetime.timedelta`.
+
+    On PostgreSQL it maps to native ``INTERVAL`` (psycopg returns and
+    accepts :class:`datetime.timedelta` directly). On SQLite — which has
+    no interval type — we store the duration as an integer number of
+    microseconds in a ``BIGINT`` column, matching Django's strategy. The
+    Python value is always a ``timedelta``; the SQLite encoding is an
+    implementation detail callers don't see.
+
+    Example::
+
+        class Job(dorm.Model):
+            timeout = dorm.DurationField()
+
+        Job.objects.create(timeout=datetime.timedelta(minutes=5))
+    """
+
+    _MICROS_PER_SECOND = 10 ** 6
+
+    def to_python(self, value):
+        if value is None:
+            return None
+        if isinstance(value, datetime.timedelta):
+            return value
+        if isinstance(value, (int, float)):
+            # Treat raw numbers as microseconds — matches the SQLite
+            # storage round-trip and what users get back from
+            # ``from_db_value`` on that backend.
+            return datetime.timedelta(microseconds=int(value))
+        if isinstance(value, str):
+            return self._parse_iso8601(value)
+        raise ValidationError(
+            f"Field '{self.name}': cannot convert {value!r} to timedelta."
+        )
+
+    @classmethod
+    def _parse_iso8601(cls, value: str) -> datetime.timedelta:
+        # Accept the two shapes ``isoformat`` round-trips between us and
+        # the database produce: ``HH:MM:SS[.ffffff]`` (PG INTERVAL coerced
+        # to text in custom queries) and ``"<int> microseconds"`` /
+        # ``"<int>"`` (SQLite raw integer or older Django dumps).
+        s = value.strip()
+        if not s:
+            raise ValidationError(
+                f"Field '{getattr(cls, 'name', '?')}': empty duration string."
+            )
+        if s.lstrip("-").isdigit():
+            return datetime.timedelta(microseconds=int(s))
+        # ``HH:MM:SS[.ffffff]`` with optional leading sign.
+        sign = 1
+        if s[0] in "+-":
+            if s[0] == "-":
+                sign = -1
+            s = s[1:]
+        parts = s.split(":")
+        if len(parts) != 3:
+            raise ValidationError(
+                f"DurationField: cannot parse {value!r}; "
+                "expected 'HH:MM:SS[.ffffff]' or microseconds as int."
+            )
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            secs = float(parts[2])
+        except ValueError as exc:
+            raise ValidationError(
+                f"DurationField: cannot parse {value!r}: {exc}"
+            ) from exc
+        td = datetime.timedelta(hours=hours, minutes=minutes, seconds=secs)
+        return -td if sign < 0 else td
+
+    def get_db_prep_value(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, datetime.timedelta):
+            value = self.to_python(value)
+        # On the binding path we don't have *connection* — the queryset
+        # rewriter calls ``get_db_prep_value`` before the SQL is dispatched
+        # to a specific backend. We return the timedelta unchanged so PG
+        # binds it natively as INTERVAL; SQLite's adapter chain (see
+        # ``dorm.db.backends.sqlite``) converts it to int microseconds at
+        # the cursor boundary. ``from_db_value`` reverses both encodings.
+        assert isinstance(value, datetime.timedelta)
+        return value
+
+    def from_db_value(self, value):
+        if value is None:
+            return None
+        if isinstance(value, datetime.timedelta):
+            return value
+        if isinstance(value, (int, float)):
+            return datetime.timedelta(microseconds=int(value))
+        if isinstance(value, str):
+            return self._parse_iso8601(value)
+        return value
+
+    def db_type(self, connection) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            return "INTERVAL"
+        return "BIGINT"
+
+
+# ── Enum field ────────────────────────────────────────────────────────────────
+
+
+_TEnum = TypeVar("_TEnum", bound=enum.Enum)
+
+
+class EnumField(Field[Any], Generic[_TEnum]):
+    """Stores a Python :class:`enum.Enum` member.
+
+    The column type is derived from the enum's underlying value type:
+    string-valued enums map to ``VARCHAR(max_length)``, integer-valued
+    enums to ``INTEGER``. The Python instance always carries the enum
+    *member* (e.g. ``Status.ACTIVE``); reading from the DB rehydrates
+    by member ``.value``.
+
+    ``choices`` is auto-derived from the enum so admin / form layers see
+    every member without restating them in ``Meta``.
+
+    Example::
+
+        class Status(enum.Enum):
+            ACTIVE = "active"
+            ARCHIVED = "archived"
+
+        class Article(dorm.Model):
+            status = dorm.EnumField(Status, default=Status.ACTIVE)
+    """
+
+    _STRING_DEFAULT_MAX = 50
+
+    def __init__(
+        self,
+        enum_cls: type[_TEnum],
+        *,
+        max_length: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if not (isinstance(enum_cls, type) and issubclass(enum_cls, enum.Enum)):
+            raise ValidationError(
+                "EnumField(enum_cls=...) must be a subclass of enum.Enum."
+            )
+        self.enum_cls = enum_cls
+        sample = next(iter(enum_cls)).value
+        self._is_string = isinstance(sample, str)
+        if self._is_string:
+            longest = max(len(m.value) for m in enum_cls)
+            self.max_length = max_length if max_length is not None else max(
+                longest, self._STRING_DEFAULT_MAX
+            )
+            kwargs.setdefault("max_length", self.max_length)
+        else:
+            self.max_length = None
+        # Auto-derive choices for admin / forms unless the caller
+        # passed an explicit set (rare but allowed for narrowing).
+        kwargs.setdefault(
+            "choices",
+            [(member.value, member.name) for member in enum_cls],
+        )
+        super().__init__(**kwargs)
+
+    def to_python(self, value):
+        if value is None:
+            return None
+        if isinstance(value, self.enum_cls):
+            return value
+        try:
+            return self.enum_cls(value)
+        except ValueError as exc:
+            valid = ", ".join(repr(m.value) for m in self.enum_cls)
+            raise ValidationError(
+                f"Field '{self.name}': {value!r} is not a valid member of "
+                f"{self.enum_cls.__name__} (expected one of {valid})."
+            ) from exc
+
+    def get_db_prep_value(self, value):
+        if value is None:
+            return None
+        if isinstance(value, self.enum_cls):
+            return value.value
+        # Allow already-coerced raw values on the write path so callers
+        # can pass either ``Status.ACTIVE`` or ``"active"``.
+        return value
+
+    def from_db_value(self, value):
+        if value is None:
+            return None
+        try:
+            return self.enum_cls(value)
+        except ValueError:
+            # Historical rows with a value outside the current enum
+            # definition shouldn't crash on read — surface the raw
+            # value so callers can migrate them.
+            return value
+
+    def db_type(self, connection) -> str:
+        if self._is_string:
+            return f"VARCHAR({self.max_length})"
+        # Integer enums; ``BIGINT``-sized values are fine in INTEGER on
+        # both backends (SQLite stores them in 64 bits regardless).
+        return "INTEGER"
+
+
+# ── Case-insensitive text ─────────────────────────────────────────────────────
+
+
+class CITextField(TextField):
+    """Case-insensitive text column.
+
+    Maps to PostgreSQL's ``CITEXT`` (requires the ``citext`` extension
+    on the database — issue ``RunSQL("CREATE EXTENSION IF NOT EXISTS
+    citext")`` from a migration before adding the column). On SQLite,
+    falls back to ``TEXT COLLATE NOCASE`` so equality / ``LIKE`` queries
+    behave the same way without the extension.
+
+    Example::
+
+        class User(dorm.Model):
+            email = dorm.CITextField(unique=True)
+
+        # both succeed and find the same row:
+        User.objects.get(email="Alice@example.com")
+        User.objects.get(email="alice@example.com")
+    """
+
+    def db_type(self, connection) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            return "CITEXT"
+        return "TEXT COLLATE NOCASE"
+
+
+# ── Range field (PostgreSQL) ──────────────────────────────────────────────────
+
+
+class Range:
+    """Plain-Python value type for PostgreSQL range columns.
+
+    Mirrors the shape of psycopg's :class:`psycopg.types.range.Range`
+    without coupling our public API to it. *bounds* is a two-character
+    string with the inclusivity of each endpoint: ``"[)"`` (default,
+    inclusive lower / exclusive upper), ``"(]"``, ``"[]"`` or ``"()"``.
+
+    Either endpoint may be ``None`` to denote an unbounded side.
+    """
+
+    __slots__ = ("lower", "upper", "bounds")
+
+    def __init__(
+        self,
+        lower: Any = None,
+        upper: Any = None,
+        bounds: str = "[)",
+    ) -> None:
+        if bounds not in ("[)", "(]", "[]", "()"):
+            raise ValidationError(
+                f"Range.bounds must be one of '[)', '(]', '[]', '()' — got {bounds!r}."
+            )
+        self.lower = lower
+        self.upper = upper
+        self.bounds = bounds
+
+    @property
+    def lower_inc(self) -> bool:
+        return self.bounds[0] == "["
+
+    @property
+    def upper_inc(self) -> bool:
+        return self.bounds[1] == "]"
+
+    def is_empty(self) -> bool:
+        # PostgreSQL has a distinct "empty" sentinel; we treat
+        # ``Range(None, None, "()")`` as empty for our pure-Python
+        # representation. Callers who need the literal ``empty`` keyword
+        # PG returns can pass it through ``RawSQL``.
+        return self.lower is None and self.upper is None and self.bounds == "()"
+
+    def __repr__(self) -> str:
+        return f"Range({self.lower!r}, {self.upper!r}, bounds={self.bounds!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Range):
+            return NotImplemented
+        return (
+            self.lower == other.lower
+            and self.upper == other.upper
+            and self.bounds == other.bounds
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.lower, self.upper, self.bounds))
+
+
+def _format_range_endpoint(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    return str(value)
+
+
+class RangeField(Field[Range]):
+    """Abstract base for PostgreSQL range columns.
+
+    Concrete subclasses set :attr:`range_type` to the SQL type name
+    (``int4range``, ``int8range``, ``numrange``, ``daterange``,
+    ``tstzrange``). PostgreSQL is the only supported backend; SQLite
+    raises :class:`NotImplementedError` from :meth:`db_type` so the
+    limitation surfaces at migrate time, not at first query.
+
+    The Python value is :class:`Range`. Reading from the database
+    accepts both psycopg's ``Range`` and our own; binding for write
+    formats the value as a typed range literal (``[lower,upper)``).
+
+    Example::
+
+        class Reservation(dorm.Model):
+            during = dorm.DateTimeRangeField()
+
+        from datetime import datetime, timezone
+        Reservation.objects.create(
+            during=dorm.Range(
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                datetime(2026, 1, 8, tzinfo=timezone.utc),
+            ),
+        )
+    """
+
+    range_type: str = ""
+
+    def to_python(self, value):
+        if value is None:
+            return None
+        if isinstance(value, Range):
+            return value
+        if isinstance(value, (list, tuple)) and len(value) in (2, 3):
+            lower, upper = value[0], value[1]
+            bounds = value[2] if len(value) == 3 else "[)"
+            return Range(lower, upper, bounds=bounds)
+        # Duck-type psycopg's Range without importing it (so we don't
+        # require psycopg to construct fields on SQLite-only deploys).
+        if all(hasattr(value, attr) for attr in ("lower", "upper", "lower_inc", "upper_inc")):
+            bounds = (
+                ("[" if value.lower_inc else "(")
+                + ("]" if value.upper_inc else ")")
+            )
+            return Range(value.lower, value.upper, bounds=bounds)
+        raise ValidationError(
+            f"Field '{self.name}': cannot convert {value!r} to a Range."
+        )
+
+    def get_db_prep_value(self, value):
+        if value is None:
+            return None
+        r = value if isinstance(value, Range) else self.to_python(value)
+        # PostgreSQL accepts a typed range literal in string form during
+        # INSERT — ``'[1,10)'::int4range``. Letting psycopg cast based
+        # on the column type lets us avoid registering custom adapters
+        # while keeping the wire format compact.
+        return (
+            f"{r.bounds[0]}{_format_range_endpoint(r.lower)},"
+            f"{_format_range_endpoint(r.upper)}{r.bounds[1]}"
+        )
+
+    def from_db_value(self, value):
+        if value is None:
+            return None
+        if isinstance(value, Range):
+            return value
+        if isinstance(value, str):
+            return self._parse_literal(value)
+        # psycopg's Range — convert via to_python so we only depend on
+        # its public attributes.
+        return self.to_python(value)
+
+    @staticmethod
+    def _parse_literal(text: str) -> "Range | None":
+        s = text.strip()
+        if s == "empty":
+            return Range(None, None, bounds="()")
+        if not s or s[0] not in "[(" or s[-1] not in "])":
+            raise ValidationError(
+                f"RangeField: cannot parse range literal {text!r}."
+            )
+        inner = s[1:-1]
+        # The endpoint values can themselves be quoted strings — but for
+        # the types we support (numbers / dates / timestamps) PG returns
+        # them unquoted. A naive split on the first comma is enough.
+        if "," not in inner:
+            raise ValidationError(
+                f"RangeField: malformed range literal {text!r}."
+            )
+        lower_text, upper_text = inner.split(",", 1)
+        lower = lower_text.strip().strip('"') or None
+        upper = upper_text.strip().strip('"') or None
+        return Range(lower, upper, bounds=s[0] + s[-1])
+
+    def db_type(self, connection) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"{self.__class__.__name__} is only supported on PostgreSQL. "
+                "SQLite has no native range type — use two columns and a "
+                "CHECK constraint instead."
+            )
+        return self.range_type
+
+
+class IntegerRangeField(RangeField):
+    range_type = "int4range"
+
+    def to_python(self, value):
+        r = super().to_python(value)
+        if r is None:
+            return None
+        return Range(
+            int(r.lower) if r.lower not in (None, "") else None,
+            int(r.upper) if r.upper not in (None, "") else None,
+            bounds=r.bounds,
+        )
+
+    def from_db_value(self, value):
+        return self.to_python(super().from_db_value(value))
+
+
+class BigIntegerRangeField(IntegerRangeField):
+    range_type = "int8range"
+
+
+class DecimalRangeField(RangeField):
+    range_type = "numrange"
+
+    def to_python(self, value):
+        r = super().to_python(value)
+        if r is None:
+            return None
+        return Range(
+            decimal.Decimal(str(r.lower)) if r.lower not in (None, "") else None,
+            decimal.Decimal(str(r.upper)) if r.upper not in (None, "") else None,
+            bounds=r.bounds,
+        )
+
+    def from_db_value(self, value):
+        return self.to_python(super().from_db_value(value))
+
+
+class DateRangeField(RangeField):
+    range_type = "daterange"
+
+    @staticmethod
+    def _coerce_date(v: Any) -> datetime.date | None:
+        if v in (None, ""):
+            return None
+        if isinstance(v, datetime.datetime):
+            return v.date()
+        if isinstance(v, datetime.date):
+            return v
+        return datetime.date.fromisoformat(str(v))
+
+    def to_python(self, value):
+        r = super().to_python(value)
+        if r is None:
+            return None
+        return Range(
+            self._coerce_date(r.lower),
+            self._coerce_date(r.upper),
+            bounds=r.bounds,
+        )
+
+    def from_db_value(self, value):
+        return self.to_python(super().from_db_value(value))
+
+
+class DateTimeRangeField(RangeField):
+    range_type = "tstzrange"
+
+    @staticmethod
+    def _coerce_dt(v: Any) -> datetime.datetime | None:
+        if v in (None, ""):
+            return None
+        if isinstance(v, datetime.datetime):
+            return v
+        return datetime.datetime.fromisoformat(str(v))
+
+    def to_python(self, value):
+        r = super().to_python(value)
+        if r is None:
+            return None
+        return Range(
+            self._coerce_dt(r.lower),
+            self._coerce_dt(r.upper),
+            bounds=r.bounds,
+        )
+
+    def from_db_value(self, value):
+        return self.to_python(super().from_db_value(value))
 
 
 # ── Relational fields ──────────────────────────────────────────────────────────

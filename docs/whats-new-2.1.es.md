@@ -309,6 +309,76 @@ Las variables conocidas del pool (`MAX_POOL_SIZE`, `POOL_TIMEOUT`,
 `POOL_CHECK`, `MAX_IDLE`, `MAX_LIFETIME`, `PREPARE_THRESHOLD`) se
 suben como claves de primer nivel; el resto cae en `OPTIONS`.
 
+## Nuevos tipos de campo
+
+Cuatro tipos cubren huecos clásicos del catálogo:
+
+```python
+import datetime, enum
+
+class Priority(enum.Enum):
+    LOW, MEDIUM, HIGH = "low", "medium", "high"
+
+class Job(dorm.Model):
+    name = dorm.CharField(max_length=100)
+    timeout = dorm.DurationField()                       # INTERVAL / BIGINT µs
+    priority = dorm.EnumField(Priority, default=Priority.LOW)
+    owner_email = dorm.CITextField(unique=True)          # CITEXT / TEXT NOCASE
+    seats = dorm.IntegerRangeField(null=True, blank=True)  # int4range PG
+```
+
+- **`DurationField`** almacena `datetime.timedelta`. `INTERVAL`
+  nativo en PostgreSQL; en SQLite dorm registra un adaptador de
+  sqlite3 para que el mismo `timedelta` viaje como microsegundos
+  enteros en un `BIGINT`.
+- **`EnumField(enum_cls)`** almacena un miembro de `enum.Enum`. El
+  tipo de columna se deriva del valor subyacente (string → `VARCHAR`,
+  int → `INTEGER`); `choices` se autopobla a partir del enum.
+- **`CITextField`** mapea al `CITEXT` de PostgreSQL (requiere la
+  extensión) y cae a `TEXT COLLATE NOCASE` en SQLite.
+- **Campos de rango** — `IntegerRangeField`, `BigIntegerRangeField`,
+  `DecimalRangeField`, `DateRangeField`, `DateTimeRangeField`. El
+  valor Python es `dorm.Range(lower, upper, bounds="[)")`. SQLite
+  levanta `NotImplementedError` desde `db_type()` para que la
+  limitación aparezca en `migrate`.
+
+## Receivers asíncronos en señales
+
+Las señales aceptan ahora receivers `async def`. Se conectan igual:
+
+```python
+async def reindex(sender, instance, **kw):
+    await search_client.upsert(instance)
+
+dorm.signals.post_save.connect(reindex, sender=Article, weak=False)
+
+await Article(...).asave()        # receiver async awaiteado en orden
+Article(...).save()               # receiver async se salta + WARNING
+```
+
+`Signal.asend()` es el nuevo punto de entrada que usan
+`Model.asave` / `Model.adelete`. Los receivers síncronos siguen
+síncronos; las corrutinas se awaitean secuencialmente en el orden de
+conexión. El `send()` síncrono mantiene su semántica — los receivers
+async conectados ahí se saltan con un único `WARNING` en
+`dorm.signals` para que el trabajo perdido sea visible.
+
+## `dorm dumpdata` / `dorm loaddata`
+
+Fixtures en JSON, compatibles con la forma de Django:
+
+```bash
+dorm dumpdata blog.Author > fixtures/authors.json
+dorm dumpdata --output fixtures/seed.json --indent 2
+dorm loaddata fixtures/authors.json
+```
+
+La salida es `[{"model": "<app.Model>", "pk": <pk>, "fields": {...}}, …]`.
+Las FKs se serializan como el PK del objetivo; las M2M como lista de
+PKs. El cargador inserta dentro de un `atomic()`, así que un
+registro malformado revierte el archivo entero. Se omiten `save()` y
+las señales para que el seed sea determinista y rápido.
+
 ## Migración desde 2.0.x
 
 Casi todas las features de 2.1 son aditivas — no necesitas cambios

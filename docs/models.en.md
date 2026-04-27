@@ -56,13 +56,70 @@ you declare your own primary key.
 | `DateField()` | `DATE` |
 | `TimeField()` | `TIME` |
 | `DateTimeField(auto_now_add=False, auto_now=False)` | `TIMESTAMP` |
+| `DurationField()` | `INTERVAL` (PG) / `BIGINT` µs (SQLite) |
 
 `auto_now_add` populates on insert; `auto_now` overwrites on every save.
+
+`DurationField` stores a `datetime.timedelta`. On PostgreSQL it maps
+to native `INTERVAL` (psycopg adapts `timedelta` directly). SQLite has
+no interval type, so dorm registers a sqlite3 adapter that stores the
+duration as integer microseconds in a `BIGINT` — the Python value is
+always a `timedelta`, the encoding is invisible.
+
+```python
+import datetime
+
+class Job(dorm.Model):
+    timeout = dorm.DurationField()
+    grace = dorm.DurationField(null=True, blank=True)
+
+Job.objects.create(timeout=datetime.timedelta(minutes=5))
+```
 
 ### Booleans
 
 `BooleanField()` — `BOOLEAN` (PG) / `INTEGER 0|1` (SQLite). Defaults
 are emitted vendor-aware (`DEFAULT TRUE` vs `DEFAULT 1`).
+
+### Enumerations
+
+`EnumField(enum_cls, max_length=None)` stores a `enum.Enum` member.
+The column type is derived from the enum's underlying value:
+string-valued enums become `VARCHAR(max_length)`, integer-valued enums
+become `INTEGER`. The Python instance always carries the enum
+*member*; reads from the DB rehydrate via `enum_cls(value)`.
+`choices` is auto-populated for admin / form layers.
+
+```python
+import enum
+
+class Status(enum.Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+class Article(dorm.Model):
+    status = dorm.EnumField(Status, default=Status.ACTIVE)
+
+Article.objects.filter(status=Status.ACTIVE)   # member
+Article.objects.filter(status="active")        # raw value also accepted
+```
+
+### Case-insensitive text
+
+`CITextField()` — case-insensitive text column. Maps to PostgreSQL's
+`CITEXT` (the database needs the `citext` extension; install via
+`RunSQL("CREATE EXTENSION IF NOT EXISTS citext")` in a migration). On
+SQLite, falls back to `TEXT COLLATE NOCASE` so equality / `LIKE`
+queries behave the same way without the extension.
+
+```python
+class User(dorm.Model):
+    email = dorm.CITextField(unique=True)
+
+# both succeed and find the same row:
+User.objects.get(email="Alice@example.com")
+User.objects.get(email="alice@example.com")
+```
 
 ### Structured data
 
@@ -71,6 +128,44 @@ are emitted vendor-aware (`DEFAULT TRUE` vs `DEFAULT 1`).
 | `JSONField()` | `JSONB` (PG) / `TEXT` (SQLite) |
 | `BinaryField()` | `BYTEA` / `BLOB` |
 | `ArrayField(base_field)` | `<inner>[]` (PG only — raises on SQLite) |
+
+### Range types (PostgreSQL only)
+
+| Field | DB type |
+|---|---|
+| `IntegerRangeField()` | `int4range` |
+| `BigIntegerRangeField()` | `int8range` |
+| `DecimalRangeField()` | `numrange` |
+| `DateRangeField()` | `daterange` |
+| `DateTimeRangeField()` | `tstzrange` |
+
+The Python value type is `dorm.Range(lower, upper, bounds="[)")`.
+`bounds` is two characters denoting endpoint inclusivity — `"[)"` (the
+default), `"(]"`, `"[]"`, or `"()"`. Either endpoint may be `None` to
+mean "unbounded on that side".
+
+```python
+import datetime
+
+class Reservation(dorm.Model):
+    during = dorm.DateTimeRangeField()
+    seats = dorm.IntegerRangeField(null=True, blank=True)
+
+Reservation.objects.create(
+    during=dorm.Range(
+        datetime.datetime(2026, 1, 1, 9, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 1, 1, 17, tzinfo=datetime.timezone.utc),
+    ),
+    seats=dorm.Range(1, 10),
+)
+```
+
+PostgreSQL canonicalises *discrete* ranges (`int4range`, `int8range`,
+`daterange`) on the way out — `(1, 5]` always returns as `[2, 6)`.
+Continuous ranges (`numrange`, `tstzrange`) preserve the bounds you
+wrote. SQLite has no native range type; using one of these fields on
+a SQLite connection raises `NotImplementedError` from `db_type()` so
+the limitation surfaces at migrate time, not at first query.
 
 ### Relationships
 

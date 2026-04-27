@@ -141,6 +141,53 @@ lugar de la cadena de conexión, así no queda en el historial del
 shell ni en `ps`. El proceso hijo hereda tu terminal — sal con `\q`
 (psql) o `.exit` (sqlite3) para volver.
 
+## `dorm dumpdata` (2.1+)
+
+Serializa filas de modelos a JSON. Sin argumento posicional vuelca
+todos los modelos concretos de `INSTALLED_APPS`. Pasa un label de app
+o `app.ModelName` para acotar.
+
+```bash
+dorm dumpdata                              # todo → stdout
+dorm dumpdata blog                         # solo modelos de la app "blog"
+dorm dumpdata blog.Post users.User         # modelos específicos
+dorm dumpdata --output fixtures/seed.json --indent 2
+```
+
+Formato de salida (compatible con `dumpdata` de Django):
+
+```json
+[
+  {"model": "blog.Author", "pk": 1, "fields": {"name": "Alice"}},
+  {"model": "blog.Article", "pk": 7, "fields": {
+      "title": "Hello", "author": 1, "tags": [3, 5]
+  }}
+]
+```
+
+Las claves foráneas se serializan como el PK del objetivo. Las
+relaciones M2M se serializan como lista de PKs relacionados. Los
+tipos no nativos de JSON (decimales, UUIDs, datetimes, duraciones,
+rangos, bytes) viajan por envoltorios dedicados — el cargador
+reconstruye el tipo Python correcto vía el `to_python` del campo.
+
+## `dorm loaddata` (2.1+)
+
+Carga uno o más archivos JSON de fixtures dentro de la base de datos.
+
+```bash
+dorm loaddata fixtures/seed.json
+dorm loaddata fixtures/users.json fixtures/posts.json
+dorm loaddata fixtures/seed.json --database replica
+```
+
+Cada archivo se carga dentro de una única transacción — un registro
+malformado revierte al inicio de ese archivo en lugar de dejar una
+restauración a medias. Las relaciones M2M se insertan en una segunda
+fase, una vez que todas las filas padre han aterrizado. **Se omiten
+`save()` y las señales** por rendimiento; `Model.save()` es el camino
+correcto cuando sí quieres que disparen los pre-save hooks.
+
 ## `dorm help`
 
 ```bash
