@@ -130,6 +130,27 @@ Author.objects.aggregate(total=Sum("age"), avg=Avg("age"))
 Author.objects.annotate(post_count=Count("books"))
 ```
 
+### `alias()` — annotate sin proyectar
+
+`alias()` declara una expresión usable en `filter()` / `exclude()` /
+`order_by()` pero **no** se proyecta en las filas resultado — te
+ahorras el ancho de banda y la hidratación por fila cuando solo
+necesitas el valor para construir un predicado o una clave de orden:
+
+```python
+authors = (
+    Author.objects
+    .alias(book_count=Count("books"))
+    .filter(book_count__gte=5)        # usa el alias
+    .order_by("name")
+)
+# SELECT solo las columnas normales de Author; el COUNT() participa
+# en el WHERE pero no se devuelve.
+```
+
+Promueve un alias a proyección real volviéndolo a declarar con
+`annotate(name=...)` más adelante en la cadena — paridad con Django.
+
 ## Funciones BD
 
 ```python
@@ -188,6 +209,38 @@ Author.objects.bulk_create([
 # 1 INSERT multi-row por batch.
 ```
 
+### Upsert (`bulk_create` con manejo de conflicto)
+
+`bulk_create` acepta dos flags de upsert que mapean a la semántica
+`ON CONFLICT` de PostgreSQL / SQLite:
+
+```python
+# Saltar duplicados (ON CONFLICT DO NOTHING)
+Tag.objects.bulk_create(
+    [Tag(name="alpha"), Tag(name="beta")],
+    ignore_conflicts=True,
+)
+
+# Actualizar al haber conflicto (ON CONFLICT (...) DO UPDATE SET ...)
+Author.objects.bulk_create(
+    [Author(email="x@y.com", name="Updated", age=42)],
+    update_conflicts=True,
+    update_fields=["name", "age"],     # qué refrescar al haber conflicto
+    unique_fields=["email"],            # qué constraint identifica el conflicto
+)
+```
+
+`unique_fields=` es **obligatorio** con `update_conflicts=True`.
+`update_fields=` por defecto cubre todas las columnas no-PK / no-
+unique cuando se omite — normalmente lo que quieres para una
+sincronización idempotente desde una fuente externa. La contraparte
+async, `abulk_create(...)`, expone los mismos flags.
+
+Cuando puede haber filas saltadas por conflicto, las PKs devueltas
+**no** se asignan a los objetos de entrada — la BD no reporta qué
+filas escribieron de verdad. Re-fetch por `unique_fields` si
+necesitas el set final de PKs.
+
 ## get_or_create / update_or_create
 
 ```python
@@ -232,6 +285,47 @@ intermedia (sin el "fetch through y luego fetch targets" en dos pasos).
 Author.objects.only("name", "email")     # SELECT name, email
 Author.objects.defer("bio")              # SELECT todo menos bio
 ```
+
+## Bloqueo de filas: `select_for_update`
+
+Bloquea filas para la transacción que las envuelve. Tiene que
+llamarse dentro de un bloque `atomic()` / `aatomic()` — si no,
+PostgreSQL libera el lock de inmediato al hacer autocommit y la
+llamada queda en no-op.
+
+```python
+from dorm import transaction
+
+with transaction.atomic():
+    a = Author.objects.select_for_update().get(pk=1)
+    a.balance -= 100
+    a.save()
+```
+
+Tres flags mapean a las variantes de lock por fila de PostgreSQL:
+
+```python
+# Patrón cola de tareas: cada worker se lleva la siguiente fila *no
+# bloqueada*.
+job = (
+    Job.objects
+    .filter(status="pending")
+    .select_for_update(skip_locked=True)
+    .first()
+)
+
+# Fallar rápido ante contención en lugar de esperar.
+qs.select_for_update(no_wait=True)
+
+# Bloquear solo tablas concretas en joins (evita bloquear padres en
+# una cadena de select_related).
+qs.select_related("publisher").select_for_update(of=("authors",))
+```
+
+`skip_locked` y `no_wait` son mutuamente exclusivos. Las tres son
+PostgreSQL-only — pasarlas en SQLite lanza `NotImplementedError`
+(SQLite serializa escritores con el lock de archivo, así que las
+variantes a nivel de fila no traducen).
 
 ## Streaming para resultsets enormes
 

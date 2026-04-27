@@ -159,19 +159,43 @@ class ModelBase(type):
         for fname, field in declared_fields:
             field.contribute_to_class(new_class, fname)
 
-        # Add default manager only for concrete models
+        # Contribute any user-declared Manager instances (custom managers
+        # like ``objects = MyCustomManager()``). Without this step the
+        # manager would just be a class attribute pointing at a Manager
+        # whose ``model`` was never set — ``MyModel.objects.all()`` would
+        # still call methods, but ``self.model`` is None inside them and
+        # most queryset construction breaks. We collect names first so
+        # the descriptor swap doesn't perturb the iteration.
         from .manager import Manager
-        if not opts.abstract and not any(isinstance(v, Manager) for v in attrs.values()):
-            manager = Manager()
-            manager.contribute_to_class(new_class, "objects")
+        declared_manager_names = [
+            (k, v) for k, v in attrs.items() if isinstance(v, Manager)
+        ]
+        for name_, mgr in declared_manager_names:
+            mgr.contribute_to_class(new_class, name_)
+        already = {n for n, _ in declared_manager_names}
 
-        # Also inherit managers from concrete parents
+        # Inherit managers from parents (including abstract ones — that's
+        # how :class:`SoftDeleteModel` ships ``objects`` /
+        # ``all_objects`` / ``deleted_objects`` to its subclasses). We
+        # do this BEFORE the default-manager fallback so a child that
+        # only redeclares some of the parents' managers still gets the
+        # rest, and the default Manager doesn't clobber an inherited
+        # ``objects``. Re-instantiate via ``mgr.__class__()`` so
+        # ``self.model`` points at the *child* class, not the parent.
         for parent in parents:
             if hasattr(parent, "_meta"):
                 for mgr in parent._meta.managers:
-                    if mgr.name not in new_class.__dict__:
-                        new_mgr = mgr.__class__()
-                        new_mgr.contribute_to_class(new_class, mgr.name)
+                    if mgr.name in already:
+                        continue
+                    new_mgr = mgr.__class__()
+                    new_mgr.contribute_to_class(new_class, mgr.name)
+                    already.add(mgr.name)
+
+        # Add the default Manager only for concrete models that ended
+        # up with no manager at all (no declared, no inherited).
+        if not opts.abstract and "objects" not in already:
+            manager = Manager()
+            manager.contribute_to_class(new_class, "objects")
 
         # Set up model-level DoesNotExist / MultipleObjectsReturned
         new_class.DoesNotExist = type(  # type: ignore

@@ -132,6 +132,27 @@ Author.objects.aggregate(total=Sum("age"), avg=Avg("age"))
 Author.objects.annotate(post_count=Count("books"))
 ```
 
+### `alias()` — annotate without selecting
+
+`alias()` declares a named expression usable in `filter()` /
+`exclude()` / `order_by()` but **not** projected into the result
+rows — skip the bandwidth and per-row hydration cost when you only
+need the value to build a predicate or a sort key:
+
+```python
+authors = (
+    Author.objects
+    .alias(book_count=Count("books"))
+    .filter(book_count__gte=5)        # uses the alias
+    .order_by("name")
+)
+# SELECT only the regular Author columns; the COUNT() participates
+# in the WHERE clause but isn't returned.
+```
+
+Promote an alias to a real projection by re-declaring it via
+`annotate(name=...)` later in the chain — Django parity.
+
 ## DB functions
 
 ```python
@@ -189,6 +210,38 @@ Author.objects.bulk_create([
 # 1 multi-row INSERT per batch.
 ```
 
+### Upsert (`bulk_create` with conflict handling)
+
+`bulk_create` accepts two upsert flags, mapping to PostgreSQL /
+SQLite `ON CONFLICT` semantics:
+
+```python
+# Skip duplicates entirely (ON CONFLICT DO NOTHING)
+Tag.objects.bulk_create(
+    [Tag(name="alpha"), Tag(name="beta")],
+    ignore_conflicts=True,
+)
+
+# Update on conflict (ON CONFLICT (...) DO UPDATE SET ...)
+Author.objects.bulk_create(
+    [Author(email="x@y.com", name="Updated", age=42)],
+    update_conflicts=True,
+    update_fields=["name", "age"],     # what to refresh on conflict
+    unique_fields=["email"],            # which constraint identifies the conflict
+)
+```
+
+`unique_fields=` is **required** with `update_conflicts=True`.
+`update_fields=` defaults to every non-PK / non-unique column when
+omitted — usually what you want for an idempotent sync from an
+external source. Async counterpart: `abulk_create(...)` with the
+same flags.
+
+When conflicts may have skipped rows, returned PKs are not
+back-filled on the input objects — the database doesn't report which
+rows actually wrote. Re-fetch by `unique_fields` if you need the
+final PK set.
+
 ## get_or_create / update_or_create
 
 ```python
@@ -232,6 +285,45 @@ table (no separate "fetch through then fetch targets" round-trip).
 Author.objects.only("name", "email")     # SELECT name, email
 Author.objects.defer("bio")              # SELECT everything except bio
 ```
+
+## Row locking: `select_for_update`
+
+Lock rows for the surrounding transaction. Must be called inside an
+`atomic()` / `aatomic()` block — otherwise PostgreSQL releases the
+lock immediately at autocommit and the call is effectively a no-op.
+
+```python
+from dorm import transaction
+
+with transaction.atomic():
+    a = Author.objects.select_for_update().get(pk=1)
+    a.balance -= 100
+    a.save()
+```
+
+Three flags map to PostgreSQL's row-level lock variants:
+
+```python
+# Task-queue pattern: each worker pops the next *unlocked* row.
+job = (
+    Job.objects
+    .filter(status="pending")
+    .select_for_update(skip_locked=True)
+    .first()
+)
+
+# Bail fast on contention instead of waiting.
+qs.select_for_update(no_wait=True)
+
+# Lock only specific tables when joining (avoid locking parents
+# in a select_related chain).
+qs.select_related("publisher").select_for_update(of=("authors",))
+```
+
+`skip_locked` and `no_wait` are mutually exclusive. All three flags
+are PostgreSQL-only — passing them on SQLite raises
+`NotImplementedError` (SQLite serialises writers via the file lock,
+so row-level lock variants don't translate).
 
 ## Streaming for huge result sets
 

@@ -52,6 +52,79 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Author.objects.iterator()` now works without going through
   `.get_queryset().iterator()`, matching the rest of the manager API
   and Django's surface.
+- **`transaction.on_commit(callback)` and `transaction.aon_commit(...)`.**
+  Schedule callbacks that fire only after the surrounding transaction
+  actually commits — the canonical Django pattern for sending email,
+  enqueueing background jobs, or publishing events from inside a
+  write block without leaking effects when the transaction rolls back.
+  Async variant accepts both regular callables and coroutine
+  functions. Outside an `atomic()` block, callbacks fire immediately.
+- **`atomic()` / `aatomic()` context managers expose `set_rollback(True)`.**
+  Force a rollback without raising — primarily for test fixtures and
+  cleanup helpers. Mirrors Django's `transaction.set_rollback`.
+- **`QuerySet.select_for_update(skip_locked=, no_wait=, of=)`.** Three
+  new flags, all PostgreSQL-only:
+  - `skip_locked=True` skips already-locked rows instead of waiting —
+    the canonical "task queue" pattern (`SELECT … FOR UPDATE SKIP LOCKED`).
+  - `no_wait=True` raises immediately on contention instead of waiting.
+  - `of=("authors", …)` limits the lock to specific tables when
+    joining. Identifiers are validated.
+
+  SQLite raises `NotImplementedError` if any of these are passed —
+  better than silently ignoring them.
+- **`QuerySet.bulk_create(ignore_conflicts=, update_conflicts=, …)`.**
+  Native upsert support via `ON CONFLICT … DO NOTHING` (when
+  `ignore_conflicts=True`) and `ON CONFLICT … DO UPDATE SET …` (when
+  `update_conflicts=True`). Works on both PostgreSQL and SQLite ≥ 3.24.
+  `update_conflicts=True` requires `unique_fields=` to identify the
+  conflict target; `update_fields=` defaults to every non-PK,
+  non-unique column. Async counterpart `abulk_create` mirrors the same
+  surface.
+- **`QuerySet.alias(**kwargs)` (and `Manager.alias`).** Same shape as
+  `annotate()` but the named expression is **not** included in the
+  `SELECT` list — usable for `filter()` / `exclude()` / `order_by()`
+  without paying the per-row hydration cost. Promote to a real
+  projection by re-declaring it via `annotate()`.
+- **`dorm.pool_stats(alias)` and `health_check(deep=True)`.**
+  `pool_stats()` returns live PostgreSQL pool metrics
+  (`pool_size`, `pool_available`, `requests_waiting`,
+  `requests_num`, `usage_ms`, `connections_ms`, …) for a Prometheus /
+  OTel exporter. `health_check(deep=True)` composes the basic
+  `SELECT 1` probe with `pool_stats()` so the same endpoint can serve
+  both readiness and observability.
+- **`dorm.test` module: `transactional_db` / `atransactional_db`
+  fixtures and `DormTestCase` mixin.** Wrap each test in an `atomic()`
+  block that rolls back at exit, avoiding the
+  `DROP TABLE`/`CREATE TABLE` churn between tests. Drops a typical
+  suite's runtime by ~3-5×.
+- **`dorm dbshell` CLI command.** Drops into the underlying database
+  client (`psql` / `sqlite3`) with credentials already wired from
+  settings. The PG password is passed via `PGPASSWORD` env var so it
+  doesn't show up in `ps`. `--database` selects an alias.
+- **`dorm.contrib.softdelete`: `SoftDeleteModel` abstract mixin and
+  managers.** Inherit from `SoftDeleteModel` to get a `deleted_at`
+  field, three managers (`objects`, `all_objects`, `deleted_objects`)
+  and a `delete(hard=False)` / `restore()` / async equivalents API.
+  The default `objects` manager hides soft-deleted rows; `all_objects`
+  sees them; `deleted_objects` shows only soft-deleted rows.
+- **PostgreSQL `LISTEN` / `NOTIFY` async API.**
+  `await async_conn.notify(channel, payload)` and
+  `async for msg in async_conn.listen(channel)` give you pub/sub on
+  the database itself — no Redis required for small fan-out workloads.
+  Channel names are validated as SQL identifiers.
+- **`dorm.contrib.otel.instrument()` / `uninstrument()`.** Auto-wires
+  the `pre_query` / `post_query` signals to OpenTelemetry spans.
+  Idempotent — calling twice replaces the previous wiring. Optional
+  dependency on `opentelemetry-api`; raises a helpful `ImportError` if
+  not installed.
+- **Custom Manager instances declared on a model are now properly
+  registered.** Previously `objects = MyCustomManager()` left the
+  manager's `model` attribute unset, breaking most queryset
+  construction. The metaclass now calls `contribute_to_class` for
+  every declared manager, and inherits managers from abstract parents
+  before falling back to the auto-default — making
+  `dorm.contrib.softdelete` (and any user-written equivalent) work
+  out of the box.
 
 ### Security
 - **DEBUG query logs mask values bound to sensitive columns.** Values

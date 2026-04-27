@@ -797,3 +797,65 @@ class PostgreSQLAsyncDatabaseWrapper:
             self._pool = None
             _lifecycle.info("async pool closed")
             _lifecycle.debug("async pool closed: db=%s", self._dsn.get("dbname"))
+
+    async def notify(self, channel: str, payload: str = "") -> None:
+        """Send a ``NOTIFY`` to *channel* with optional *payload*.
+
+        ``channel`` is validated as a SQL identifier; ``payload`` is
+        passed as a bound parameter so it can carry any UTF-8 text
+        (PostgreSQL's NOTIFY payload limit is 8000 bytes by default).
+        Emit from anywhere — inside or outside a transaction. When
+        called inside an :func:`aatomic` block the NOTIFY isn't
+        delivered until the surrounding transaction commits, which is
+        usually exactly what you want.
+        """
+        from ...query import _validate_identifier
+
+        _validate_identifier(channel, kind="NOTIFY channel")
+        # NOTIFY's payload arg can be parameterised via pg_notify().
+        await self.execute("SELECT pg_notify(%s, %s)", [channel, payload])
+
+    async def listen(self, channel: str):
+        """Async iterator yielding notification objects for *channel*.
+
+        Opens its **own** dedicated connection (LISTEN holds the
+        connection for the lifetime of the subscription, so we don't
+        want to tie up a pool slot). Each yielded value is a
+        ``psycopg.Notify`` with ``channel``, ``payload`` and ``pid``
+        attributes.
+
+        ``channel`` is validated as a SQL identifier so callers passing
+        user input can't smuggle arbitrary SQL.
+
+        Use it as ``async for msg in conn.listen("orders"): …`` — the
+        loop never returns by itself; break out when you want to
+        unsubscribe (or cancel the consuming task). On exit, the
+        underlying connection is closed cleanly.
+        """
+        import psycopg
+        from psycopg.rows import dict_row
+        from ...query import _validate_identifier
+
+        _validate_identifier(channel, kind="LISTEN channel")
+        # psycopg requires LISTEN to run on a dedicated, autocommit
+        # connection — the generator owns this connection for its
+        # lifetime. We can't re-use a pool connection because LISTEN
+        # registers an asynchronous notification handler on it.
+        conn = await psycopg.AsyncConnection.connect(
+            _dsn_to_conninfo(self._dsn),
+            autocommit=True,
+            row_factory=dict_row,  # type: ignore
+        )
+        try:
+            async with conn.cursor() as cur:
+                # Identifier is already validated; safe to splice.
+                # ``cur.execute`` wants a LiteralString; the f-string here
+                # is built only from validated identifiers, so it's safe.
+                await cur.execute(f'LISTEN "{channel}"')  # type: ignore
+            async for notify in conn.notifies():
+                yield notify
+        finally:
+            try:
+                await conn.close()
+            except Exception:
+                pass

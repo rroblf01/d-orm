@@ -74,11 +74,24 @@ class BaseManager(Generic[_T]):
     def prefetch_related(self, *fields: str) -> QuerySet[_T]:
         return self.get_queryset().prefetch_related(*fields)
 
-    def select_for_update(self) -> QuerySet[_T]:
-        return self.get_queryset().select_for_update()
+    def select_for_update(
+        self,
+        *,
+        skip_locked: bool = False,
+        no_wait: bool = False,
+        of: tuple[str, ...] | list[str] | None = None,
+    ) -> QuerySet[_T]:
+        return self.get_queryset().select_for_update(
+            skip_locked=skip_locked,
+            no_wait=no_wait,
+            of=of,
+        )
 
     def annotate(self, **kwargs: Any) -> QuerySet[_T]:
         return self.get_queryset().annotate(**kwargs)
+
+    def alias(self, **kwargs: Any) -> QuerySet[_T]:
+        return self.get_queryset().alias(**kwargs)
 
     def values(self, *fields: str) -> QuerySet[Any]:
         return self.get_queryset().values(*fields)
@@ -117,8 +130,24 @@ class BaseManager(Generic[_T]):
     def delete(self) -> tuple[int, dict[str, int]]:
         return self.get_queryset().delete()
 
-    def bulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
-        return self.get_queryset().bulk_create(objs, batch_size)
+    def bulk_create(
+        self,
+        objs: list[_T],
+        batch_size: int = 1000,
+        *,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: list[str] | None = None,
+        unique_fields: list[str] | None = None,
+    ) -> list[_T]:
+        return self.get_queryset().bulk_create(
+            objs,
+            batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=update_conflicts,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
 
     def bulk_update(self, objs: list[_T], fields: list[str], batch_size: int = 1000) -> int:
         return self.get_queryset().bulk_update(objs, fields, batch_size)
@@ -192,8 +221,24 @@ class BaseManager(Generic[_T]):
     async def alast(self) -> _T | None:
         return await self.get_queryset().alast()
 
-    async def abulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
-        return await self.get_queryset().abulk_create(objs, batch_size)
+    async def abulk_create(
+        self,
+        objs: list[_T],
+        batch_size: int = 1000,
+        *,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: list[str] | None = None,
+        unique_fields: list[str] | None = None,
+    ) -> list[_T]:
+        return await self.get_queryset().abulk_create(
+            objs,
+            batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=update_conflicts,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
 
     async def abulk_update(
         self, objs: list[_T], fields: list[str], batch_size: int = 1000

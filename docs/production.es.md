@@ -115,6 +115,35 @@ Ninguno lanza excepción — siempre responden, incluso cuando la BD
 está caída, que es lo que necesita una sonda de readiness en un
 orquestador.
 
+Pasa `deep=True` para incluir además estadísticas en vivo del pool,
+así el mismo endpoint puede servir readiness *y* observabilidad:
+
+```python
+await dorm.ahealth_check(deep=True)
+# {
+#   "status": "ok", "alias": "default", "elapsed_ms": 0.42,
+#   "pool": {
+#     "alias": "default", "vendor": "postgresql", "has_pool": True,
+#     "pool_min": 1, "pool_max": 10,
+#     "pool_size": 7, "pool_available": 4, "requests_waiting": 0,
+#     "requests_num": 18234, "usage_ms": 412.3, "connections_ms": 1.1,
+#     ...
+#   }
+# }
+```
+
+O llama a `dorm.pool_stats(alias)` directamente si solo te interesa
+la vista del pool (p.ej. en un exporter de Prometheus):
+
+```python
+from dorm.db.connection import pool_stats
+stats = pool_stats("default")
+```
+
+Un pool cuyo `pool_available` se queda a cero con
+`requests_waiting > 0` durante periodos prolongados es el indicador
+adelantado de una app limitada por conexiones.
+
 ## Despliegue de migraciones
 
 El orden recomendado:

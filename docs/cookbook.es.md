@@ -56,23 +56,35 @@ def page_after(qs, last_id: int, page_size: int = 20):
 
 ## Soft delete
 
+Hay un mixin listo en `dorm.contrib.softdelete`:
+
 ```python
-class SoftDeleteQuerySet(QuerySet):
-    def alive(self):
-        return self.filter(deleted_at__isnull=True)
-    def soft_delete(self):
-        from datetime import datetime, timezone
-        return self.update(deleted_at=datetime.now(timezone.utc))
+from dorm.contrib.softdelete import SoftDeleteModel
+import dorm
 
-class Post(dorm.Model):
+class Post(SoftDeleteModel):
     title = dorm.CharField(max_length=200)
-    deleted_at = dorm.DateTimeField(null=True, blank=True, db_index=True)
 
-    objects = SoftDeleteQuerySet.as_manager()
+# Tres managers:
+Post.objects                          # solo filas vivas
+Post.all_objects                      # todo
+Post.deleted_objects                  # solo soft-deleted
+
+# Soft delete por defecto; pasa hard=True para un DELETE real:
+post.delete()                         # UPDATE … SET deleted_at = now()
+post.delete(hard=True)                # DELETE FROM …
+post.restore()                        # limpia deleted_at
+
+# Paridad async:
+await post.adelete()
+await post.arestore()
 ```
 
-Pasa siempre por `Post.objects.alive()` en queries normales y
-reserva `Post.objects.all()` para código de admin/auditoría.
+Avisos: `on_delete=CASCADE` **no** cascadea por soft delete (los
+hijos siguen visibles en `Post.objects`). Y los UNIQUE de la BD no
+saben de `deleted_at` — usa un índice parcial
+(`UNIQUE … WHERE deleted_at IS NULL`) en el schema si necesitas
+"único entre filas vivas".
 
 ## Audit log via señales
 
@@ -195,7 +207,8 @@ para todo lo más antiguo de unos segundos.
 
 ```python
 import pytest, dorm
-from dorm.db.connection import close_all, reset_connections
+from dorm.db.connection import close_all
+from dorm.test import transactional_db, atransactional_db  # noqa: F401
 
 @pytest.fixture(scope="session", autouse=True)
 def configure_dorm():
@@ -206,8 +219,69 @@ def configure_dorm():
 @pytest.fixture
 def author():
     return Author.objects.create(name="Alice", age=30)
+
+
+def test_something(transactional_db, author):
+    Author.objects.create(name="Mallory", age=99)
+    assert Author.objects.count() == 2
+    # Las dos filas se hacen rollback solas al salir el test.
+```
+
+`transactional_db` (sync) y `atransactional_db` (pytest-asyncio)
+envuelven cada test en un `atomic()` que hace rollback al salir,
+ahorrándote el `DROP TABLE` / `CREATE TABLE` entre tests. Para
+suites con unittest usa el mixin `dorm.test.DormTestCase`:
+
+```python
+import unittest
+from dorm.test import DormTestCase
+
+class AuthorTests(DormTestCase, unittest.TestCase):
+    def test_create(self):
+        Author.objects.create(name="Alice", age=30)
+        # rollback en tearDown
 ```
 
 Para tests de integración con PostgreSQL, usa
 [`testcontainers`](https://testcontainers-python.readthedocs.io/)
 para levantar un Postgres efímero por sesión.
+
+## Instrumentación con OpenTelemetry
+
+```python
+from dorm.contrib.otel import instrument
+
+instrument()                # nombre de tracer por defecto: "dorm"
+# instrument(tracer_name="miapp.dorm")
+```
+
+Cada query genera un span con `db.system` (`"postgresql"` /
+`"sqlite"`), `db.statement` (truncado a 1KB) y
+`db.dorm.elapsed_ms`. Las queries fallidas marcan el span con status
+`ERROR` y la clase de la excepción en `db.dorm.error`. Idempotente —
+llamarla dos veces reemplaza el cableado anterior (sin duplicar
+spans). Dependencia opcional sobre `opentelemetry-api`.
+
+## Pub/sub PostgreSQL con `LISTEN` / `NOTIFY`
+
+```python
+from dorm.db.connection import get_async_connection
+
+conn = get_async_connection()
+
+# Publicar:
+async with transaction.aatomic():
+    Order.objects.create(...)
+    await conn.notify("orders", str(order.pk))
+# El NOTIFY se entrega tras el COMMIT — los suscriptores solo ven
+# trabajo commiteado.
+
+# Suscribirse:
+async for msg in conn.listen("orders"):
+    print(msg.channel, msg.payload, msg.pid)
+```
+
+Los nombres de canal se validan como identificadores SQL. El
+iterador async de `listen()` abre su propia conexión dedicada
+(LISTEN retiene la conexión durante toda la suscripción) y la cierra
+limpio cuando rompes el bucle.

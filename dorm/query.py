@@ -44,8 +44,21 @@ class SQLQuery:
         self.selected_fields: list[str] | None = None  # for .values()
         self.deferred_loading: bool = False  # True when using only()/defer()
         self.annotations: dict[str, Any] = {}
+        # Names in ``annotations`` that should be available for WHERE /
+        # ORDER BY but NOT included in the SELECT column list. Populated
+        # by :meth:`QuerySet.alias`. Treated like annotations in every
+        # other respect (FK joins, expression compilation) — only the
+        # SELECT-projection step honours this set.
+        self.alias_only_names: set[str] = set()
         self.distinct_flag: bool = False
         self.for_update_flag: bool = False
+        # Detail flags for ``SELECT … FOR UPDATE`` clauses. Only meaningful
+        # on PostgreSQL; SQLite raises if any is set (see queryset's
+        # ``select_for_update``). ``for_update_of`` is a tuple of relation
+        # names — empty means lock the whole row, not specific tables.
+        self.for_update_skip_locked: bool = False
+        self.for_update_no_wait: bool = False
+        self.for_update_of: tuple[str, ...] = ()
         self.joins: list[tuple] = []  # (join_type, table, alias, on_condition)
         self.group_by_fields: list[str] = []
         self.having_nodes: list = []
@@ -61,8 +74,12 @@ class SQLQuery:
         q.selected_fields = list(self.selected_fields) if self.selected_fields is not None else None
         q.deferred_loading = self.deferred_loading
         q.annotations = dict(self.annotations)
+        q.alias_only_names = set(self.alias_only_names)
         q.distinct_flag = self.distinct_flag
         q.for_update_flag = self.for_update_flag
+        q.for_update_skip_locked = self.for_update_skip_locked
+        q.for_update_no_wait = self.for_update_no_wait
+        q.for_update_of = self.for_update_of
         q.joins = list(self.joins)
         q.group_by_fields = list(self.group_by_fields)
         q.having_nodes = list(self.having_nodes)
@@ -71,6 +88,44 @@ class SQLQuery:
         return q
 
     # ── SQL builders ──────────────────────────────────────────────────────────
+
+    def _compile_for_update(self, connection) -> str:
+        """Return the trailing ``FOR UPDATE`` clause SQL for this query.
+
+        On SQLite there is no row-level locking; we emit nothing and rely
+        on the file-level lock + ``BEGIN IMMEDIATE`` semantics. The
+        queryset method validates that no PG-only flags were set so the
+        user gets a clear error rather than silent SQL corruption.
+
+        On PostgreSQL we map directly:
+
+            select_for_update()                       → FOR UPDATE
+            select_for_update(skip_locked=True)       → FOR UPDATE SKIP LOCKED
+            select_for_update(no_wait=True)           → FOR UPDATE NOWAIT
+            select_for_update(of=("authors", ...))    → FOR UPDATE OF "authors"
+
+        ``of`` names are validated through ``_validate_identifier`` so
+        they can never inject SQL.
+        """
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            # SQLite: row-level locking is not a thing — the OS-level
+            # file lock + ``BEGIN IMMEDIATE`` already serialise writers.
+            # Emit nothing; the queryset validated the args already.
+            return ""
+
+        clause = " FOR UPDATE"
+        if self.for_update_of:
+            of_parts: list[str] = []
+            for name in self.for_update_of:
+                _validate_identifier(name)
+                of_parts.append(f'"{name}"')
+            clause += " OF " + ", ".join(of_parts)
+        if self.for_update_skip_locked:
+            clause += " SKIP LOCKED"
+        elif self.for_update_no_wait:
+            clause += " NOWAIT"
+        return clause
 
     def get_table(self) -> str:
         return self.model._meta.db_table
@@ -89,7 +144,11 @@ class SQLQuery:
         alias = table
         distinct = "DISTINCT " if self.distinct_flag else ""
 
-        # Annotations — collect SQL and params separately (appear before WHERE in SQL)
+        # Annotations — collect SQL and params separately (appear before WHERE in SQL).
+        # Names listed in ``alias_only_names`` came from :meth:`QuerySet.alias`
+        # and must not be emitted in the SELECT list (they're only usable
+        # in WHERE / ORDER BY). Their expressions are still compiled here
+        # so any FK joins they trigger get registered on ``self.joins``.
         annotation_params: list = []
         extra_select = ""
         if self.annotations:
@@ -97,9 +156,15 @@ class SQLQuery:
             for alias_name, agg in self.annotations.items():
                 _validate_identifier(alias_name, "annotation alias")
                 agg_sql, agg_p = agg.as_sql(alias)
+                if alias_name in self.alias_only_names:
+                    # alias()-only: skip the SELECT projection. We still
+                    # compiled the SQL above so any side-effects (joins,
+                    # validation) happened.
+                    continue
                 parts.append(f'{agg_sql} AS "{alias_name}"')
                 annotation_params.extend(agg_p)
-            extra_select = ", " + ", ".join(parts)
+            if parts:
+                extra_select = ", " + ", ".join(parts)
 
         params: list = []
 
@@ -209,7 +274,7 @@ class SQLQuery:
             select += f" OFFSET {int(self.offset_val)}"
 
         if self.for_update_flag:
-            select += " FOR UPDATE"
+            select += self._compile_for_update(connection)
 
         return self._adapt_placeholders(select, connection), params
 
@@ -243,13 +308,95 @@ class SQLQuery:
         sql = f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders})'
         return self._adapt_placeholders(sql, connection), values
 
-    def as_bulk_insert(self, fields: list, rows_values: list[list], connection) -> tuple[str, list]:
+    def as_bulk_insert(
+        self,
+        fields: list,
+        rows_values: list[list],
+        connection,
+        *,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: list[str] | None = None,
+        unique_fields: list[str] | None = None,
+    ) -> tuple[str, list]:
+        """Build a multi-row ``INSERT`` statement.
+
+        With ``ignore_conflicts`` or ``update_conflicts`` set, append the
+        backend's upsert clause:
+
+        - PostgreSQL: ``ON CONFLICT (cols) DO NOTHING`` /
+          ``ON CONFLICT (cols) DO UPDATE SET col = EXCLUDED.col``.
+        - SQLite (≥ 3.24): same syntax — sqlite3 ships ON CONFLICT support
+          since 3.24, which is older than every supported Python release.
+
+        ``unique_fields`` is required for ``update_conflicts`` (PG needs
+        the conflict target; SQLite accepts it bare but we mirror PG's
+        contract for portability). ``update_fields`` defaults to every
+        non-PK field — usually what you want.
+        """
         table = self.get_table()
         cols = ", ".join(f'"{f.column}"' for f in fields)
         row_ph = f"({', '.join(['%s'] * len(fields))})"
         all_ph = ", ".join([row_ph] * len(rows_values))
         sql = f'INSERT INTO "{table}" ({cols}) VALUES {all_ph}'
         params = [v for row in rows_values for v in row]
+
+        if ignore_conflicts and update_conflicts:
+            raise ValueError(
+                "as_bulk_insert: ignore_conflicts and update_conflicts "
+                "are mutually exclusive."
+            )
+
+        if ignore_conflicts:
+            # ON CONFLICT without a target = "any conflict" — works on
+            # both PG and SQLite. Cheaper than enumerating every unique
+            # constraint and equally correct for the "skip duplicates"
+            # use case.
+            sql += " ON CONFLICT DO NOTHING"
+        elif update_conflicts:
+            if not unique_fields:
+                raise ValueError(
+                    "bulk_create(update_conflicts=True) requires "
+                    "unique_fields= to identify the conflict target."
+                )
+            for name in unique_fields:
+                _validate_identifier(name)
+            target_cols = ", ".join(f'"{c}"' for c in unique_fields)
+
+            # Default update_fields = all non-PK, non-unique columns.
+            if update_fields is None:
+                update_cols = [
+                    f.column
+                    for f in fields
+                    if not f.primary_key and f.column not in unique_fields
+                ]
+            else:
+                # Resolve user-supplied attnames to columns. Validate
+                # each so an attacker-controlled list can't smuggle SQL.
+                update_cols = []
+                meta = self.model._meta
+                for name in update_fields:
+                    _validate_identifier(name)
+                    field = None
+                    try:
+                        field = meta.get_field(name)
+                    except Exception:
+                        pass
+                    update_cols.append(field.column if field else name)
+
+            if not update_cols:
+                # Nothing meaningful to update — degrade to DO NOTHING so
+                # the statement still parses. Mirrors Django's behaviour.
+                sql += f" ON CONFLICT ({target_cols}) DO NOTHING"
+            else:
+                set_clauses = ", ".join(
+                    f'"{c}" = EXCLUDED."{c}"' for c in update_cols
+                )
+                sql += (
+                    f" ON CONFLICT ({target_cols}) "
+                    f"DO UPDATE SET {set_clauses}"
+                )
+
         return self._adapt_placeholders(sql, connection), params
 
     def as_update(self, update_kwargs: dict, connection) -> tuple[str, list]:

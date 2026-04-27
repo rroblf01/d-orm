@@ -54,23 +54,35 @@ def page_after(qs, last_id: int, page_size: int = 20):
 
 ## Soft delete
 
+There's a built-in mixin in `dorm.contrib.softdelete`:
+
 ```python
-class SoftDeleteQuerySet(QuerySet):
-    def alive(self):
-        return self.filter(deleted_at__isnull=True)
-    def soft_delete(self):
-        from datetime import datetime, timezone
-        return self.update(deleted_at=datetime.now(timezone.utc))
+from dorm.contrib.softdelete import SoftDeleteModel
+import dorm
 
-class Post(dorm.Model):
+class Post(SoftDeleteModel):
     title = dorm.CharField(max_length=200)
-    deleted_at = dorm.DateTimeField(null=True, blank=True, db_index=True)
 
-    objects = SoftDeleteQuerySet.as_manager()
+# Three managers:
+Post.objects                          # only live rows
+Post.all_objects                      # everything
+Post.deleted_objects                  # only soft-deleted
+
+# Soft delete by default; pass hard=True for a real DELETE:
+post.delete()                         # UPDATE … SET deleted_at = now()
+post.delete(hard=True)                # DELETE FROM …
+post.restore()                        # clear deleted_at
+
+# Async parity:
+await post.adelete()
+await post.arestore()
 ```
 
-Always go through `Post.objects.alive()` for normal queries and
-reserve `Post.objects.all()` for admin/audit code.
+Caveats: `on_delete=CASCADE` does **not** cascade through soft
+deletes (children remain visible to `Post.objects`). And database-
+level UNIQUE constraints don't know about `deleted_at` — use a
+partial index (`UNIQUE … WHERE deleted_at IS NULL`) at the schema
+level if you need "unique among live rows only".
 
 ## Audit log via signals
 
@@ -191,7 +203,8 @@ for everything older than a few seconds.
 
 ```python
 import pytest, dorm
-from dorm.db.connection import close_all, reset_connections
+from dorm.db.connection import close_all
+from dorm.test import transactional_db, atransactional_db  # noqa: F401
 
 @pytest.fixture(scope="session", autouse=True)
 def configure_dorm():
@@ -202,8 +215,68 @@ def configure_dorm():
 @pytest.fixture
 def author():
     return Author.objects.create(name="Alice", age=30)
+
+
+def test_something(transactional_db, author):
+    Author.objects.create(name="Mallory", age=99)
+    assert Author.objects.count() == 2
+    # Both rows are rolled back automatically when the test exits.
+```
+
+`transactional_db` (sync) and `atransactional_db` (pytest-asyncio)
+wrap each test in an `atomic()` block that rolls back on exit, so
+you avoid the `DROP TABLE` / `CREATE TABLE` churn between tests. For
+unittest-style suites use `dorm.test.DormTestCase` as a mixin:
+
+```python
+import unittest
+from dorm.test import DormTestCase
+
+class AuthorTests(DormTestCase, unittest.TestCase):
+    def test_create(self):
+        Author.objects.create(name="Alice", age=30)
+        # rolled back at tearDown
 ```
 
 For PostgreSQL integration tests, use
 [`testcontainers`](https://testcontainers-python.readthedocs.io/) to
 spin a throwaway Postgres per session.
+
+## OpenTelemetry instrumentation
+
+```python
+from dorm.contrib.otel import instrument
+
+instrument()                # default tracer name "dorm"
+# instrument(tracer_name="myapp.dorm")
+```
+
+Every query becomes a span with `db.system` (`"postgresql"` /
+`"sqlite"`), `db.statement` (truncated to 1KB), and
+`db.dorm.elapsed_ms`. Failed queries get span status `ERROR` and the
+exception class in `db.dorm.error`. Idempotent — calling twice
+replaces the previous wiring (no double-spans). Optional dependency
+on `opentelemetry-api`.
+
+## PostgreSQL pub/sub via `LISTEN` / `NOTIFY`
+
+```python
+from dorm.db.connection import get_async_connection
+
+conn = get_async_connection()
+
+# Publish:
+async with transaction.aatomic():
+    Order.objects.create(...)
+    await conn.notify("orders", str(order.pk))
+# NOTIFY is delivered after COMMIT — listeners only see committed work.
+
+# Subscribe:
+async for msg in conn.listen("orders"):
+    print(msg.channel, msg.payload, msg.pid)
+```
+
+Channel names are validated as SQL identifiers. The `listen()` async
+iterator opens its own dedicated connection (LISTEN holds the
+connection for the lifetime of the subscription) and closes it
+cleanly when you break out.

@@ -107,6 +107,68 @@ dorm runs in **auto-commit by default** — every statement outside an
 reads or single-statement writes; `atomic()` exists for the cases
 where multiple statements must succeed-or-fail as a unit.
 
+## Side effects after commit: `on_commit`
+
+Sending an email, enqueueing a Celery / RQ job, publishing a Kafka
+message, calling a third-party API — these effects must NEVER fire
+when their parent transaction rolls back. Wrap them in
+`transaction.on_commit(callback)` so they only run after a successful
+commit:
+
+```python
+from dorm import transaction
+
+with transaction.atomic():
+    user = User.objects.create(name=name, email=email)
+    transaction.on_commit(lambda: send_welcome_email(user))
+    # If anything below raises, the user is rolled back AND
+    # the email is never sent. The two are atomic together.
+    audit_log.record(user, action="signup")
+```
+
+Outside an `atomic()` block, `on_commit` runs the callback
+immediately (Django parity). Nested `atomic()` blocks defer all
+callbacks to the outermost commit — a rollback at any depth discards
+the callbacks scheduled inside it.
+
+For async code, use `transaction.aon_commit`:
+
+```python
+from dorm import transaction
+
+async with transaction.aatomic():
+    user = await User.objects.acreate(name=name)
+    transaction.aon_commit(lambda: notify_kafka(user))
+    # async coroutines are awaited in order at outermost commit
+```
+
+`aon_commit` accepts both regular callables and coroutine functions —
+the latter are awaited at commit time.
+
+A failing post-commit callback is **logged on the
+`dorm.transaction` logger but does not raise**: by the time it runs,
+the DB has already committed and propagating the error would falsely
+claim the transaction failed. Wire that logger into your alerting if
+the callback is correctness-critical.
+
+## Forcing a rollback without raising: `set_rollback`
+
+The atomic context manager exposes `set_rollback(True)` to force a
+rollback while still exiting the `with` block normally — primarily
+for test fixtures and "speculative work" patterns:
+
+```python
+with transaction.atomic() as tx:
+    Author.objects.create(name="speculative")
+    if not is_useful(...):
+        tx.set_rollback(True)
+    # Block exits without an exception; rollback fires anyway,
+    # the speculative row is gone, and pending on_commit callbacks
+    # are discarded.
+```
+
+The `dorm.test.transactional_db` fixture is built on top of this.
+
 ## Connection-level vs alias-level
 
 A few things to know about the model:

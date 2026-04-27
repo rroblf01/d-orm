@@ -7,6 +7,10 @@ import pytest
 
 import dorm
 from dorm.db.connection import reset_connections
+# Re-export the transactional_db fixtures so test files can request them
+# by name. They live in dorm.test for end users; here we make them
+# part of the conftest so our own suite exercises them too.
+from dorm.test import transactional_db, atransactional_db  # noqa: F401
 
 
 _db_fd, _db_path = tempfile.mkstemp(suffix=".db")

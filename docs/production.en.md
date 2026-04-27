@@ -112,6 +112,35 @@ async def healthz():
 Both never raise — they always respond, even when the DB is down,
 which is what an orchestrator readiness probe needs.
 
+Pass `deep=True` to also include live pool statistics, so the same
+endpoint can serve readiness *and* observability:
+
+```python
+await dorm.ahealth_check(deep=True)
+# {
+#   "status": "ok", "alias": "default", "elapsed_ms": 0.42,
+#   "pool": {
+#     "alias": "default", "vendor": "postgresql", "has_pool": True,
+#     "pool_min": 1, "pool_max": 10,
+#     "pool_size": 7, "pool_available": 4, "requests_waiting": 0,
+#     "requests_num": 18234, "usage_ms": 412.3, "connections_ms": 1.1,
+#     ...
+#   }
+# }
+```
+
+Or call `dorm.pool_stats(alias)` directly if you only want the pool
+view (e.g. on a Prometheus exporter):
+
+```python
+from dorm.db.connection import pool_stats
+stats = pool_stats("default")
+```
+
+A pool whose `pool_available` stays at zero with `requests_waiting`
+above zero for sustained periods is the leading indicator of a
+connection-bound app.
+
 ## Migration deploys
 
 The recommended deploy order:

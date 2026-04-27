@@ -398,6 +398,81 @@ def cmd_dbcheck(args):
     print("\nAll checked models match the database schema.")
 
 
+def cmd_dbshell(args):
+    """Drop into the underlying database client (``psql`` for PostgreSQL,
+    ``sqlite3`` for SQLite) with credentials and database name pre-filled
+    from the active settings. The user-set ``--database`` selects which
+    DATABASES alias to connect to (default: ``"default"``).
+
+    For PostgreSQL the password is passed via ``PGPASSWORD`` environment
+    variable rather than a connection-string argument so it doesn't end
+    up in shell history or process listings. The child process inherits
+    the current terminal — exit it (``\\q`` for psql, ``.exit`` for
+    sqlite3) to come back to your shell.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+
+    alias = args.database
+    if alias not in settings.DATABASES:
+        print(
+            f"error: alias {alias!r} not in DATABASES; "
+            f"choices are {sorted(settings.DATABASES)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    cfg = settings.DATABASES[alias]
+    engine = (cfg.get("ENGINE") or "sqlite").lower()
+    import shutil
+
+    if "sqlite" in engine:
+        db_path = cfg.get("NAME") or "db.sqlite3"
+        client = shutil.which("sqlite3")
+        if client is None:
+            print(
+                "error: 'sqlite3' executable not found on PATH. "
+                "Install it (e.g. `apt install sqlite3`) and retry.",
+                file=sys.stderr,
+            )
+            sys.exit(127)
+        os.execvp(client, [client, str(db_path)])
+
+    if "postgres" in engine:
+        client = shutil.which("psql")
+        if client is None:
+            print(
+                "error: 'psql' executable not found on PATH. "
+                "Install the PostgreSQL client and retry.",
+                file=sys.stderr,
+            )
+            sys.exit(127)
+        env = dict(os.environ)
+        # Pass password via env so it doesn't show up in `ps`. psql
+        # also reads PGPASSFILE; we don't override anything the user
+        # already set.
+        if cfg.get("PASSWORD"):
+            env["PGPASSWORD"] = str(cfg["PASSWORD"])
+        argv = [client]
+        if cfg.get("HOST"):
+            argv += ["-h", str(cfg["HOST"])]
+        if cfg.get("PORT"):
+            argv += ["-p", str(cfg["PORT"])]
+        if cfg.get("USER"):
+            argv += ["-U", str(cfg["USER"])]
+        if cfg.get("NAME"):
+            argv += ["-d", str(cfg["NAME"])]
+        os.execvpe(client, argv, env)
+
+    print(
+        f"error: dbshell does not know how to launch a client for engine {engine!r}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def cmd_shell(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
@@ -671,6 +746,21 @@ def main():
         ),
     )
     ini.set_defaults(func=cmd_init)
+
+    # dbshell
+    dbsh = sub.add_parser(
+        "dbshell",
+        help=(
+            "Drop into the native database client (psql / sqlite3) "
+            "with credentials pre-filled from settings."
+        ),
+    )
+    dbsh.add_argument(
+        "--database",
+        default="default",
+        help="DATABASES alias to connect to (default: 'default').",
+    )
+    dbsh.set_defaults(func=cmd_dbshell)
 
     # help
     hp = sub.add_parser("help", help="Show this help message and exit")

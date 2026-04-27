@@ -108,6 +108,69 @@ lecturas simples o escrituras de una sola sentencia; `atomic()`
 existe para los casos en que múltiples sentencias tienen que
 "triunfar o fracasar" como una unidad.
 
+## Efectos secundarios tras commit: `on_commit`
+
+Mandar un email, encolar un job de Celery / RQ, publicar un mensaje
+en Kafka, llamar a una API externa — efectos que **nunca** deben
+disparar si su transacción padre se hace rollback. Envuélvelos en
+`transaction.on_commit(callback)` para que solo corran tras un
+commit exitoso:
+
+```python
+from dorm import transaction
+
+with transaction.atomic():
+    user = User.objects.create(name=name, email=email)
+    transaction.on_commit(lambda: send_welcome_email(user))
+    # Si algo falla más abajo, el user se hace rollback Y
+    # el email no se manda. Quedan atómicamente acoplados.
+    audit_log.record(user, action="signup")
+```
+
+Fuera de un bloque `atomic()`, `on_commit` ejecuta el callback
+inmediatamente (paridad con Django). Bloques `atomic()` anidados
+difieren todos los callbacks al commit del más externo — un rollback
+a cualquier profundidad descarta los callbacks programados ahí.
+
+Para código async usa `transaction.aon_commit`:
+
+```python
+from dorm import transaction
+
+async with transaction.aatomic():
+    user = await User.objects.acreate(name=name)
+    transaction.aon_commit(lambda: notify_kafka(user))
+    # las coroutines se await-ean en orden al commit más externo
+```
+
+`aon_commit` acepta tanto callables normales como coroutine
+functions — estas últimas se await-ean en el momento del commit.
+
+Un callback post-commit que falle se **loguea en el logger
+`dorm.transaction` pero no se relanza**: para cuando corre, la BD ya
+commiteó y propagar el error supondría reportar falsamente que la
+transacción falló. Cablea ese logger a tu alerting si el callback es
+crítico para la corrección.
+
+## Forzar rollback sin lanzar excepción: `set_rollback`
+
+El context manager de atomic expone `set_rollback(True)` para forzar
+un rollback saliendo del bloque `with` con normalidad — pensado
+sobre todo para fixtures de tests y patrones de "trabajo
+especulativo":
+
+```python
+with transaction.atomic() as tx:
+    Author.objects.create(name="especulativo")
+    if not is_useful(...):
+        tx.set_rollback(True)
+    # El bloque sale sin excepción; el rollback igual ocurre,
+    # la fila especulativa desaparece, y los callbacks de
+    # on_commit pendientes se descartan.
+```
+
+El fixture `dorm.test.transactional_db` está construido sobre esto.
+
 ## A nivel de conexión vs a nivel de alias
 
 Algunas cosas que conviene saber del modelo:

@@ -194,8 +194,39 @@ class QuerySet(Generic[_T]):
         qs._fields = list(fields)
         return qs
 
+    def alias(self, **kwargs: Any) -> QuerySet[_T]:
+        """Add named expressions usable in :meth:`filter`, :meth:`exclude`
+        and :meth:`order_by` without including them in the ``SELECT`` list.
+
+        Same shape as :meth:`annotate` — pass ``name=expression`` pairs —
+        but the expression is **not** projected into the result rows. Use
+        this when you only need the value to build a predicate or sort
+        and don't care about reading it back, so you skip the bandwidth
+        and per-row hydration cost::
+
+            qs = (
+                Author.objects
+                .alias(book_count=Count("books"))
+                .filter(book_count__gte=5)
+            )
+
+        ``alias()`` and :meth:`annotate` can be mixed freely; aliased
+        names that you later promote to a SELECT can be re-declared via
+        ``annotate(name=F("name"))`` (Django pattern)."""
+        qs = self._clone()
+        for name in kwargs:
+            qs._query.alias_only_names.add(name)
+        qs._query.annotations.update(kwargs)
+        return qs
+
     def annotate(self, **kwargs: Any) -> QuerySet[_T]:
         qs = self._clone()
+        # If a name was previously declared as alias-only and is now
+        # being annotated, promote it to a real SELECT projection
+        # (matches Django's behaviour: ``alias().annotate()`` chains
+        # turn the alias into a returned column).
+        for name in kwargs:
+            qs._query.alias_only_names.discard(name)
         qs._query.annotations.update(kwargs)
         return qs
 
@@ -234,9 +265,58 @@ class QuerySet(Generic[_T]):
             return dict(row) if hasattr(row, "keys") else dict(zip(cols, row))
         return {}
 
-    def select_for_update(self) -> QuerySet[_T]:
+    def select_for_update(
+        self,
+        *,
+        skip_locked: bool = False,
+        no_wait: bool = False,
+        of: tuple[str, ...] | list[str] | None = None,
+    ) -> QuerySet[_T]:
+        """Lock the rows returned by this query until the surrounding
+        transaction ends. Must be called inside an :func:`atomic` /
+        :func:`aatomic` block — otherwise PostgreSQL silently treats it as
+        a no-op (the lock would be released immediately at autocommit).
+
+        Args:
+            skip_locked: Skip rows already locked by other transactions
+                instead of waiting. The canonical "task queue" pattern —
+                each worker pops the next unlocked job.
+            no_wait: Raise immediately if any matched row is locked,
+                instead of waiting. Useful for bailing fast on contention.
+            of: Tuple of relation names (typically table aliases from
+                joins) to lock; defaults to all referenced tables. Use
+                this with ``select_related`` to lock only the parent row
+                without also locking joined parent tables.
+
+        ``skip_locked`` and ``no_wait`` are mutually exclusive — passing
+        both raises ``ValueError``. Both are PostgreSQL-only; on SQLite
+        they raise ``NotImplementedError`` so the caller learns instead
+        of silently getting a different lock model.
+        """
+        if skip_locked and no_wait:
+            raise ValueError(
+                "select_for_update(): skip_locked and no_wait are "
+                "mutually exclusive — choose one."
+            )
+        if (skip_locked or no_wait or of):
+            # Only PG supports these. We can't check the connection
+            # here without resolving it, so the validation happens at
+            # SQL emission time on backends that don't support it.
+            from .db.connection import get_connection
+
+            conn = get_connection(self._db)
+            vendor = getattr(conn, "vendor", "sqlite")
+            if vendor != "postgresql":
+                raise NotImplementedError(
+                    f"select_for_update(skip_locked=, no_wait=, of=) "
+                    f"is PostgreSQL-only; backend {vendor!r} does not "
+                    f"support row-level lock variants."
+                )
         qs = self._clone()
         qs._query.for_update_flag = True
+        qs._query.for_update_skip_locked = bool(skip_locked)
+        qs._query.for_update_no_wait = bool(no_wait)
+        qs._query.for_update_of = tuple(of) if of else ()
         return qs
 
     def using(self, alias: str) -> QuerySet[_T]:
@@ -877,11 +957,47 @@ class QuerySet(Generic[_T]):
         total_counts[model_label] = total_counts.get(model_label, 0) + count
         return sum(total_counts.values()), total_counts
 
-    def bulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
+    def bulk_create(
+        self,
+        objs: list[_T],
+        batch_size: int = 1000,
+        *,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: list[str] | None = None,
+        unique_fields: list[str] | None = None,
+    ) -> list[_T]:
+        """Insert *objs* in batches of ``batch_size``.
+
+        With ``ignore_conflicts=True``, duplicate-key conflicts are
+        silently skipped (``ON CONFLICT DO NOTHING``). With
+        ``update_conflicts=True``, the conflicting row is *updated* —
+        the canonical "upsert" pattern. ``unique_fields`` is required
+        when updating so the conflict target is unambiguous; if
+        ``update_fields`` is omitted, every non-PK / non-unique column
+        is updated, which is almost always what you want for an idempotent
+        sync from an external source.
+
+        Note: when conflicts are skipped or updated, returned PKs may be
+        ``None`` for affected rows (the database doesn't report which
+        rows actually wrote new data). Re-fetch by ``unique_fields`` if
+        you need the full set of PKs back.
+        """
         if not objs:
             return objs
         from .transaction import atomic
         from .fields import AutoField
+
+        if ignore_conflicts and update_conflicts:
+            raise ValueError(
+                "bulk_create(): ignore_conflicts and update_conflicts "
+                "are mutually exclusive — choose one."
+            )
+        if update_conflicts and not unique_fields:
+            raise ValueError(
+                "bulk_create(update_conflicts=True) requires "
+                "unique_fields= to identify the conflict target."
+            )
 
         connection = self._get_connection()
         meta = self.model._meta
@@ -914,12 +1030,24 @@ class QuerySet(Generic[_T]):
                     for obj in batch
                 ]
                 sql, params = self._query.as_bulk_insert(
-                    fields, rows_values, connection
+                    fields,
+                    rows_values,
+                    connection,
+                    ignore_conflicts=ignore_conflicts,
+                    update_conflicts=update_conflicts,
+                    update_fields=update_fields,
+                    unique_fields=unique_fields,
                 )
                 pks = connection.execute_bulk_insert(
                     sql, params, pk_col=pk_col, count=len(batch)
                 )
-                if meta.pk and pks:
+                if meta.pk and pks and not (ignore_conflicts or update_conflicts):
+                    # PK assignment is unsafe when conflicts may have
+                    # skipped rows: the returned ``pks`` list count
+                    # can be shorter than ``batch`` and the alignment
+                    # between objects and inserted rows is no longer
+                    # 1:1. Skip assignment in upsert mode; callers can
+                    # re-fetch by ``unique_fields`` if needed.
                     for obj, pk in zip(batch, pks):
                         if obj.__dict__.get(meta.pk.attname) is None:
                             obj.__dict__[meta.pk.attname] = pk
@@ -1415,11 +1543,33 @@ class QuerySet(Generic[_T]):
         results = [obj async for obj in qs]
         return results[0] if results else None
 
-    async def abulk_create(self, objs: list[_T], batch_size: int = 1000) -> list[_T]:
+    async def abulk_create(
+        self,
+        objs: list[_T],
+        batch_size: int = 1000,
+        *,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: list[str] | None = None,
+        unique_fields: list[str] | None = None,
+    ) -> list[_T]:
+        """Async counterpart of :meth:`bulk_create`. See the sync version
+        for ``ignore_conflicts`` / ``update_conflicts`` semantics."""
         if not objs:
             return objs
         from .transaction import aatomic
         from .fields import AutoField
+
+        if ignore_conflicts and update_conflicts:
+            raise ValueError(
+                "abulk_create(): ignore_conflicts and update_conflicts "
+                "are mutually exclusive — choose one."
+            )
+        if update_conflicts and not unique_fields:
+            raise ValueError(
+                "abulk_create(update_conflicts=True) requires "
+                "unique_fields= to identify the conflict target."
+            )
 
         conn = self._get_async_connection()
         meta = self.model._meta
@@ -1448,11 +1598,22 @@ class QuerySet(Generic[_T]):
                     ]
                     for obj in batch
                 ]
-                sql, params = self._query.as_bulk_insert(fields, rows_values, conn)
+                sql, params = self._query.as_bulk_insert(
+                    fields,
+                    rows_values,
+                    conn,
+                    ignore_conflicts=ignore_conflicts,
+                    update_conflicts=update_conflicts,
+                    update_fields=update_fields,
+                    unique_fields=unique_fields,
+                )
                 pks = await conn.execute_bulk_insert(
                     sql, params, pk_col=pk_col, count=len(batch)
                 )
-                if meta.pk and pks:
+                if meta.pk and pks and not (ignore_conflicts or update_conflicts):
+                    # See sync ``bulk_create``: skip PK assignment in
+                    # upsert mode because the returned-PK list may not
+                    # align 1:1 with the input batch.
                     for obj, pk in zip(batch, pks):
                         if obj.__dict__.get(meta.pk.attname) is None:
                             obj.__dict__[meta.pk.attname] = pk

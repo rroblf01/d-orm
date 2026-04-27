@@ -123,6 +123,21 @@ If IPython is installed, you get IPython; otherwise the standard
 REPL. Settings are loaded and `INSTALLED_APPS` are imported, so you
 can `from blog.models import Post` and start querying right away.
 
+## `dorm dbshell`
+
+Drop into the underlying database client (`psql` or `sqlite3`) with
+credentials and database name pre-filled from settings.
+
+```bash
+dorm dbshell                      # connects to DATABASES["default"]
+dorm dbshell --database replica   # pick a different alias
+```
+
+The PostgreSQL password is passed via `PGPASSWORD` env var rather
+than the connection string so it doesn't end up in your shell
+history or `ps` output. The child process inherits your terminal —
+exit it (`\q` for psql, `.exit` for sqlite3) to come back.
+
 ## `dorm help`
 
 ```bash
