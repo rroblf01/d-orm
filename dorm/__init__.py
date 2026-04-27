@@ -31,7 +31,7 @@ Quick start:
 
 from .conf import configure, settings
 from . import signals, transaction
-from .db.connection import ahealth_check, health_check
+from .db.connection import ahealth_check, health_check, pool_stats
 from .signals import (
     Signal,
     post_delete,
@@ -127,6 +127,7 @@ __all__ = [
     "signals",
     "health_check",
     "ahealth_check",
+    "pool_stats",
     # Signals
     "Signal",
     "pre_save",

@@ -68,6 +68,83 @@ async def replica_op(...):
 Los bloques `aatomic` toman una conexión async del pool, así que la
 puedes mantener a través de varios `await` sin bloquear el event loop.
 
+## `on_commit`
+
+```python
+def on_commit(callback: Callable[[], Any], using: str = "default") -> None
+```
+
+Programa un callable sin argumentos para ejecutarse **después** del
+commit de la transacción que lo envuelve. Patrón canónico para
+disparar efectos secundarios que no deben ocurrir si la transacción
+hace rollback (mandar email, encolar Celery/RQ, publicar a Kafka,
+llamar API externa).
+
+```python
+from dorm import transaction
+
+with transaction.atomic():
+    user = User.objects.create(name=name, email=email)
+    transaction.on_commit(lambda: send_welcome_email(user))
+    audit_log.record(user, action="signup")
+# El email se manda solo si el commit triunfa.
+```
+
+**Semántica:**
+
+- Fuera de un bloque `atomic()`, el callback corre inmediatamente
+  (paridad con Django).
+- Bloques `atomic()` anidados difieren todos los callbacks al commit
+  más externo.
+- Un rollback a cualquier profundidad descarta los callbacks
+  programados ahí (y los merged de commits internos).
+- Una excepción dentro del callback se loguea en el logger
+  `dorm.transaction` pero **no** se relanza — la BD ya commiteó.
+
+## `aon_commit`
+
+```python
+def aon_commit(
+    callback: Callable[[], Any] | Callable[[], Awaitable[Any]],
+    using: str = "default",
+) -> None
+```
+
+Contraparte async. Acepta tanto callables regulares como coroutine
+functions; las coroutines se await-ean al commit más externo.
+
+```python
+async with transaction.aatomic():
+    user = await User.objects.acreate(name=name)
+    transaction.aon_commit(lambda: notify_kafka(user))
+```
+
+Fuera de un bloque `aatomic()`, las coroutines se programan con
+`asyncio.ensure_future` para que el sitio de llamada no tenga que
+hacer await.
+
+## Forzar rollback: `set_rollback`
+
+El context manager devuelto por `atomic()` y `aatomic()` expone
+`set_rollback(True)` para forzar un rollback al salir *sin lanzar
+excepción*. Útil en fixtures de tests y patrones de "trabajo
+especulativo":
+
+```python
+with dorm.transaction.atomic() as tx:
+    Author.objects.create(name="especulativo", age=1)
+    if not is_useful(...):
+        tx.set_rollback(True)
+    # Bloque sale limpio; el rollback igual ocurre.
+```
+
+Cuando se llama a `set_rollback(True)`, cualquier callback de
+`on_commit` programado dentro del bloque se descarta — mismo
+comportamiento que un rollback por excepción.
+
+La variante async expone el mismo método en el context manager de
+`aatomic()`, con semántica idéntica.
+
 ## Avisos
 
 - **No mezcles sync y async sobre el mismo alias dentro de un mismo

@@ -21,7 +21,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 [project.urls]
-Homepage = "https://github.com/rroblf01/d-orm/"
+Homepage = "https://rroblf01.github.io/d-orm/"
 Repository = "https://github.com/rroblf01/d-orm/"
 
 [project.optional-dependencies]

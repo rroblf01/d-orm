@@ -248,40 +248,220 @@ para levantar un Postgres efímero por sesión.
 
 ## Instrumentación con OpenTelemetry
 
+`dorm.contrib.otel` engancha las señales `pre_query` / `post_query`
+para que cada query del ORM se convierta en un span de OTel sin
+cambios en cada call site.
+
+### Setup
+
+Instala la API de OTel (y un SDK si quieres mandar spans a algún
+sitio):
+
+```bash
+pip install opentelemetry-api opentelemetry-sdk
+# Exporters opcionales:
+pip install opentelemetry-exporter-otlp     # → collector OTLP / Jaeger / Honeycomb
+pip install opentelemetry-exporter-jaeger   # → Jaeger directo
+```
+
+En el startup de tu app:
+
 ```python
 from dorm.contrib.otel import instrument
 
-instrument()                # nombre de tracer por defecto: "dorm"
-# instrument(tracer_name="miapp.dorm")
+instrument()                                 # tracer por defecto "dorm"
+# instrument(tracer_name="miapp.dorm")       # tracer custom
 ```
 
-Cada query genera un span con `db.system` (`"postgresql"` /
-`"sqlite"`), `db.statement` (truncado a 1KB) y
-`db.dorm.elapsed_ms`. Las queries fallidas marcan el span con status
-`ERROR` y la clase de la excepción en `db.dorm.error`. Idempotente —
-llamarla dos veces reemplaza el cableado anterior (sin duplicar
-spans). Dependencia opcional sobre `opentelemetry-api`.
+Ya está — cada query del ORM produce un span.
+
+### Atributos del span
+
+Cada span lleva:
+
+| Atributo | Valor |
+|---|---|
+| nombre del span | `db.<vendor>` (`db.postgresql` / `db.sqlite`) |
+| `db.system` | `"postgresql"` o `"sqlite"` |
+| `db.statement` | el SQL, truncado a 1024 chars |
+| `db.dorm.elapsed_ms` | duración wall-clock (set en `post_query`, antes de `end()`) |
+| `db.dorm.error` | nombre de clase de la excepción (solo en fallo) |
+| status del span | `ERROR` en fallo, default `UNSET` en éxito |
+
+El truncado a 1KB del statement mantiene el SQL gigante de
+`bulk_create` fuera de tus traces; si necesitas el SQL completo,
+loguéalo aparte vía `dorm.queries`.
+
+### Cablear un exporter (Jaeger via OTLP)
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
+provider = TracerProvider(resource=Resource({SERVICE_NAME: "miapp"}))
+provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://jaeger:4317"))
+)
+trace.set_tracer_provider(provider)
+
+# Ahora cablea dorm:
+from dorm.contrib.otel import instrument
+instrument()
+```
+
+`instrument()` es idempotente — llamarla dos veces reemplaza el
+cableado anterior en lugar de producir spans duplicados, así que es
+seguro en hot reload.
+
+### Desconectar
+
+```python
+from dorm.contrib.otel import uninstrument
+uninstrument()  # desengancha los receivers; futuras queries no se trazan
+```
+
+Útil en teardown de tests o en librerías que quieran opt-out para
+un código path específico.
+
+### Avisos
+
+- **Dependencia opcional.** `instrument()` lanza un `ImportError`
+  claro si `opentelemetry-api` no está instalado. Despliegues sin
+  el paquete siguen funcionando — sin spans.
+- **Los spans se producen sync en el thread llamante.** No hay pump
+  background dedicado. El BatchSpanProcessor (config típica del
+  SDK) absorbe la latencia del export, así que el caller ve
+  overhead de nanosegundos por span.
+- **Los params sensibles aterrizan en `db.statement`.** El SQL es
+  el texto literal de la query (placeholders `%s`, params aparte).
+  El atributo OTel **no** incluye los params bindeados — esos van
+  por `dorm.db.utils._mask_params` solo en logs DEBUG. Si también
+  quieres los params en el span, escribe un receiver custom en
+  lugar de llamar a `instrument()`.
 
 ## Pub/sub PostgreSQL con `LISTEN` / `NOTIFY`
 
+`NOTIFY` / `LISTEN` de PostgreSQL te dan pub/sub en la propia BD —
+sin Redis para workloads de fan-out a escala modesta. El wrapper
+async de `dorm` expone los dos lados.
+
+### Publicar
+
 ```python
+from dorm import transaction
 from dorm.db.connection import get_async_connection
 
 conn = get_async_connection()
 
-# Publicar:
-async with transaction.aatomic():
-    Order.objects.create(...)
-    await conn.notify("orders", str(order.pk))
-# El NOTIFY se entrega tras el COMMIT — los suscriptores solo ven
-# trabajo commiteado.
-
-# Suscribirse:
-async for msg in conn.listen("orders"):
-    print(msg.channel, msg.payload, msg.pid)
+async def crear_order(payload):
+    async with transaction.aatomic():
+        order = await Order.objects.acreate(**payload)
+        await conn.notify("orders.created", str(order.pk))
+        # El NOTIFY se entrega TRAS el COMMIT — los suscriptores
+        # nunca ven trabajo que termine en rollback.
 ```
 
-Los nombres de canal se validan como identificadores SQL. El
-iterador async de `listen()` abre su propia conexión dedicada
-(LISTEN retiene la conexión durante toda la suscripción) y la cierra
-limpio cuando rompes el bucle.
+El `channel` se valida como identificador SQL
+(`[A-Za-z_][A-Za-z0-9_]*`, ≤ 63 chars), así un nombre de canal que
+venga de input del usuario no puede colar SQL. El payload va como
+parámetro bound, así que no hay que escaparlo.
+
+**Límite de payload.** El payload de `NOTIFY` está capado a 8000
+bytes por defecto (compile-time `NOTIFY_PAYLOAD_MAX`). No
+serialices la fila entera — manda un pk y deja que el listener la
+busque.
+
+### Suscribirse
+
+```python
+async def consumer_orders():
+    conn = get_async_connection()
+    async for msg in conn.listen("orders.created"):
+        order = await Order.objects.aget(pk=int(msg.payload))
+        await dispatch(order)
+```
+
+`msg` es un `psycopg.Notify` con atributos `channel`, `payload` y
+`pid`. El iterador async no termina por sí solo — rompe el bucle
+cuando quieras parar:
+
+```python
+async for msg in conn.listen("orders.created"):
+    if shutdown_event.is_set():
+        break
+    await dispatch(msg)
+```
+
+### Propiedad de la conexión
+
+`listen()` abre su **propia** conexión psycopg dedicada (LISTEN
+registra un handler de notificación scoped a la sesión — la conexión
+debe sobrevivir a la suscripción). NO tira del pool, así que un
+listener de larga duración no ocupa un slot del pool.
+
+Cuando rompes el bucle, la conexión se cierra en un bloque
+`finally`. Si el worker muere a saco, la conexión del listener se
+recolecta por el timeout de idle-connection de PG.
+
+### Reconexión / reintentos
+
+El `listen()` actual no se reconecta solo ante pérdida de conexión.
+Envuélvelo en tu propio loop de retry si necesitas eso:
+
+```python
+async def listener_robusto(channel: str, handler):
+    while True:
+        try:
+            async for msg in get_async_connection().listen(channel):
+                await handler(msg)
+        except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
+            logger.warning("listener desconectado: %s — reconectando", exc)
+            await asyncio.sleep(1.0)
+```
+
+Ten en cuenta: las notificaciones disparadas *mientras está
+desconectado* se pierden. PG no las encola. Para semántica
+at-least-once, combina NOTIFY con una tabla outbox que poll-eas al
+reconectar.
+
+### Patrones habituales
+
+**Invalidación de caché entre réplicas:**
+
+```python
+async with transaction.aatomic():
+    await User.objects.filter(pk=user_id).aupdate(**changes)
+    await conn.notify("user.invalidate", str(user_id))
+# Cada nodo escuchando tira su caché local para ese user.
+```
+
+**Cola de workers (consumidor uno-de-N):**
+
+NOTIFY hace broadcast a *todos* los listeners. Para patrones de
+consumer exclusivo, usa una cola row-based con
+`select_for_update(skip_locked=True)` y NOTIFY solo como señal de
+wake-up:
+
+```python
+# Productor
+async with transaction.aatomic():
+    job = await Job.objects.acreate(payload=payload, status="pending")
+    await conn.notify("jobs.wakeup", "")
+
+# Consumer
+async for _ in conn.listen("jobs.wakeup"):
+    while True:
+        async with transaction.aatomic():
+            job = await (
+                Job.objects.filter(status="pending")
+                .select_for_update(skip_locked=True)
+                .afirst()
+            )
+            if job is None:
+                break
+            await job.run()
+            await job.adelete()
+```

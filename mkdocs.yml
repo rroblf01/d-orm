@@ -62,6 +62,7 @@ plugins:
             Async patterns: Patrones async
             Migrations: Migraciones
             Transactions: Transacciones
+            Soft delete: Soft delete
             FastAPI integration: Integración con FastAPI
             CLI reference: Referencia del CLI
             Production deployment: Despliegue en producción
@@ -95,6 +96,7 @@ nav:
       - Migrations: migrations.md
       - Transactions: transactions.md
       - Signals: signals.md
+      - Soft delete: softdelete.md
       - FastAPI integration: fastapi.md
       - CLI reference: cli.md
       - Production deployment: production.md

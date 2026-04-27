@@ -39,7 +39,11 @@ result = dorm.health_check("default")
 ### `ahealth_check`
 
 ```python
-async def ahealth_check(alias: str = "default", timeout: float = 5.0) -> dict[str, Any]
+async def ahealth_check(
+    alias: str = "default",
+    timeout: float = 5.0,
+    deep: bool = False,
+) -> dict[str, Any]
 ```
 
 Equivalente async de `health_check`, pensado para rutas de FastAPI /
@@ -51,6 +55,56 @@ para que un Postgres colgado no bloquee al worker indefinidamente.
 async def healthz():
     return await dorm.ahealth_check()
 ```
+
+### `health_check(deep=True)`
+
+Tanto `health_check` como `ahealth_check` aceptan `deep=True` para
+añadir el snapshot del pool bajo la clave `pool` — útil cuando el
+mismo endpoint `/healthz` sirve readiness y observabilidad:
+
+```python
+@app.get("/healthz")
+async def healthz():
+    return await dorm.ahealth_check(deep=True)
+# {
+#   "status": "ok", "alias": "default", "elapsed_ms": 0.42,
+#   "pool": {
+#     "alias": "default", "vendor": "postgresql", "has_pool": True,
+#     "pool_min": 1, "pool_max": 10,
+#     "pool_size": 7, "pool_available": 4, "requests_waiting": 0,
+#     "requests_num": 18234, "usage_ms": 412.3, "connections_ms": 1.1,
+#   }
+# }
+```
+
+### `pool_stats`
+
+```python
+def pool_stats(alias: str = "default") -> dict[str, Any]
+```
+
+Devuelve estadísticas en vivo del pool para *alias*. Pensado para
+exporters Prometheus / OpenTelemetry que solo quieren la vista del
+pool sin el `SELECT 1` del health-check:
+
+```python
+from dorm import pool_stats
+metrics.gauge("db.pool.in_use", pool_stats("default")["pool_size"])
+```
+
+**Claves devueltas** (cuando el pool está abierto, vendor PG):
+
+- `alias`, `vendor`, `has_pool`
+- `pool_min`, `pool_max` — config del pool
+- `pool_size`, `pool_available`, `requests_waiting`,
+  `requests_num`, `usage_ms`, `connections_ms` — del
+  `psycopg_pool.AsyncConnectionPool.get_stats()`
+
+**Para SQLite**: `vendor`, `has_pool=False`, `atomic_depth`. SQLite
+no tiene pool — el campo está expuesto por paridad.
+
+**Para alias nunca usado**: `{"alias": ..., "status": "uninitialised"}`
+— nunca lanza excepción.
 
 ## Acceso a conexiones
 
