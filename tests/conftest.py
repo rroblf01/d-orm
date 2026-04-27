@@ -26,6 +26,22 @@ def _docker_available() -> bool:
         return False
 
 
+def _minio_test_deps_available() -> bool:
+    """Returns True iff every dep needed for the live-MinIO S3 tests is
+    importable: testcontainers' MinIO module, boto3, and a reachable
+    Docker daemon. Tests that need MinIO call this — when False they
+    skip cleanly so users without Docker (or without the optional
+    boto3 extra) still get a green run."""
+    if not _docker_available():
+        return False
+    try:
+        import boto3  # noqa: F401
+        from testcontainers.minio import MinioContainer  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _ci_postgres_available() -> bool:
     """The CI workflow exposes a real Postgres service via DORM_TEST_POSTGRES_*.
     When set, prefer it over testcontainers (faster, no Docker daemon needed)."""
@@ -106,6 +122,109 @@ def _shared_admin_dsn(tmp_path_factory, worker_id: str) -> dict:
     finally:
         fcntl.flock(fh, fcntl.LOCK_UN)
         fh.close()
+
+
+def _shared_minio_endpoint(tmp_path_factory, worker_id: str) -> dict:
+    """Return endpoint info for a MinIO instance shared across xdist workers.
+
+    Mirrors :func:`_shared_admin_dsn`'s pattern: the first worker to
+    arrive starts a single ``MinioContainer`` and writes its
+    coordinates to a tmp-dir-shared JSON file; subsequent workers read
+    the file. testcontainers' ryuk sidecar tears the container down at
+    session end. Bucket-level isolation between tests / workers is the
+    fixture's responsibility — not this function's.
+    """
+    bt = tmp_path_factory.getbasetemp()
+    shared_root = bt if worker_id == "master" else bt.parent
+    info_file = shared_root / "shared_minio.json"
+    lock_path = shared_root / "shared_minio.lock"
+
+    import fcntl
+    fh = open(str(lock_path), "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+
+        if info_file.exists():
+            return json.loads(info_file.read_text())
+
+        from testcontainers.minio import MinioContainer
+
+        # Pin to a known-good tag so a future MinIO release doesn't
+        # silently change the API surface tests rely on. Bump
+        # deliberately when reviewing changelogs.
+        minio = MinioContainer(image="minio/minio:RELEASE.2025-04-22T22-12-26Z")
+        minio.start()
+        # ``MinioContainer`` exposes the API on port 9000 and the web
+        # console on 9001; we only need the API for boto3.
+        host = minio.get_container_host_ip()
+        api_port = int(minio.get_exposed_port(9000))
+        info = {
+            "endpoint_url": f"http://{host}:{api_port}",
+            "access_key": minio.access_key,
+            "secret_key": minio.secret_key,
+            "region_name": "us-east-1",
+        }
+        info_file.write_text(json.dumps(info))
+        return info
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+
+def _wait_for_minio(endpoint_url: str, access_key: str, secret_key: str,
+                    timeout: float = 30.0) -> None:
+    """Poll the MinIO endpoint until it answers a ``list_buckets`` call.
+
+    ``MinioContainer.start()`` returns when Docker reports the
+    container running, but MinIO itself takes another second or two to
+    be reachable. Without a ready-probe, the first test occasionally
+    fails with a connection-refused before the in-container daemon
+    starts listening."""
+    import boto3
+    from botocore.exceptions import EndpointConnectionError
+    from botocore.client import Config
+
+    deadline = time.time() + timeout
+    last_exc: Exception | None = None
+    cfg = Config(signature_version="s3v4", retries={"max_attempts": 1})
+    while time.time() < deadline:
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name="us-east-1",
+            config=cfg,
+        )
+        try:
+            client.list_buckets()
+            return
+        except EndpointConnectionError as exc:
+            last_exc = exc
+            time.sleep(0.3)
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.3)
+    raise RuntimeError(f"MinIO not ready after {timeout}s: {last_exc}")
+
+
+@pytest.fixture(scope="session")
+def minio_endpoint(tmp_path_factory, worker_id):
+    """Session-scoped MinIO endpoint shared across xdist workers.
+
+    Skips the requesting test when Docker / boto3 / testcontainers'
+    MinIO module aren't available — same gating philosophy as the
+    Postgres backend tests.
+    """
+    if not _minio_test_deps_available():
+        pytest.skip(
+            "MinIO live-tests skipped: needs Docker + boto3 + "
+            "testcontainers[minio]. Install with `pip install "
+            "'djanorm[dev,s3]'` and start Docker."
+        )
+    info = _shared_minio_endpoint(tmp_path_factory, worker_id)
+    _wait_for_minio(info["endpoint_url"], info["access_key"], info["secret_key"])
+    return info
 
 
 def _wait_for_postgres(host, port, user, password, timeout: float = 30.0) -> None:

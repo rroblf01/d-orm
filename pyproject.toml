@@ -31,7 +31,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "ty>=0.0.32",
     "ruff>=0.15.11",
-    "testcontainers[postgres]>=4.14.2",
+    "testcontainers[postgres,minio]>=4.14.2",
     "pytest-xdist>=3.8.0",
     # Used by tests for ``dorm.contrib.otel``. The runtime feature is
     # opt-in (raises ImportError if the user calls ``instrument()``
@@ -39,6 +39,12 @@ dev = [
     # the wiring end-to-end to keep that opt-in path from breaking.
     "opentelemetry-api>=1.30.0",
     "opentelemetry-sdk>=1.30.0",
+    # boto3 powers the integration tests for ``dorm.contrib.storage.s3``
+    # against a MinIO container (see ``tests/test_s3_storage_minio.py``).
+    # Same opt-in rationale as the OTel deps above — the runtime
+    # feature is gated behind ``djanorm[s3]`` but the tests cover the
+    # wiring end-to-end.
+    "boto3>=1.42.96",
 ]
 # Standalone group for users who want to wire dorm.contrib.otel — kept
 # separate from ``dev`` so production installs don't pull SDK + exporters.
@@ -55,7 +61,7 @@ postgresql = ["psycopg[binary,pool]>=3.3.3"]
 # ``dorm.contrib.storage.s3``. boto3 picks up credentials from the
 # ambient environment (IAM role, ``~/.aws/credentials``, env vars) by
 # default; settings.STORAGES['default']['OPTIONS'] can override.
-s3 = ["boto3>=1.34"]
+s3 = ["boto3>=1.42.96"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
 # Email/URL/IP format validation is done by dorm's own field code on

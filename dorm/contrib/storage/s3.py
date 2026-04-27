@@ -100,9 +100,9 @@ class S3Storage(Storage):
         if self._client is not None:
             return self._client
         try:
-            import boto3  # ty: ignore[unresolved-import]
-            from botocore.config import Config  # ty: ignore[unresolved-import]
-        except ImportError as exc:
+            import boto3
+            from botocore.config import Config
+        except ImportError as exc:  # pragma: no cover — exercised only without boto3
             raise ImproperlyConfigured(
                 "S3Storage needs the 'boto3' package. Install the optional "
                 "dependency: pip install 'djanorm[s3]'."
