@@ -130,6 +130,23 @@ class Settings:
     #
     #     dorm.configure(DATABASES={...}, DATABASE_ROUTERS=[ReplicaRouter()])
     DATABASE_ROUTERS: list = []
+    # File storage backends, mirroring DATABASES. Empty means "use the
+    # default FileSystemStorage rooted at ./media" — see
+    # :func:`dorm.storage.get_storage`. Example::
+    #
+    #     STORAGES = {
+    #         "default": {
+    #             "BACKEND": "dorm.storage.FileSystemStorage",
+    #             "OPTIONS": {"location": "/var/app/media",
+    #                         "base_url": "/media/"},
+    #         },
+    #         "uploads": {
+    #             "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+    #             "OPTIONS": {"bucket_name": "uploads",
+    #                         "region_name": "us-east-1"},
+    #         },
+    #     }
+    STORAGES: dict = {}
     # NOTE: TIME_ZONE and USE_TZ are reserved for future timezone-aware
     # datetime support. They are NOT yet wired into the field encoding
     # paths — datetime values are stored exactly as Python provides them.
@@ -265,6 +282,12 @@ def configure(**kwargs):
                 normalised[alias] = cfg
         kwargs["DATABASES"] = normalised
     settings.configure(**kwargs)
+    # Drop any cached storage instances so the next ``get_storage()``
+    # re-reads the (possibly new) STORAGES setting. Cheap when no
+    # FileField is in use; essential when tests reconfigure mid-suite.
+    if "STORAGES" in kwargs:
+        from .storage import reset_storages
+        reset_storages()
 
 
 def _autodiscover_settings() -> bool:

@@ -104,6 +104,7 @@ from .fields import (
     DurationField,
     EmailField,
     EnumField,
+    FileField,
     FloatField,
     ForeignKey,
     GeneratedField,
@@ -132,6 +133,16 @@ from .fields import (
     SET_DEFAULT,
     DO_NOTHING,
     RESTRICT,
+)
+from .storage import (
+    ContentFile,
+    FieldFile,
+    File,
+    FileSystemStorage,
+    Storage,
+    default_storage,
+    get_storage,
+    reset_storages,
 )
 from .models import Model
 from .manager import Manager
@@ -204,6 +215,16 @@ __all__ = [
     "DurationField",
     "EnumField",
     "CITextField",
+    "FileField",
+    # Storage
+    "Storage",
+    "FileSystemStorage",
+    "File",
+    "ContentFile",
+    "FieldFile",
+    "default_storage",
+    "get_storage",
+    "reset_storages",
     "Range",
     "RangeField",
     "IntegerRangeField",

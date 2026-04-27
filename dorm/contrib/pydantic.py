@@ -45,13 +45,14 @@ extra (``pip install 'djanorm[pydantic]'``).
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any, Type
+from typing import Annotated, Any, Type
 from uuid import UUID
 
 try:
     from pydantic import BaseModel, ConfigDict, create_model
+    from pydantic.functional_validators import BeforeValidator
 except ImportError as e:
     raise ImportError(
         "Pydantic is required for dorm.contrib.pydantic. "
@@ -59,6 +60,7 @@ except ImportError as e:
     ) from e
 
 from ..fields import (
+    ArrayField,
     AutoField,
     BigIntegerField,
     BinaryField,
@@ -67,9 +69,13 @@ from ..fields import (
     DateField,
     DateTimeField,
     DecimalField,
+    DurationField,
     EmailField,
+    EnumField,
+    FileField,
     FloatField,
     ForeignKey,
+    GeneratedField,
     GenericIPAddressField,
     IPAddressField,
     IntegerField,
@@ -78,6 +84,7 @@ from ..fields import (
     OneToOneField,
     PositiveIntegerField,
     PositiveSmallIntegerField,
+    RangeField,
     SlugField,
     SmallIntegerField,
     TextField,
@@ -87,11 +94,43 @@ from ..fields import (
 )
 from ..models import Model
 
+def _coerce_field_file_to_str(value: Any) -> Any:
+    """Pydantic input adapter for :class:`dorm.FileField` columns.
+
+    ``from_attributes=True`` reads the descriptor's :class:`FieldFile`
+    wrapper, but the schema declares the column as ``str``. Without
+    this validator Pydantic would refuse a ``FieldFile`` argument
+    even though its ``.name`` round-trips losslessly to a string. We
+    accept ``str`` / ``None`` / anything with a ``.name`` attribute,
+    and fall back to ``str(value)`` so user-defined ``File`` subclasses
+    still work as long as their ``__str__`` returns the storage name.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    name = getattr(value, "name", None)
+    if isinstance(name, str):
+        return name
+    return str(value)
+
+
+# Annotated[str] subtype that quietly unwraps a FieldFile / File on
+# input. Used for FileField columns where the descriptor returns the
+# wrapper but the API contract is "the storage name".
+_FieldFileStr = Annotated[str, BeforeValidator(_coerce_field_file_to_str)]
+
+
 # All string-like fields map to ``str`` here. Format validation
 # (email / URL / IP) is enforced by dorm's own field code at assignment
 # time, so a request body with ``{"email": "example"}`` is rejected as
 # soon as ``Customer(email="example")`` runs — no Pydantic-side validator
 # (and no email-validator dependency) needed.
+#
+# Order matters: more-specific subclasses come before their parents so
+# ``isinstance(field, parent)`` doesn't shadow a richer mapping. Fields
+# that need *per-instance* logic (``EnumField`` exposing its
+# ``enum_cls``, ``ArrayField`` parameterising the inner type,
+# ``GeneratedField`` recursing into its ``output_field``) live in
+# :func:`_field_to_type` instead of this static table.
 _FIELD_TYPE_MAP: list[tuple[type, Any]] = [
     (PositiveSmallIntegerField, int),
     (PositiveIntegerField, int),
@@ -106,23 +145,58 @@ _FIELD_TYPE_MAP: list[tuple[type, Any]] = [
     (URLField, str),
     (SlugField, str),
     (CharField, str),
-    (TextField, str),
+    (TextField, str),  # also matches CITextField (subclass) → str
     (UUIDField, UUID),
     (DateTimeField, datetime),
     (DateField, date),
     (TimeField, time),
+    (DurationField, timedelta),
     (JSONField, Any),
     (BinaryField, bytes),
     (GenericIPAddressField, str),
     (IPAddressField, str),
+    (FileField, _FieldFileStr),
+    # PG-only range types: catch the whole family with the abstract
+    # base. The Python value is :class:`dorm.Range`; serialising it
+    # as ``Any`` lets FastAPI hand it off without forcing a strict
+    # JSON Schema. Users who want a typed surface can override the
+    # field on their ``DormSchema`` subclass with a ``BaseModel``
+    # tailored to ``{lower, upper, bounds}``.
+    (RangeField, Any),
 ]
 
 
 def _field_to_type(field: Any) -> Any:
-    """Map a dorm field instance to its Python type for Pydantic."""
+    """Map a dorm field instance to its Python type for Pydantic.
+
+    Per-instance shapes (``EnumField`` exposing its enum class,
+    ``ArrayField`` parameterised by element type, ``GeneratedField``
+    delegating to ``output_field``) are handled here before falling
+    back to :data:`_FIELD_TYPE_MAP`.
+    """
     # FK / O2O serialize as the underlying PK column value (int by default).
     if isinstance(field, (ForeignKey, OneToOneField)):
         return int
+    if isinstance(field, EnumField):
+        # Pydantic v2 accepts an ``enum.Enum`` subclass as a type
+        # annotation and validates membership automatically — perfect
+        # match for our value semantics.
+        return field.enum_cls
+    if isinstance(field, GeneratedField):
+        # The DB computes the value; for Pydantic purposes its type is
+        # whatever ``output_field`` declares (``DecimalField`` →
+        # ``Decimal``, etc.).
+        return _field_to_type(field.output_field)
+    if isinstance(field, ArrayField):
+        # ``list[T]`` where T is whatever the base field maps to. The
+        # inner mapping recurses, so an ``ArrayField(EnumField(Status))``
+        # surfaces as ``list[Status]``.
+        inner = _field_to_type(field.base_field)
+        # ``list[inner]`` is a runtime ``GenericAlias``, which is what
+        # Pydantic's ``create_model`` expects. Hoisting the lookup out
+        # of the subscript also keeps ty happy — it rejects function
+        # calls inside type-expression positions otherwise.
+        return list[inner]
     for field_cls, py_type in _FIELD_TYPE_MAP:
         if isinstance(field, field_cls):
             return py_type

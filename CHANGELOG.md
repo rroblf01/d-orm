@@ -6,6 +6,48 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — File storage
+- **`FileField(upload_to=, storage=, max_length=)`** — pluggable file
+  storage. The column is a ``VARCHAR(max_length)`` holding the
+  storage-side name; the Python value is a ``FieldFile`` wrapper that
+  delegates ``.url`` / ``.size`` / ``.open()`` / ``.delete()`` to the
+  configured backend. ``upload_to`` accepts a static string, a
+  ``strftime`` template, or a callable
+  ``f(instance, filename) -> str``.
+- **`dorm.storage` module**: ``Storage`` abstract base, default
+  ``FileSystemStorage`` (local disk, default backend), ``File`` /
+  ``ContentFile`` wrappers, ``FieldFile`` (descriptor result),
+  ``get_storage(alias)`` registry and a ``default_storage`` proxy
+  that re-resolves on every call. Storage methods come in sync + async
+  pairs; async defaults wrap sync via ``asyncio.to_thread`` so backends
+  with no native async client still work without thread blocking the
+  event loop.
+- **`STORAGES` setting** — multi-alias config that mirrors
+  ``DATABASES``::
+
+      STORAGES = {
+          "default": {
+              "BACKEND": "dorm.storage.FileSystemStorage",
+              "OPTIONS": {"location": "/var/app/media",
+                          "base_url": "/media/"},
+          },
+      }
+
+  ``dorm.configure(STORAGES=...)`` invalidates the storage cache so
+  the next ``get_storage()`` re-reads.
+- **`dorm.contrib.storage.s3.S3Storage`** — AWS S3 backend gated
+  behind the new ``s3`` extra (``pip install 'djanorm[s3]'``). Lazy
+  ``boto3`` client init, presigned-URL support
+  (``querystring_auth``), CDN / vanity-domain ``custom_domain``,
+  configurable ``default_acl``, ``location`` prefix, opt-in
+  ``file_overwrite`` for content-addressed layouts. Works with any
+  S3-compatible service (MinIO, Cloudflare R2, Backblaze B2) via
+  ``endpoint_url=``.
+- **Path-traversal hardening** in ``FileSystemStorage``: every
+  ``save`` / ``open`` / ``delete`` resolves ``name`` against an
+  absolute ``location`` and refuses any path that escapes the root,
+  even if the basename slipped through ``get_valid_name``.
+
 ### Added — Field types
 - **`DurationField`** stores `datetime.timedelta`. Native ``INTERVAL``
   on PostgreSQL; on SQLite a process-wide ``sqlite3.register_adapter``

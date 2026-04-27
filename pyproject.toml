@@ -51,6 +51,11 @@ otel = [
 # attribute name still exists (and update the runtime warning if not).
 sqlite = ["aiosqlite>=0.22.1,<0.23"]
 postgresql = ["psycopg[binary,pool]>=3.3.3"]
+# Optional S3 storage backend for ``dorm.FileField`` — see
+# ``dorm.contrib.storage.s3``. boto3 picks up credentials from the
+# ambient environment (IAM role, ``~/.aws/credentials``, env vars) by
+# default; settings.STORAGES['default']['OPTIONS'] can override.
+s3 = ["boto3>=1.34"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
 # Email/URL/IP format validation is done by dorm's own field code on
@@ -66,7 +71,7 @@ docs = [
     "mkdocstrings[python]>=1.0.4",
     "mkdocs-static-i18n>=1.3.1",
 ]
-all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel]"]
+all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel,s3]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"

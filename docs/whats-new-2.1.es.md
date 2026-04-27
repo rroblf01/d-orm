@@ -342,6 +342,45 @@ class Job(dorm.Model):
   levanta `NotImplementedError` desde `db_type()` para que la
   limitación aparezca en `migrate`.
 
+## `FileField` y storage backends
+
+Una capa de almacenamiento de archivos pluggable con el disco local
+por defecto y un backend S3 opcional detrás del extra `s3`:
+
+```python
+class Document(dorm.Model):
+    name = dorm.CharField(max_length=100)
+    attachment = dorm.FileField(upload_to="docs/%Y/%m/", null=True, blank=True)
+
+doc = Document(name="Q1")
+doc.attachment = dorm.ContentFile(b"bytes del PDF", name="q1.pdf")
+doc.save()
+doc.attachment.url      # → "/media/docs/2026/04/q1.pdf"
+```
+
+La configuración sigue el patrón de `DATABASES`:
+
+```python
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.storage.FileSystemStorage",
+        "OPTIONS": {"location": "/var/app/media", "base_url": "/media/"},
+    },
+}
+```
+
+Cambia el default a S3 instalando el extra y apuntando el backend a
+`dorm.contrib.storage.s3.S3Storage`:
+
+```bash
+pip install 'djanorm[s3]'
+```
+
+Soporta varios alias (`storage="cold"`, etc.), así que un mismo
+proyecto puede mezclar local + S3. Los backends custom solo necesitan
+heredar de `dorm.storage.Storage` e implementar seis métodos.
+Referencia completa en [Models & fields](models.md#archivos).
+
 ## Receivers asíncronos en señales
 
 Las señales aceptan ahora receivers `async def`. Se conectan igual:

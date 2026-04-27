@@ -822,6 +822,229 @@ class BinaryField(Field[bytes]):
         return "BLOB"
 
 
+class FileField(Field[Any]):
+    """Stores a file via a pluggable :class:`dorm.storage.Storage` backend.
+
+    The column itself is a ``VARCHAR(max_length)`` holding the
+    storage-side *name* (relative path / S3 key). The Python value
+    exposed by the descriptor is a :class:`dorm.storage.FieldFile` —
+    a thin wrapper that knows the bound model instance and routes
+    ``.url`` / ``.size`` / ``.open()`` / ``.delete()`` through the
+    configured storage.
+
+    Configuration:
+
+    - ``upload_to`` — directory template for newly uploaded files.
+      Accepts a static string (``"docs/"``), a ``strftime`` template
+      (``"docs/%Y/%m/"``, evaluated at save time), or a callable
+      ``f(instance, filename) -> str`` for fully dynamic paths.
+    - ``storage`` — the :class:`Storage` to use. Either a
+      ``Storage`` instance, a string alias resolved against
+      ``settings.STORAGES`` (``"default"`` is the fallback), or
+      ``None`` (which means: defer the lookup until first use, so
+      ``settings.STORAGES`` can change between import time and the
+      first request).
+
+    Example::
+
+        class Document(dorm.Model):
+            name = dorm.CharField(max_length=100)
+            attachment = dorm.FileField(upload_to="docs/%Y/%m/")
+
+        doc = Document(name="Q1 report")
+        doc.attachment = dorm.ContentFile(b"PDF bytes here", name="q1.pdf")
+        doc.save()
+
+        doc.attachment.url      # storage.url(name)
+        doc.attachment.size     # storage.size(name)
+        with doc.attachment.open("rb") as fh:
+            data = fh.read()
+        doc.attachment.delete()  # removes file + clears the column
+    """
+
+    # Marker the model metaclass checks for to decide whether to route
+    # assignment through ``__set__`` (descriptor path) or write the raw
+    # value to ``__dict__`` directly. FileField installs itself as a
+    # class-level descriptor and needs the ``__set__`` path so the
+    # pending-upload tracking actually runs.
+    _uses_class_descriptor: bool = True
+
+    def __init__(
+        self,
+        upload_to: str | Any = "",
+        *,
+        storage: "str | Any | None" = None,
+        max_length: int = 255,
+        **kwargs: Any,
+    ) -> None:
+        self.upload_to = upload_to
+        self._storage_arg = storage
+        self.max_length = max_length
+        kwargs.setdefault("max_length", max_length)
+        super().__init__(**kwargs)
+
+    def contribute_to_class(self, cls: Any, name: str) -> None:
+        # Reinstall the FileField as a class-level descriptor so
+        # ``obj.attachment = ContentFile(...)`` actually triggers our
+        # ``__set__`` (the metaclass strips field instances from class
+        # attrs by default). This mirrors what ``RelatedField`` does
+        # for its FK descriptor.
+        super().contribute_to_class(cls, name)
+        setattr(cls, name, self)
+
+    # ── Storage resolution ───────────────────────────────────────────────────
+
+    @property
+    def storage(self) -> "Any":
+        """Lazily resolve the storage backend.
+
+        Resolves on every access (not at field construction) so a
+        ``FileField`` declared at module import time still picks up
+        whatever ``settings.STORAGES`` looks like once
+        :func:`dorm.configure` has run — and reflects later
+        reconfigurations (typical in tests). Caching lives at the
+        registry level: :func:`dorm.storage.get_storage` memoises the
+        instance per alias and :func:`dorm.storage.reset_storages`
+        invalidates it. We don't keep a copy here too, because that
+        would require knowing when the registry was reset.
+        """
+        from .storage import Storage, get_storage
+
+        arg = self._storage_arg
+        if isinstance(arg, Storage):
+            return arg
+        alias = arg if isinstance(arg, str) and arg else "default"
+        return get_storage(alias)
+
+    # ── Naming ───────────────────────────────────────────────────────────────
+
+    def _render_target_name(self, instance: Any, filename: str) -> str:
+        """Combine ``upload_to`` with the user-supplied basename.
+
+        ``upload_to`` is one of:
+          - a string with optional ``strftime`` placeholders (rendered
+            against the *current* time, matching Django).
+          - a callable ``f(instance, filename) -> str`` that returns
+            the full storage name (``upload_to`` itself, no further
+            joining).
+        """
+        upload_to = self.upload_to
+        if not isinstance(upload_to, str) and callable(upload_to):
+            return str(upload_to(instance, filename))
+        directory = upload_to or ""
+        if directory:
+            import datetime as _dt
+            directory = _dt.datetime.now().strftime(directory)
+        # ``filename`` may carry user-controlled path segments — keep
+        # only the basename so the upload can never escape *upload_to*.
+        from .storage import Storage
+        cleaned = Storage.get_valid_name(filename)
+        if directory:
+            return f"{directory.rstrip('/')}/{cleaned}"
+        return cleaned
+
+    # ── Field hooks ──────────────────────────────────────────────────────────
+
+    def __get__(self, instance: Any, owner: Any = None) -> Any:
+        if instance is None:
+            return self
+        from .storage import FieldFile
+
+        cache_key = f"_fieldfile_{self.attname}"
+        cached = instance.__dict__.get(cache_key)
+        raw = instance.__dict__.get(self.attname)
+        # Re-create the wrapper if the underlying name changed (assignment
+        # via ``obj.attachment = "other.pdf"`` etc.) so the FieldFile we
+        # return is always in sync with the stored column.
+        if cached is None or cached.name != (raw or ""):
+            wrapper = FieldFile(instance, self, raw if isinstance(raw, str) else None)
+            if isinstance(raw, FieldFile):
+                wrapper = raw
+                wrapper.instance = instance
+                wrapper.field = self
+            instance.__dict__[cache_key] = wrapper
+            cached = wrapper
+        return cached
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        from .storage import File, FieldFile
+
+        assert self.attname is not None
+        if value is None or value == "":
+            instance.__dict__[self.attname] = None
+            instance.__dict__.pop(f"_fieldfile_{self.attname}", None)
+            return
+        if isinstance(value, str):
+            instance.__dict__[self.attname] = value
+            instance.__dict__.pop(f"_fieldfile_{self.attname}", None)
+            return
+        if isinstance(value, FieldFile):
+            # Reassigning a FieldFile (e.g. from another instance) just
+            # carries its name across — the file already lives on the
+            # storage; we don't want to copy or re-upload.
+            instance.__dict__[self.attname] = value.name or None
+            instance.__dict__.pop(f"_fieldfile_{self.attname}", None)
+            return
+        if isinstance(value, File):
+            # Pending upload — stash the File on the instance under a
+            # private slot. ``pre_save`` writes it to storage on the
+            # next ``Model.save()`` and replaces the slot with the
+            # final storage name.
+            instance.__dict__[f"_pending_file_{self.attname}"] = value
+            # ``attname`` itself stays at whatever was there before
+            # (None for new instances) so save() can tell adding from
+            # updating; pre_save populates it.
+            instance.__dict__.pop(f"_fieldfile_{self.attname}", None)
+            return
+        raise ValidationError(
+            f"FileField {self.name!r}: cannot assign {type(value).__name__}; "
+            "expected File / ContentFile / str / None."
+        )
+
+    def pre_save(self, model_instance: Any, add: bool) -> Any:
+        """Persist any pending upload, then return the storage name.
+
+        Called by :meth:`Model.save` (and ``asave`` via the same path)
+        before binding the column. If a ``File`` was assigned via
+        ``__set__``, this is the moment it actually hits the storage —
+        keeping I/O at save time avoids surprising side effects from
+        attribute assignment.
+        """
+        assert self.attname is not None
+        pending = model_instance.__dict__.pop(f"_pending_file_{self.attname}", None)
+        if pending is not None:
+            target = self._render_target_name(model_instance, pending.name or "upload")
+            saved = self.storage.save(
+                target, pending, max_length=self.max_length
+            )
+            model_instance.__dict__[self.attname] = saved
+        return model_instance.__dict__.get(self.attname)
+
+    def get_db_prep_value(self, value: Any) -> Any:
+        from .storage import FieldFile
+
+        if value is None:
+            return None
+        if isinstance(value, FieldFile):
+            return value.name or None
+        return value
+
+    def to_python(self, value: Any) -> Any:
+        from .storage import File, FieldFile
+
+        if value is None or isinstance(value, (str, File, FieldFile)):
+            return value
+        return str(value)
+
+    def from_db_value(self, value: Any) -> Any:
+        # Reads from the database surface as plain strings; the
+        # descriptor wraps them on access (see ``__get__``).
+        return value
+
+    def db_type(self, connection: Any) -> str:
+        return f"VARCHAR({self.max_length})"
+
+
 class DurationField(Field[datetime.timedelta]):
     """Stores a :class:`datetime.timedelta`.
 

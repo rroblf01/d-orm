@@ -132,6 +132,115 @@ User.objects.get(email="alice@example.com")
 | `BinaryField()` | `BYTEA` / `BLOB` |
 | `ArrayField(base_field)` | `<inner>[]` (solo PG — falla en SQLite) |
 
+### Archivos
+
+`FileField(upload_to="", *, storage=None, max_length=255)` almacena
+un fichero vía un [storage pluggable](#storage-backends). La columna
+en BD es un `VARCHAR(max_length)` que guarda el nombre del storage
+(path relativo / clave S3); el valor Python es un wrapper
+`FieldFile` que devuelve el descriptor.
+
+```python
+class Document(dorm.Model):
+    name = dorm.CharField(max_length=100)
+    attachment = dorm.FileField(upload_to="docs/%Y/%m/", null=True, blank=True)
+
+doc = Document(name="Informe Q1")
+doc.attachment = dorm.ContentFile(b"bytes del PDF", name="q1.pdf")
+doc.save()                     # escribe en storage, guarda nombre en BD
+
+doc.attachment.url             # storage.url(name) — path local o URL S3
+doc.attachment.size            # storage.size(name)
+with doc.attachment.open("rb") as fh:
+    payload = fh.read()
+doc.attachment.delete()        # borra el fichero + limpia la columna
+```
+
+`upload_to` acepta:
+
+- un string estático (`"docs/"`).
+- una plantilla `strftime` (`"docs/%Y/%m/"`, se expande al guardar).
+- un callable `f(instance, filename) -> str` para paths totalmente
+  dinámicos.
+
+`storage` acepta una instancia `Storage`, un alias resuelto contra
+`settings.STORAGES` (por defecto `"default"`), o `None` para diferir
+la búsqueda hasta el primer uso. Sobre `null=True` mira el bloque de
+config más abajo — muy recomendado.
+
+#### Storage backends
+
+La configuración sigue el mismo esquema `BACKEND + OPTIONS` que
+`DATABASES`:
+
+```python
+# settings.py — sistema de archivos local (default si STORAGES no se define)
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.storage.FileSystemStorage",
+        "OPTIONS": {
+            "location": "/var/app/media",
+            "base_url": "/media/",
+        },
+    }
+}
+```
+
+Para usar S3, instala el extra opcional y cambia el backend:
+
+```bash
+pip install 'djanorm[s3]'
+```
+
+```python
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": "my-app-uploads",
+            "region_name": "eu-west-1",
+            "default_acl": "private",
+            "querystring_auth": True,     # URLs firmadas
+            "querystring_expire": 3600,
+            # endpoint_url= para MinIO / R2 / Backblaze B2.
+        },
+    }
+}
+```
+
+Puedes mezclar backends — declara varios alias y eliges por campo:
+
+```python
+class Avatar(dorm.Model):
+    image = dorm.FileField(upload_to="avatars/", storage="public")
+    backup = dorm.FileField(upload_to="archive/", storage="cold")
+```
+
+De serie dorm trae:
+
+| Backend | Módulo | Extra |
+|---|---|---|
+| `FileSystemStorage` | `dorm.storage` | core |
+| `S3Storage` | `dorm.contrib.storage.s3` | `s3` (boto3) |
+
+Para enchufar el tuyo (Azure Blob, GCS, encriptado en reposo),
+hereda de `dorm.storage.Storage` e implementa `_save`, `_open`,
+`delete`, `exists`, `size`, `url`. Los métodos async heredan de la
+clase base (envuelven los sync con `asyncio.to_thread`);
+sobrescríbelos si tu SDK es nativamente async.
+
+#### Consejos
+
+- **Declara siempre `null=True, blank=True`** en campos de archivo
+  opcionales. Un `FileField` sin set bindea `NULL` al insertar; una
+  columna no-null rechazaría la fila.
+- **`MEDIA_URL` es una preocupación solo del ORM** — dorm no sirve
+  los ficheros. Conecta tu framework (FastAPI `StaticFiles`, nginx
+  `alias`, etc.) para exponer `location` en `base_url`.
+- **`default_storage`** es un proxy a nivel de módulo que se re-resuelve
+  en cada llamada, así que `dorm.configure(STORAGES=...)` después
+  del import surte efecto al instante.
+
 ### Tipos de rango (solo PostgreSQL)
 
 | Campo | Tipo BD |

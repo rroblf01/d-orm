@@ -263,6 +263,15 @@ class Model(metaclass=ModelBase):
             if isinstance(field, RelatedField) and key == field.name:
                 # Use FK descriptor so model instances get their PK extracted
                 setattr(self, key, value)
+            elif type(self).__dict__.get(field.attname) is field or hasattr(
+                type(field), "_uses_class_descriptor"
+            ):
+                # The field installed itself as a class-level descriptor
+                # (FileField, future custom fields). Route through
+                # ``setattr`` so ``__set__`` fires — bypassing it would
+                # write the raw value past the descriptor's logic
+                # (pending-upload tracking, etc.).
+                setattr(self, key, value)
             else:
                 # NOTE: ``field.to_python`` may raise ValidationError
                 # (e.g. EmailField rejecting an invalid address). We let
