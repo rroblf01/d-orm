@@ -151,6 +151,75 @@ the DB has already committed and propagating the error would falsely
 claim the transaction failed. Wire that logger into your alerting if
 the callback is correctness-critical.
 
+## Cleanup on rollback: `on_rollback`
+
+The mirror image of `on_commit` — schedule a callback that fires
+**only** when the surrounding transaction rolls back. Use it to undo
+non-transactional side effects whose parent DB work didn't stick:
+deleting a file you just wrote to local storage / S3, removing a
+key from a cache, sending a "the previous notification was reverted"
+webhook.
+
+```python
+from dorm import transaction
+
+with transaction.atomic():
+    user = User.objects.create(name=name)
+    s3_key = upload_avatar(user, image_bytes)
+    # If anything below raises, the row rolls back AND the
+    # avatar gets removed — atomic together.
+    transaction.on_rollback(lambda: s3.delete(s3_key))
+    audit_log.record(user, action="signup")
+```
+
+Semantics mirror `on_commit` in reverse:
+
+- **Outside an `atomic()` block**, `on_rollback` is a no-op — there's
+  nothing to roll back, so nothing to undo. (Mirror of `on_commit`'s
+  "fire immediately" path: same logical answer, since the
+  "transaction" is already final.)
+- **Inside nested `atomic()`**, callbacks fire when *their* block
+  rolls back. A savepoint rollback fires only inner callbacks; an
+  outer rollback fires both inner-merged and outer ones in order.
+- **If the surrounding block commits**, queued rollback callbacks
+  are discarded.
+- **A failing rollback callback is logged**, not raised — same
+  rationale as `on_commit`. The rollback already happened; losing a
+  stray cleanup shouldn't escalate to a crash.
+
+For async code, use `transaction.aon_rollback`:
+
+```python
+from dorm import transaction
+
+async with transaction.aatomic():
+    user = await User.objects.acreate(name=name)
+    s3_key = await aupload_avatar(user, image_bytes)
+    transaction.aon_rollback(lambda: s3_async.delete(s3_key))
+```
+
+`aon_rollback` accepts both regular callables and coroutine
+functions — coroutines are awaited at rollback time.
+
+### Built-in user: `FileField`
+
+`FileField.pre_save` registers an `on_rollback` automatically when
+it writes a file inside an `atomic()` block, so this pattern Just
+Works:
+
+```python
+with transaction.atomic():
+    doc = Document(name="report")
+    doc.attachment = dorm.ContentFile(b"PDF body", name="r.pdf")
+    doc.save()                     # writes to storage, queues cleanup
+    raise BusinessRuleViolation()  # row + bytes both rolled back
+```
+
+No orphan files on disk, no orphan keys in S3 / MinIO. The
+auto-registration is opt-in via being inside an active `atomic()` —
+non-transactional saves are unchanged. See
+[Models: Files](models.md#files) for storage backend details.
+
 ## Forcing a rollback without raising: `set_rollback`
 
 The atomic context manager exposes `set_rollback(True)` to force a

@@ -161,7 +161,7 @@ doc.attachment.delete()        # borra el fichero + limpia la columna
 - un string estático (`"docs/"`).
 - una plantilla `strftime` (`"docs/%Y/%m/"`, se expande al guardar).
 - un callable `f(instance, filename) -> str` para paths totalmente
-  dinámicos — ver [Rutas dinámicas](#rutas-dinámicas) abajo.
+  dinámicos — ver [Rutas dinámicas](#rutas-dinamicas) abajo.
 
 `storage` acepta una instancia `Storage`, un alias resuelto contra
 `settings.STORAGES` (por defecto `"default"`), o `None` para diferir
@@ -368,6 +368,23 @@ sobrescríbelos si tu SDK es nativamente async.
 - **`default_storage`** es un proxy a nivel de módulo que se re-resuelve
   en cada llamada, así que `dorm.configure(STORAGES=...)` después
   del import surte efecto al instante.
+- **Los ficheros escritos dentro de `atomic()` se limpian en
+  rollback.** `FileField.pre_save` registra un hook `on_rollback`
+  que llama a `storage.delete(name)` si la transacción que lo
+  rodea hace rollback, así que un `BusinessRuleViolation` a media
+  de bloque no deja bytes huérfanos en disco / S3. Los rollbacks
+  de savepoint limpian solo los ficheros escritos dentro de ese
+  savepoint; el commit exterior (si lo hay) preserva el resto.
+  Fuera de `atomic()` no se registra cleanup — los saves son
+  fire-and-forget. Ver
+  [Transacciones: limpieza al rollback](transactions.md#limpieza-al-rollback-on_rollback)
+  para la API subyacente.
+- **Reemplazar un fichero no borra el antiguo.** Reasignar
+  `obj.attachment = ContentFile(...)` y guardar escribe el fichero
+  nuevo pero deja el anterior en storage. Si necesitas semántica
+  delete-on-replace, llama a `obj.attachment.delete(save=False)`
+  antes de asignar el reemplazo, o programa la limpieza tú mismo
+  vía `on_commit`.
 
 ### Tipos de rango (solo PostgreSQL)
 

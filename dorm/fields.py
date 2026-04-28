@@ -1011,6 +1011,13 @@ class FileField(Field[Any]):
         ``__set__``, this is the moment it actually hits the storage —
         keeping I/O at save time avoids surprising side effects from
         attribute assignment.
+
+        When the surrounding code is inside an :func:`atomic` /
+        :func:`aatomic` block, the freshly written file is queued for
+        deletion via :func:`on_rollback` so a transaction that later
+        rolls back doesn't leave an orphan on disk / in S3. Outside any
+        active transaction, no cleanup is registered (there's nothing
+        to undo).
         """
         assert self.attname is not None
         pending = model_instance.__dict__.pop(f"_pending_file_{self.attname}", None)
@@ -1020,6 +1027,14 @@ class FileField(Field[Any]):
                 target, pending, max_length=self.max_length
             )
             model_instance.__dict__[self.attname] = saved
+            # Schedule a rollback cleanup so an outer ``atomic()`` that
+            # later raises doesn't leave the bytes on storage with no
+            # row referencing them. ``on_rollback`` is a no-op when
+            # there's no active transaction, so the non-atomic happy
+            # path stays unchanged.
+            from .transaction import on_rollback
+            storage = self.storage
+            on_rollback(lambda _name=saved, _s=storage: _s.delete(_name))
         return model_instance.__dict__.get(self.attname)
 
     def get_db_prep_value(self, value: Any) -> Any:

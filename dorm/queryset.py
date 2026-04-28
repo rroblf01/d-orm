@@ -1201,8 +1201,21 @@ class QuerySet(Generic[_T]):
 
         connection = self._get_connection()
         meta = self.model._meta
+        # Include the auto-PK in ``concrete_fields`` only when the
+        # caller explicitly set it on the first object. Excluding all
+        # ``AutoField`` columns unconditionally — the previous
+        # behaviour — silently dropped the user's pre-assigned PK,
+        # so ``bulk_create([Publisher(pk=4242, …)])`` ended up with
+        # an auto-generated id instead. Match Django: trust the
+        # caller's pk if present.
         concrete_fields = [
-            f for f in meta.fields if f.column and not isinstance(f, AutoField)
+            f
+            for f in meta.fields
+            if f.column
+            and (
+                not isinstance(f, AutoField)
+                or objs[0].__dict__.get(f.attname) is not None
+            )
         ]
         pk_col = meta.pk.column if meta.pk else "id"
 
@@ -1309,9 +1322,20 @@ class QuerySet(Generic[_T]):
     ) -> int:
         """Update *fields* on *objs* with a single ``UPDATE ... SET col = CASE pk
         WHEN ...`` statement per batch (one round-trip per ``batch_size``
-        objects, instead of one per object)."""
+        objects, instead of one per object).
+
+        Raises :class:`ValueError` if *fields* is empty — without
+        columns to set, the generated SQL would be malformed (``UPDATE
+        … WHERE …`` with no ``SET`` clause), so we fail fast at the
+        Python boundary instead of at the database parser.
+        """
         if not objs:
             return 0
+        if not fields:
+            raise ValueError(
+                "bulk_update() requires at least one column name in *fields*; "
+                "got an empty list."
+            )
         from .transaction import atomic
 
         count = 0
@@ -1773,8 +1797,16 @@ class QuerySet(Generic[_T]):
 
         conn = self._get_async_connection()
         meta = self.model._meta
+        # See ``bulk_create`` for the rationale on AutoField inclusion
+        # when the caller pre-assigned the PK.
         concrete_fields = [
-            f for f in meta.fields if f.column and not isinstance(f, AutoField)
+            f
+            for f in meta.fields
+            if f.column
+            and (
+                not isinstance(f, AutoField)
+                or objs[0].__dict__.get(f.attname) is not None
+            )
         ]
         pk_col = meta.pk.column if meta.pk else "id"
 
@@ -1826,6 +1858,13 @@ class QuerySet(Generic[_T]):
         strategy: one UPDATE statement per batch of ``batch_size`` objects."""
         if not objs:
             return 0
+        if not fields:
+            # Same fast-fail as ``bulk_update``: empty ``fields`` would
+            # build malformed SQL.
+            raise ValueError(
+                "abulk_update() requires at least one column name in *fields*; "
+                "got an empty list."
+            )
         from .transaction import aatomic
 
         count = 0

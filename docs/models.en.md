@@ -362,6 +362,22 @@ directly if your SDK is natively async.
 - **`default_storage`** is a module-level proxy that re-resolves on
   every call, so `dorm.configure(STORAGES=...)` after import time
   takes effect immediately.
+- **Files written inside `atomic()` are cleaned up on rollback.**
+  `FileField.pre_save` registers an `on_rollback` hook that calls
+  `storage.delete(name)` if the surrounding transaction rolls back,
+  so a `BusinessRuleViolation` mid-block leaves no orphan bytes on
+  disk / S3. Savepoint rollbacks clean up only the files written
+  inside that savepoint; the outer commit (if any) preserves the
+  rest. Outside `atomic()`, no cleanup is registered — saves are
+  fire-and-forget. See [Transactions: cleanup on
+  rollback](transactions.md#cleanup-on-rollback-on_rollback) for
+  the underlying API.
+- **Replacing a file does not delete the old one.** Reassigning
+  `obj.attachment = ContentFile(...)` and saving writes the new
+  file but leaves the previous one on storage. If you need
+  delete-on-replace semantics, call `obj.attachment.delete(save=False)`
+  before assigning the replacement, or schedule the cleanup yourself
+  via `on_commit`.
 
 ### Range types (PostgreSQL only)
 

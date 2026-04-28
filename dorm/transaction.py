@@ -27,14 +27,18 @@ _log = logging.getLogger("dorm.transaction")
 
 _SYNC_STATE = threading.local()
 
-# Async stack is a per-task list of (using_alias, callbacks) frames.
-_ASYNC_STACK: contextvars.ContextVar[list[tuple[str, list[Callable[[], Any]]]] | None] = (
-    contextvars.ContextVar("dorm_on_commit_async_stack", default=None)
-)
+# Async stack is a per-task list of (using_alias, commit_callbacks,
+# rollback_callbacks) frames. Sync uses a parallel pair of dicts on
+# ``_SYNC_STATE`` (commit / rollback) keyed by alias.
+_ASYNC_STACK: contextvars.ContextVar[
+    list[tuple[str, list[Callable[[], Any]], list[Callable[[], Any]]]] | None
+] = contextvars.ContextVar("dorm_on_commit_async_stack", default=None)
 
 
 def _sync_stack(using: str) -> list[list[Callable[[], Any]]]:
-    """Return (and lazily create) the per-thread, per-alias frame stack."""
+    """Return (and lazily create) the per-thread, per-alias commit frame
+    stack. Each entry is a list of pending ``on_commit`` callbacks for
+    one nesting level."""
     stacks = getattr(_SYNC_STATE, "stacks", None)
     if stacks is None:
         stacks = {}
@@ -42,23 +46,53 @@ def _sync_stack(using: str) -> list[list[Callable[[], Any]]]:
     return stacks.setdefault(using, [])
 
 
+def _sync_rollback_stack(using: str) -> list[list[Callable[[], Any]]]:
+    """Per-thread rollback-callback stack, parallel to ``_sync_stack``.
+
+    Maintained as a separate dict on ``_SYNC_STATE`` so the existing
+    ``on_commit`` path stays untouched — the ``_pop_sync_frame``
+    coordinator drains both stacks atomically."""
+    stacks = getattr(_SYNC_STATE, "rb_stacks", None)
+    if stacks is None:
+        stacks = {}
+        _SYNC_STATE.rb_stacks = stacks
+    return stacks.setdefault(using, [])
+
+
 def _push_sync_frame(using: str) -> None:
     _sync_stack(using).append([])
+    _sync_rollback_stack(using).append([])
 
 
 def _pop_sync_frame(using: str, *, committed: bool) -> None:
     """Pop the innermost frame.
 
-    If the surrounding ``atomic()`` block committed, the frame's callbacks
-    are merged into the parent frame so they fire when the parent commits
-    (or chained again into an even-outer frame). If the block rolled back,
-    the callbacks are discarded — exactly what you want for "fire only on
-    commit" semantics.
+    On commit: ``on_commit`` callbacks are merged into the parent (so
+    they fire when the *outermost* tx commits) and ``on_rollback``
+    callbacks are discarded — we did commit, no cleanup needed.
+
+    On rollback: ``on_rollback`` callbacks fire **now** (the inner work
+    is genuinely undone, so its compensations should run as soon as the
+    rollback completes) and ``on_commit`` callbacks are discarded.
+
+    Each callback is fired in its own ``try``/``except`` so a buggy
+    cleanup hook can't take down the transaction-management bookkeeping.
     """
     stack = _sync_stack(using)
+    rb_stack = _sync_rollback_stack(using)
     frame = stack.pop()
+    rb_frame = rb_stack.pop()
+
     if not committed:
+        # Discard commit callbacks; fire rollback ones immediately.
+        for cb in rb_frame:
+            try:
+                cb()
+            except Exception:
+                _log.exception("on_rollback callback %r raised", cb)
         return
+
+    # Committed — discard rollback frame, propagate commit frame.
     if stack:
         stack[-1].extend(frame)
         return
@@ -101,12 +135,61 @@ def on_commit(
     stack[-1].append(callback)
 
 
+def on_rollback(
+    callback: Callable[[], Any],
+    using: str = "default",
+) -> None:
+    """Schedule *callback* to run when the surrounding transaction rolls
+    back. The mirror image of :func:`on_commit` — used to undo
+    *non-transactional* side effects when the underlying DB work didn't
+    stick. The canonical user is :class:`dorm.FileField`, which queues
+    a ``storage.delete`` so a file written inside an ``atomic()`` that
+    later rolls back doesn't survive as an orphan.
+
+    Behaviour matches ``on_commit``'s semantics in reverse:
+
+    - Outside any ``atomic()`` block, there is nothing to roll back, so
+      the callback is **dropped**. (``on_commit`` runs the callback
+      immediately because the "transaction" already committed; the
+      symmetric "transaction already committed" answer for rollback is
+      "nothing to undo.")
+    - Inside nested ``atomic()`` blocks, callbacks fire when **their**
+      block rolls back — savepoint rollbacks fire only inner callbacks,
+      outer commit-or-rollback decides the outer ones.
+    - If the surrounding block commits, queued rollback callbacks are
+      discarded.
+    - When this is called from inside an ``aatomic()`` block, the
+      callback is registered on the async stack and fires from the
+      async pop path (``aon_rollback`` is a thin alias for callers
+      who want to make the async intent explicit).
+    """
+    # Prefer the sync stack (tracks per-thread atomic frames). Fall back
+    # to the active async stack so the same helper works inside both
+    # ``atomic()`` and ``aatomic()`` — which matters for ``FileField``,
+    # whose ``pre_save`` is sync even on the async ORM path.
+    sync_stack = _sync_rollback_stack(using)
+    if sync_stack:
+        sync_stack[-1].append(callback)
+        return
+    async_stack = _aon_commit_stack()
+    for frame in reversed(async_stack):
+        frame_using, _commit, rollback_cbs = frame
+        if frame_using == using:
+            rollback_cbs.append(callback)
+            return
+    # Outside any active transaction → nothing to roll back, drop.
+    return
+
+
 # ── async on_commit ──────────────────────────────────────────────────────────
 
 
-def _aon_commit_stack() -> list[tuple[str, list[Callable[[], Any]]]]:
-    """Return the per-task async on-commit stack, creating one if needed.
+def _aon_commit_stack() -> list[
+    tuple[str, list[Callable[[], Any]], list[Callable[[], Any]]]
+]:
+    """Return the per-task async stack, creating one if needed.
 
+    Each frame is ``(using_alias, commit_callbacks, rollback_callbacks)``.
     The ContextVar default is ``None`` so we can detect "first use" and set
     a fresh per-task list (otherwise concurrent tasks would share the
     default mutable list — a classic gotcha).
@@ -119,16 +202,30 @@ def _aon_commit_stack() -> list[tuple[str, list[Callable[[], Any]]]]:
 
 
 def _push_async_frame(using: str) -> None:
-    _aon_commit_stack().append((using, []))
+    _aon_commit_stack().append((using, [], []))
 
 
 async def _pop_async_frame(using: str, *, committed: bool) -> None:
     stack = _aon_commit_stack()
     if not stack:
         return
-    frame_using, frame = stack.pop()
+    frame_using, frame, rb_frame = stack.pop()
+    del frame_using  # only used for parity with ``aon_rollback``'s scoping
+
     if not committed:
+        # Discard commit callbacks; fire rollback callbacks now. Both
+        # sync and async rollback callables are accepted — coroutines
+        # are awaited, sync calls run inline.
+        for cb in rb_frame:
+            try:
+                result = cb()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                _log.exception("aon_rollback callback %r raised", cb)
         return
+
+    # Committed — discard rollback frame, propagate commit frame.
     if stack:
         # Merge into parent frame so it fires when *that* layer commits.
         stack[-1][1].extend(frame)
@@ -177,7 +274,33 @@ def aon_commit(
                     "coroutine result was not awaited"
                 )
         return
+    # ``stack[-1]`` is ``(using, commit_cbs, rollback_cbs)`` — index 1
+    # is the commit list, matching the original layout.
     stack[-1][1].append(callback)
+
+
+def aon_rollback(
+    callback: Union[Callable[[], Any], Callable[[], Awaitable[Any]]],
+    using: str = "default",
+) -> None:
+    """Async counterpart of :func:`on_rollback`.
+
+    Accepts both regular callables and coroutine functions. The
+    rollback path awaits coroutines so cleanup that itself needs the
+    event loop (deleting a remote object via ``aiobotocore``, for
+    example) Just Works.
+
+    Outside an :func:`aatomic` block, the callback is dropped — the
+    rollback symmetry of the no-op ``on_commit`` path.
+    """
+    stack = _aon_commit_stack()
+    for frame in reversed(stack):
+        frame_using, _commit, rollback_cbs = frame
+        if frame_using == using:
+            rollback_cbs.append(callback)
+            return
+    # Outside any active aatomic — nothing to roll back. Drop.
+    return
 
 
 # ── atomic() / aatomic() context managers ────────────────────────────────────

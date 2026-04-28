@@ -6,6 +6,61 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Transaction lifecycle hooks
+- **`transaction.on_rollback(callback, using="default")`** and the
+  matching async **`transaction.aon_rollback`**. The mirror of
+  ``on_commit`` for code that needs to undo non-transactional side
+  effects when the surrounding ``atomic()`` rolls back. Examples:
+  deleting a file just written to a storage backend, removing a key
+  from a cache, sending a "previous notification was reverted"
+  webhook. Outside an active transaction the callback is dropped
+  (mirror of ``on_commit``'s "fire immediately" path); inside nested
+  ``atomic()`` blocks, callbacks fire when *their* block rolls back —
+  savepoint rollbacks fire only inner callbacks.
+
+### Fixed — FileField + atomic() no longer leaks orphan files
+- **A file written inside ``atomic()`` is now cleaned up
+  automatically when the transaction rolls back.** Before this
+  release, ``FileField.pre_save`` called ``storage.save`` *during*
+  the transaction; if the surrounding block then raised, the bytes
+  stayed on disk / S3 with no row referencing them. The save path
+  now registers an ``on_rollback`` cleanup that calls
+  ``storage.delete(name)`` on the just-written file, so a
+  ``RuntimeError`` mid-block leaves the storage as it was before
+  the block. Savepoint rollbacks clean up only the files written
+  inside that savepoint; files written in the outer block (which
+  still commits) are preserved. Outside any ``atomic()`` block, no
+  cleanup is registered — there's nothing to undo.
+
+### Fixed — Behaviour bugs (observable changes; review on upgrade)
+- **`Q()` is now a tautology, not a no-op.** ``Q() | Q(age=2)``
+  now correctly matches *every* row (``TRUE OR (age=2) ⇒ TRUE``);
+  previously the empty ``Q()`` was silently dropped from the OR
+  and the query collapsed to ``Q(age=2)``. AND with empty Q
+  remains a no-op (``TRUE AND X ⇒ X``), unchanged. Code that
+  relied on the buggy behaviour to filter rows via ``Q() | …``
+  will now return more rows — review your filters.
+- **`filter(col=F("other_col"))` now works for the comparison
+  lookups** (``exact``, ``gt``, ``gte``, ``lt``, ``lte``).
+  Previously the ``F`` object was passed as a bound parameter and
+  the cursor errored out with ``"type 'F' is not supported"``.
+  Other lookups raise ``NotImplementedError`` with a clear hint
+  pointing at ``annotate()``.
+- **`order_by("fk_name")` now resolves to the underlying
+  ``fk_name_id`` column** when ``fk_name`` is a ``ForeignKey`` on
+  the model. Previously the SQL emitted ``ORDER BY "fk_name"``,
+  which doesn't exist as a column — the query crashed on PG and
+  silently misbehaved on SQLite.
+- **`bulk_create([Model(pk=42, …)])` now honours the explicit pk.**
+  The previous code excluded every ``AutoField`` column from the
+  INSERT regardless of whether the caller had pre-assigned the pk,
+  so rows ended up at fresh auto-generated ids instead of the
+  requested ones. This regressed Django-style fixtures that pin
+  primary keys.
+- **`bulk_update(rows, [])` now raises ``ValueError``** instead of
+  emitting malformed ``UPDATE … WHERE …`` (no ``SET`` clause). Same
+  fix on the async ``abulk_update`` path.
+
 ### Improved — `FileField(upload_to=callable)`
 - **Migration writer round-trips module-level callables.** A
   ``FileField(upload_to=upload_owner_scoped)`` declared with a

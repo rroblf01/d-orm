@@ -285,10 +285,17 @@ class SQLQuery:
                     col = self._resolve_column(fname.split("__"))
                 else:
                     _validate_identifier(fname)
+                    # Translate Python field names to their DB column.
+                    # ``order_by("publisher")`` on a FK named ``publisher``
+                    # has to emit ``"publisher_id"`` — the column the FK
+                    # actually stores. Without this lookup the SQL would
+                    # reference a non-existent ``"publisher"`` column.
+                    leaf = self._resolve_field([fname])
+                    column = leaf.column if leaf is not None and leaf.column else fname
                     col = (
-                        f'"{self.model._meta.db_table}"."{fname}"'
+                        f'"{self.model._meta.db_table}"."{column}"'
                         if self.joins
-                        else f'"{fname}"'
+                        else f'"{column}"'
                     )
                 order_parts.append(f"{col} {'DESC' if desc else 'ASC'}")
             order_by_sql = " ORDER BY " + ", ".join(order_parts)
@@ -527,6 +534,18 @@ class SQLQuery:
         return "", []
 
     def _compile_q(self, q: Q, connection) -> tuple[str, list]:
+        # An empty ``Q()`` represents the unconditional tautology
+        # ``TRUE`` — that's how Django interprets it, and it's what
+        # makes ``Q() | Q(x)`` evaluate to "match everything" rather
+        # than "match Q(x)" only. The previous compiler returned ``""``
+        # for an empty Q, which the OR-join then dropped silently —
+        # callers got the wrong row set with no error to point at it.
+        # ``(1=0)`` is the negated form (``~Q()``); both literals work
+        # on every supported backend.
+        if not q.children:
+            sql = "(1=0)" if q.negated else "(1=1)"
+            return sql, []
+
         parts = []
         params: list = []
         for child in q.children:
@@ -584,6 +603,32 @@ class SQLQuery:
         if isinstance(value, OuterRef):
             outer_col = self._resolve_outer_ref(value)
             return f"{col} = {outer_col}", []
+
+        # ``F()`` on the RHS compiles to a column reference, not a
+        # bound parameter — the canonical "compare two columns of the
+        # same row" pattern (``filter(price__gte=F("cost"))``).
+        # Without this branch the ``F`` object falls through to the
+        # bound-parameter path and the cursor errors out with "type
+        # 'F' is not supported".
+        if isinstance(value, F):
+            rhs_col = self._resolve_column([value.name])
+            op_map = {
+                "exact": "=",
+                "iexact": "=",   # collation-insensitive comparison handled by column
+                "gt": ">",
+                "gte": ">=",
+                "lt": "<",
+                "lte": "<=",
+            }
+            op = op_map.get(lookup)
+            if op is None:
+                raise NotImplementedError(
+                    f"F() reference not supported with lookup {lookup!r}; "
+                    "use one of: exact, gt, gte, lt, lte. For other "
+                    "comparisons, evaluate the right-hand side in Python "
+                    "first or wrap in an annotate() expression."
+                )
+            return f"{col} {op} {rhs_col}", []
 
         # Extract PK from model instances (e.g. filter(author=instance))
         if hasattr(value, "_meta") and hasattr(value, "pk"):
