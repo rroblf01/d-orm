@@ -127,9 +127,23 @@ class Func:
 
 
 class Coalesce(Func):
-    """COALESCE(expr1, expr2, ...) — returns first non-null value."""
+    """COALESCE(expr1, expr2, ...) — returns first non-null value.
+
+    Constructing ``Coalesce()`` with no expressions is meaningless —
+    every backend rejects ``COALESCE()`` at parse time. Validating
+    here turns the eventual ``OperationalError`` into a clear
+    ``ValueError`` pointing at the user's code instead of at the
+    cursor.
+    """
 
     function = "COALESCE"
+
+    def __init__(self, *expressions: Any, output_field: Any = None) -> None:
+        if not expressions:
+            raise ValueError(
+                "Coalesce() requires at least one expression."
+            )
+        super().__init__(*expressions, output_field=output_field)
 
 
 class Length(Func):

@@ -201,19 +201,31 @@ def parse_database_url(url: str) -> dict:
     scheme = parsed.scheme.lower()
 
     if scheme in {"sqlite", "sqlite3"}:
-        # ``sqlite:///path`` (3 slashes = absolute path) / ``sqlite://path``
-        # (2 slashes = relative). ``urlparse`` puts the path in
-        # ``parsed.path`` either way; an empty netloc means we're already
-        # at the path. Special-case ``:memory:`` so users can spell it
-        # naturally.
+        # SQLite URL flavours we accept:
+        #   ``sqlite://``                 → in-memory
+        #   ``sqlite:///``                → in-memory
+        #   ``sqlite://relative/db``      → relative path "relative/db"
+        #   ``sqlite:////tmp/db.sqlite3`` → absolute path "/tmp/db.sqlite3"
+        #   ``sqlite:///:memory:``        → in-memory (explicit)
+        #
+        # ``urlparse`` puts the host segment of two-slash URLs into
+        # ``netloc`` and the rest into ``path``; a four-slash URL puts
+        # everything in ``path`` with an extra leading slash. We
+        # reassemble both cases into a single ``path`` string before
+        # the ``:memory:`` shortcut.
         from typing import Any as _AnyQ
         path = parsed.path
-        if path.startswith("/"):
-            # ``sqlite:////tmp/db.sqlite3`` produces path ``//tmp/...``;
-            # collapse one leading slash so the resulting path is the
-            # filesystem absolute path the user intended.
-            if parsed.netloc and not path.startswith("//"):
-                path = parsed.netloc + path
+        if parsed.netloc:
+            # ``sqlite://relative/db.sqlite3`` →
+            #   netloc="relative", path="/db.sqlite3" → "relative/db.sqlite3"
+            path = parsed.netloc + path
+        elif path.startswith("//"):
+            # ``sqlite:////tmp/db.sqlite3`` → path "//tmp/db.sqlite3";
+            # the doubled leading slash is the URL syntax for "after
+            # the empty netloc, this is an absolute filesystem path".
+            # Collapse one slash so the caller gets the filesystem
+            # path they intended.
+            path = path[1:]
         if not path or path == "/":
             path = ":memory:"
         cfg_sqlite: dict[str, _AnyQ] = {"ENGINE": "sqlite", "NAME": path}
