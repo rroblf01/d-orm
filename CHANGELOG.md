@@ -6,6 +6,32 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Tier 3 Django-parity features
+
+- **`CompositePrimaryKey(*field_names)`** — declare a primary key
+  spanning multiple existing fields. The migration writer emits
+  ``PRIMARY KEY (col1, col2, …)`` (and strips the per-column
+  ``PRIMARY KEY``); ``Model.pk`` returns / accepts a tuple;
+  ``filter(pk=(a, b))`` decomposes into per-component WHERE clauses
+  at the queryset boundary; ``save`` / ``delete`` use the multi-
+  column predicate. Documented limitations: no auto-increment on
+  components, can't be the *target* of a regular ``ForeignKey``,
+  ``filter(pk__in=[...])`` is unsupported (use ``Q`` with explicit
+  per-field clauses).
+
+- **`dorm.contrib.contenttypes`** — Django-style polymorphic FKs.
+  Adds ``ContentType`` (one row per registered model, keyed by
+  ``(app_label, model)``), ``GenericForeignKey`` (virtual field
+  composing ``content_type`` + ``object_id`` into a single
+  descriptor), and ``GenericRelation`` (reverse accessor on the
+  target side). ``ContentTypeManager.get_for_model`` /
+  ``aget_for_model`` memoises lookups per process; descriptor
+  reads cache the resolved instance per row. Includes async paths
+  (``aget`` on the GFK descriptor, ``acreate`` on the relation
+  manager). Tests cover create / cached lookup / round-trip /
+  polymorphic targets / dangling object-id / reverse manager /
+  isolation between instances on both SQLite and PostgreSQL.
+
 ### Added — Transaction lifecycle hooks
 - **`transaction.on_rollback(callback, using="default")`** and the
   matching async **`transaction.aon_rollback`**. The mirror of

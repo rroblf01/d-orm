@@ -379,6 +379,34 @@ directly if your SDK is natively async.
   before assigning the replacement, or schedule the cleanup yourself
   via `on_commit`.
 
+#### `ImageField`
+
+`ImageField(upload_to="", *, storage=None, max_length=255)` is a
+specialised `FileField` that validates the upload is a real image
+before writing it to storage — so a user can't slip a `.exe`
+through with a renamed extension.
+
+```python
+class Avatar(dorm.Model):
+    user = dorm.ForeignKey(User, on_delete=dorm.CASCADE)
+    image = dorm.ImageField(upload_to="avatars/%Y/%m/", null=True, blank=True)
+```
+
+Validation uses **Pillow** when installed; otherwise it falls back
+to a magic-bytes sniff that recognises PNG / JPEG / GIF / WebP /
+TIFF / BMP. Install the optional `image` extra to make Pillow the
+canonical validator (and unlock things like reading dimensions or
+re-encoding before save in user code):
+
+```bash
+pip install 'djanorm[image]'
+```
+
+Everything you can do with `FileField` (dynamic `upload_to`,
+`STORAGES` aliases, S3 / MinIO, atomic-rollback cleanup) works
+identically on `ImageField` — the only difference is the upfront
+content-type check at assignment time.
+
 ### Range types (PostgreSQL only)
 
 | Field | DB type |
@@ -451,6 +479,127 @@ class Book(dorm.Model):
     author = dorm.ForeignKey(Author, ...)
     author_id: int | None        # ← lets ty/mypy/pyright see it
 ```
+
+### Composite primary keys
+
+`CompositePrimaryKey(*field_names)` declares that the table's primary
+key spans more than one column. The component fields are real,
+concrete fields you also declare in the model body — the composite
+just tells the migration writer to emit `PRIMARY KEY (col1, col2)`
+and tells the ORM to address rows by tuple.
+
+```python
+class OrderLine(dorm.Model):
+    order_id = dorm.IntegerField()
+    line_no = dorm.IntegerField()
+    sku = dorm.CharField(max_length=50)
+    qty = dorm.IntegerField(default=1)
+
+    pk = dorm.CompositePrimaryKey("order_id", "line_no")
+```
+
+CRUD by tuple `pk`:
+
+```python
+line = OrderLine.objects.create(order_id=1, line_no=1, sku="A", qty=2)
+line.pk                             # (1, 1)
+
+OrderLine.objects.get(pk=(1, 1))    # tuple lookup
+OrderLine.objects.filter(pk=(1, 1)) # decomposed into per-component WHERE
+line.delete()                       # uses (order_id=…, line_no=…)
+```
+
+Limitations to know up front:
+
+- A `CompositePrimaryKey` cannot be the *target* of a `ForeignKey`
+  — single-column FKs can't reference a multi-column key. If you
+  need cross-table referencing, declare a synthetic surrogate PK
+  and a `UniqueConstraint` over the composite columns.
+- No component is auto-incrementing; you supply both values on
+  insert.
+- `filter(pk__in=[...])` over composite keys is not supported. Use
+  `Q` objects with explicit per-component clauses.
+
+### Generic relations (polymorphic FKs)
+
+For the case where one model needs to point at "any other model"
+— think tags, comments, audit-log entries — use the
+``dorm.contrib.contenttypes`` helpers. They mirror Django's
+``django.contrib.contenttypes``: a ``ContentType`` registry plus
+two field types that compose ``content_type`` (FK to
+``ContentType``) + ``object_id`` (integer column) into a
+polymorphic FK.
+
+Add the app to your settings and run the migrations once so the
+``django_content_type`` table exists:
+
+```python
+# settings.py
+INSTALLED_APPS = ["dorm.contrib.contenttypes", "myapp"]
+```
+
+```bash
+dorm makemigrations
+dorm migrate
+```
+
+Then declare the polymorphic side and the reverse accessor:
+
+```python
+import dorm
+from dorm.contrib.contenttypes import (
+    ContentType,
+    GenericForeignKey,
+    GenericRelation,
+)
+
+class Article(dorm.Model):
+    title = dorm.CharField(max_length=200)
+    tags = GenericRelation("Tag")          # reverse accessor — no column
+
+class Book(dorm.Model):
+    name = dorm.CharField(max_length=200)
+    tags = GenericRelation("Tag")
+
+class Tag(dorm.Model):
+    label = dorm.CharField(max_length=50)
+    content_type = dorm.ForeignKey(ContentType, on_delete=dorm.CASCADE)
+    content_type_id: int | None
+    object_id = dorm.PositiveIntegerField()
+    target = GenericForeignKey("content_type", "object_id")
+```
+
+Forward access:
+
+```python
+article = Article.objects.create(title="Hello")
+tag = Tag(label="featured")
+tag.target = article                       # sets content_type + object_id
+tag.save()
+
+reloaded = Tag.objects.get(pk=tag.pk)
+isinstance(reloaded.target, Article)        # True
+```
+
+Reverse access via `GenericRelation`:
+
+```python
+article.tags.create(label="urgent")
+list(article.tags.all())                   # all Tags pointing at article
+article.tags.filter(label__startswith="u").count()
+```
+
+Async paths exist alongside the sync ones:
+
+```python
+ct = await ContentType.objects.aget_for_model(Article)
+target = await tag.target.aget(tag) if tag.target is None else tag.target
+```
+
+`ContentType.objects.get_for_model(MyModel)` memoises the row per
+process — repeated polymorphic lookups don't pay a round-trip per
+access. If your tests recreate models or truncate the table, call
+`ContentType.objects.clear_cache()` to invalidate.
 
 ## Common field options
 

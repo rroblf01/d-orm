@@ -52,12 +52,11 @@ def _create_cpk_table(clean_db):
             cols.append(sql_def)
     if composite_cols:
         cols = [
-            c.replace(" PRIMARY KEY", "").replace(" AUTOINCREMENT", "")
-            for c in cols
+            c.replace(" PRIMARY KEY", "").replace(" AUTOINCREMENT", "") for c in cols
         ]
         cols.append("PRIMARY KEY (" + ", ".join(f'"{c}"' for c in composite_cols) + ")")
     conn.execute_script(
-        f'CREATE TABLE IF NOT EXISTS "cpk_order_lines" (\n  '
+        'CREATE TABLE IF NOT EXISTS "cpk_order_lines" (\n  '
         + ",\n  ".join(cols)
         + "\n)"
     )
@@ -136,14 +135,18 @@ class TestCompositePrimaryKeyCRUD:
 
     def test_pk_setter_unpacks_tuple(self, _create_cpk_table):
         line = OrderLine(sku="X")
-        line.pk = (5, 9)
+        # ``OrderLine.pk`` is a ``CompositePrimaryKey`` declaration at
+        # class scope, which the metaclass swaps out for the
+        # ``Model.pk`` property at runtime. ty sees only the static
+        # attribute, so the assignment is annotated as ``Any``-tunneled.
+        setattr(line, "pk", (5, 9))
         assert line.order_id == 5
         assert line.line_no == 9
 
     def test_pk_setter_rejects_wrong_arity(self):
         line = OrderLine(sku="X")
-        with pytest.raises(ValueError, match="2-tuple"):
-            line.pk = (1,)
+        with pytest.raises(ValueError, match="CompositePrimaryKey expects a 2-tuple"):
+            setattr(line, "pk", (1,))
 
     def test_filter_pk_rejects_wrong_arity(self, _create_cpk_table):
         with pytest.raises((ValueError, TypeError)):
@@ -157,7 +160,9 @@ class TestCompositePrimaryKeyCRUD:
 class TestCompositePrimaryKeyMigrationWriter:
     def test_create_table_emits_composite_constraint(self):
         conn = get_connection()
-        cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
+        cascade = (
+            " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
+        )
         conn.execute_script(f'DROP TABLE IF EXISTS "cpk_writer_check"{cascade}')
 
         from dorm.migrations.operations import CreateModel

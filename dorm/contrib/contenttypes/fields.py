@@ -22,7 +22,7 @@ model being pointed at::
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
 from ...fields import Field
 from ...models import Model

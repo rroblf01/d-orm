@@ -28,7 +28,13 @@ from dorm.migrations.operations import _field_to_column_sql
 
 class CTArticle(dorm.Model):
     title = dorm.CharField(max_length=200)
-    tags = GenericRelation("Tag", content_type_field="content_type", object_id_field="object_id")
+    # ``CTTag`` rather than the bare string ``"CTTag"`` so the lookup
+    # doesn't go through the global registry — the conftest also
+    # registers a model named ``Tag`` and we don't want any chance of
+    # confusion between the two.
+    tags = GenericRelation(
+        "CTTag", content_type_field="content_type", object_id_field="object_id"
+    )
 
     class Meta:
         db_table = "ct_articles"
@@ -36,15 +42,22 @@ class CTArticle(dorm.Model):
 
 class CTBook(dorm.Model):
     name = dorm.CharField(max_length=200)
-    tags = GenericRelation("Tag", content_type_field="content_type", object_id_field="object_id")
+    tags = GenericRelation(
+        "CTTag", content_type_field="content_type", object_id_field="object_id"
+    )
 
     class Meta:
         db_table = "ct_books"
 
 
-class Tag(dorm.Model):
+class CTTag(dorm.Model):
     label = dorm.CharField(max_length=50)
     content_type = dorm.ForeignKey(ContentType, on_delete=dorm.CASCADE)
+    # ``ForeignKey.contribute_to_class`` installs a typed descriptor for
+    # the underlying ``<fk>_id`` slot at runtime. Annotate it explicitly
+    # so ty sees ``tag.content_type_id`` as ``int | None`` (matches the
+    # convention used in :mod:`tests.models`).
+    content_type_id: int | None
     object_id = dorm.PositiveIntegerField()
     target = GenericForeignKey("content_type", "object_id")
 
@@ -69,7 +82,7 @@ def _create_ct_tables(clean_db):
     # no longer exist. Wipe before recreating tables.
     ContentType.objects.clear_cache()
 
-    for model in (ContentType, CTArticle, CTBook, Tag):
+    for model in (ContentType, CTArticle, CTBook, CTTag):
         cols = [
             _field_to_column_sql(f.name, f, conn)
             for f in model._meta.fields
@@ -116,6 +129,7 @@ class TestContentType:
         ct = ContentType.objects.get_for_model(CTArticle)
         loaded = ct.get_object_for_this_type(pk=article.pk)
         assert loaded.pk == article.pk
+        assert isinstance(loaded, CTArticle)
         assert loaded.title == "Hello"
 
     def test_get_object_for_this_type_missing_model(self, _create_ct_tables):
@@ -139,21 +153,21 @@ class TestContentType:
 class TestGenericForeignKey:
     def test_assignment_sets_both_columns(self, _create_ct_tables):
         article = CTArticle.objects.create(title="Hello")
-        tag = Tag(label="featured")
+        tag = CTTag(label="featured")
         tag.target = article
         # Underlying columns populated.
         ct = ContentType.objects.get_for_model(CTArticle)
-        assert tag.content_type_id == ct.pk
+        assert tag.content_type.pk == ct.pk
         assert tag.object_id == article.pk
 
     def test_round_trip_descriptor(self, _create_ct_tables):
         article = CTArticle.objects.create(title="Hello")
-        tag = Tag(label="featured")
+        tag = CTTag(label="featured")
         tag.target = article
         tag.save()
 
         # Reload to avoid descriptor cache-hit path.
-        loaded = Tag.objects.get(pk=tag.pk)
+        loaded = CTTag.objects.get(pk=tag.pk)
         target = loaded.target
         assert isinstance(target, CTArticle)
         assert target.pk == article.pk
@@ -161,18 +175,18 @@ class TestGenericForeignKey:
 
     def test_descriptor_cache_avoids_extra_query(self, _create_ct_tables):
         article = CTArticle.objects.create(title="Hello")
-        tag = Tag(label="x", content_type=ContentType.objects.get_for_model(CTArticle))
+        tag = CTTag(label="x", content_type=ContentType.objects.get_for_model(CTArticle))
         tag.object_id = article.pk
         tag.save()
 
-        loaded = Tag.objects.get(pk=tag.pk)
+        loaded = CTTag.objects.get(pk=tag.pk)
         first = loaded.target
         second = loaded.target
         assert first is second  # cached
 
     def test_assignment_to_none_clears(self, _create_ct_tables):
         article = CTArticle.objects.create(title="Hello")
-        tag = Tag(label="x")
+        tag = CTTag(label="x")
         tag.target = article
         tag.target = None
         assert tag.content_type_id is None
@@ -182,19 +196,19 @@ class TestGenericForeignKey:
         article = CTArticle.objects.create(title="Hello")
         book = CTBook.objects.create(name="Manual")
 
-        Tag.objects.create(
+        CTTag.objects.create(
             label="for-article",
             content_type=ContentType.objects.get_for_model(CTArticle),
             object_id=article.pk,
         )
-        Tag.objects.create(
+        CTTag.objects.create(
             label="for-book",
             content_type=ContentType.objects.get_for_model(CTBook),
             object_id=book.pk,
         )
 
-        for_article = Tag.objects.get(label="for-article")
-        for_book = Tag.objects.get(label="for-book")
+        for_article = CTTag.objects.get(label="for-article")
+        for_book = CTTag.objects.get(label="for-book")
         assert isinstance(for_article.target, CTArticle)
         assert isinstance(for_book.target, CTBook)
 
@@ -204,10 +218,10 @@ class TestGenericForeignKey:
         # raising. Mirrors Django's behaviour.
         article = CTArticle.objects.create(title="Hello")
         ct = ContentType.objects.get_for_model(CTArticle)
-        tag = Tag.objects.create(label="x", content_type=ct, object_id=article.pk)
+        tag = CTTag.objects.create(label="x", content_type=ct, object_id=article.pk)
         article.delete()
 
-        loaded = Tag.objects.get(pk=tag.pk)
+        loaded = CTTag.objects.get(pk=tag.pk)
         assert loaded.target is None
 
 
@@ -222,9 +236,9 @@ class TestGenericRelation:
         ct_article = ContentType.objects.get_for_model(CTArticle)
         ct_book = ContentType.objects.get_for_model(CTBook)
 
-        Tag.objects.create(label="a", content_type=ct_article, object_id=article.pk)
-        Tag.objects.create(label="b", content_type=ct_article, object_id=article.pk)
-        Tag.objects.create(label="c", content_type=ct_book, object_id=book.pk)
+        CTTag.objects.create(label="a", content_type=ct_article, object_id=article.pk)
+        CTTag.objects.create(label="b", content_type=ct_article, object_id=article.pk)
+        CTTag.objects.create(label="c", content_type=ct_book, object_id=book.pk)
 
         labels = sorted(t.label for t in article.tags.all())
         assert labels == ["a", "b"]
@@ -236,7 +250,7 @@ class TestGenericRelation:
         article = CTArticle.objects.create(title="Hello")
         article.tags.create(label="auto")
 
-        tag = Tag.objects.get(label="auto")
+        tag = CTTag.objects.get(label="auto")
         assert tag.content_type_id == ContentType.objects.get_for_model(CTArticle).pk
         assert tag.object_id == article.pk
 
@@ -272,6 +286,7 @@ class TestAsyncContentType:
         article = await CTArticle.objects.acreate(title="Async")
         ct = await ContentType.objects.aget_for_model(CTArticle)
         loaded = await ct.aget_object_for_this_type(pk=article.pk)
+        assert isinstance(loaded, CTArticle)
         assert loaded.title == "Async"
 
 
