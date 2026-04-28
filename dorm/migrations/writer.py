@@ -48,6 +48,33 @@ _FIELD_IMPORTS = {
 }
 
 
+def _is_module_level_callable(fn) -> bool:
+    """True if *fn* is a plain ``def`` at the top level of an
+    importable module — i.e. ``from <fn.__module__> import
+    <fn.__name__>`` will recover the same callable.
+
+    Disqualifies:
+    - lambdas (``__name__`` is ``"<lambda>"``);
+    - nested functions and closures (``"<locals>"`` shows up in
+      ``__qualname__``);
+    - bound methods (``__qualname__`` contains a dot for the owning
+      class — round-tripping that requires the class import too,
+      which we don't model);
+    - builtins / synthetic callables whose ``__module__`` is missing
+      or unimportable.
+    """
+    name = getattr(fn, "__name__", "") or ""
+    qualname = getattr(fn, "__qualname__", "") or ""
+    module = getattr(fn, "__module__", None)
+    if not name or not qualname or not module:
+        return False
+    if name == "<lambda>" or name.startswith("<"):
+        return False
+    if "<locals>" in qualname or "." in qualname:
+        return False
+    return True
+
+
 def _serialize_field(field) -> str:
     """Return Python source that, when ``eval``'d in a namespace where
     every needed name is imported, reconstructs *field*.
@@ -116,10 +143,21 @@ def _serialize_field(field) -> str:
     elif cls_name == "FileField":
         upload_to = getattr(field, "upload_to", "")
         if callable(upload_to):
-            # Callables can't round-trip safely (they live in user
-            # code and may capture closures). Emit a clear marker so
-            # the user notices and edits the migration by hand.
-            kwargs_parts.append("upload_to=''  # FIXME: original upload_to was a callable")
+            # Module-level functions can be round-tripped as
+            # ``upload_to=<bare_name>`` plus a matching import line in
+            # the migration's header; the import is contributed by
+            # ``_collect_user_imports``. Lambdas, nested functions and
+            # closures don't have a stable importable name, so we fall
+            # back to a FIXME marker the user has to fill in by hand.
+            if _is_module_level_callable(upload_to):
+                kwargs_parts.append(f"upload_to={upload_to.__name__}")
+            else:
+                kwargs_parts.append(
+                    "upload_to=''  # FIXME: original upload_to was a "
+                    "lambda / nested function and could not be "
+                    "round-tripped. Re-declare it at module scope and "
+                    "edit this migration to use it."
+                )
         elif upload_to:
             kwargs_parts.append(f"upload_to={upload_to!r}")
         if field.max_length and field.max_length != 255:
@@ -192,6 +230,16 @@ def _collect_user_imports(operations) -> list[str]:
             # __qualname__ has no dots here and matches __name__.
             extra.add(f"from {module} import {enum_cls.__name__}")
             del qualname  # silence ty's "assigned but unused" check
+        elif cls_name == "FileField":
+            # Module-level upload_to callables get an import line so
+            # the generated migration can resolve the bare name the
+            # serializer emitted. Anything else (string template,
+            # lambda, nested fn) needs no extra import.
+            upload_to = getattr(field, "upload_to", None)
+            if callable(upload_to) and _is_module_level_callable(upload_to):
+                module = upload_to.__module__
+                name = upload_to.__name__
+                extra.add(f"from {module} import {name}")
         elif cls_name == "ArrayField":
             base = getattr(field, "base_field", None)
             if base is not None:

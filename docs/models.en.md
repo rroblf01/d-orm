@@ -157,12 +157,93 @@ doc.attachment.delete()        # removes file + clears column
 
 - a static string (`"docs/"`).
 - a `strftime` template (`"docs/%Y/%m/"`, expanded at save time).
-- a callable `f(instance, filename) -> str` for fully dynamic paths.
+- a callable `f(instance, filename) -> str` for fully dynamic paths
+  — see [Dynamic upload paths](#dynamic-upload-paths) below.
 
 `storage` accepts a `Storage` instance, an alias resolved against
 `settings.STORAGES` (default `"default"`), or `None` to defer the
 lookup to first use. For `null=True` see the configuration block
 below — it's strongly recommended.
+
+#### Dynamic upload paths
+
+When you need to compute the storage path from the model instance —
+tenant-isolated folders, route-by-extension, content-addressed
+layouts — pass a callable instead of a string. dorm invokes it as
+`upload_to(instance, filename)` at save time and uses the returned
+string as the full storage name.
+
+```python
+def upload_owner_scoped(instance, filename):
+    """Each user's uploads live under their own prefix so a
+    misconfigured ACL can't leak across accounts."""
+    return f"users/{instance.owner_id}/{filename}"
+
+
+class Document(dorm.Model):
+    owner = dorm.ForeignKey(User, on_delete=dorm.CASCADE)
+    attachment = dorm.FileField(upload_to=upload_owner_scoped, null=True)
+```
+
+The callable receives the *fully populated* model instance, so any
+attribute that's set at save time is fair game:
+
+```python
+import os, hashlib
+
+def upload_by_extension(instance, filename):
+    """Route uploads to per-mime buckets so the CDN's cache rules
+    can target each shape differently."""
+    bucket = {".pdf": "documents", ".png": "images", ".jpg": "images"}
+    _, ext = os.path.splitext(filename)
+    return f"{bucket.get(ext.lower(), 'other')}/{filename}"
+
+
+def upload_content_addressed(instance, filename):
+    """Content-addressed layout — the storage name is the hash of
+    the model's identity. Useful for dedup-friendly storage."""
+    digest = hashlib.sha256(
+        f"{instance.owner_id}|{filename}".encode()
+    ).hexdigest()[:16]
+    _, ext = os.path.splitext(filename)
+    return f"cas/{digest}{ext}"
+```
+
+Lambdas work too:
+
+```python
+attachment = dorm.FileField(
+    upload_to=lambda instance, filename: f"by-name/{instance.slug}/{filename}",
+)
+```
+
+**Migration round-trip.** `dorm makemigrations` can serialise a
+**module-level** callable by emitting `upload_to=upload_owner_scoped`
+plus the matching `from yourapp.uploads import upload_owner_scoped`
+import in the migration's header. **Lambdas and nested functions
+can't be round-tripped** (they have no stable importable name); the
+writer leaves a `FIXME` marker in the generated file and the user
+edits it by hand. So if the model ever needs to round-trip through
+makemigrations, declare the callable at module scope:
+
+```python
+# yourapp/uploads.py — module-level, importable.
+def upload_owner_scoped(instance, filename):
+    return f"users/{instance.owner_id}/{filename}"
+
+# yourapp/models.py
+from .uploads import upload_owner_scoped
+
+class Document(dorm.Model):
+    attachment = dorm.FileField(upload_to=upload_owner_scoped)
+```
+
+**Path safety.** The basename returned by the callable goes through
+`Storage.get_valid_name` (strips path separators, normalises unsafe
+chars), and `FileSystemStorage._resolve_path` rejects any final path
+that escapes the storage root. So even if your callable accidentally
+splices a user-controlled string into the directory portion, the
+underlying writer can't be tricked into climbing out of `location`.
 
 #### Storage backends
 

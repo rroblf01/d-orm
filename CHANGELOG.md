@@ -6,6 +6,27 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improved — `FileField(upload_to=callable)`
+- **Migration writer round-trips module-level callables.** A
+  ``FileField(upload_to=upload_owner_scoped)`` declared with a
+  function defined at module scope now serialises to
+  ``upload_to=upload_owner_scoped`` plus the matching
+  ``from <module> import <fn>`` line in the migration's header — no
+  more silent ``FIXME`` for the common dynamic-path pattern.
+  Lambdas and nested functions still fall back to the FIXME marker
+  (they have no stable importable name); the marker text now
+  explains *why* and how to fix it.
+- **Documentation surfaces dynamic-upload patterns.** The "Files"
+  section in ``docs/models.md`` (EN + ES) gains a "Dynamic upload
+  paths" subsection with three realistic examples (owner-scoped
+  prefixes, route-by-extension, content-addressed) plus migration-
+  round-trip rules and a path-safety note.
+- **End-to-end coverage** in
+  ``tests/test_filefield_callable_upload_to.py``: 28 tests across
+  rendering, save/load, async parity, FK-aware paths, lambdas,
+  collision handling under shared dynamic paths, and the writer's
+  ability (or inability) to round-trip each callable shape.
+
 ## [2.2.0] - 2026-04-28
 
 The 2.2 release adds **file storage** as a first-class concern of the

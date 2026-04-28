@@ -228,7 +228,10 @@ def test_file_field_callable_upload_to_emits_marker():
         path = write_migration("myapp", mig_dir, 1, ops)
         source = path.read_text()
     assert "FIXME" in source
-    assert "callable" in source
+    # The marker mentions either "callable" (legacy wording) or
+    # "lambda / nested function" (new wording added when the writer
+    # learned to round-trip module-level callables).
+    assert "callable" in source or "lambda" in source or "nested function" in source
 
 
 # ── ArrayField / GeneratedField (recursive) ──────────────────────────────────

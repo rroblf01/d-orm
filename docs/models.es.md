@@ -161,12 +161,94 @@ doc.attachment.delete()        # borra el fichero + limpia la columna
 - un string estático (`"docs/"`).
 - una plantilla `strftime` (`"docs/%Y/%m/"`, se expande al guardar).
 - un callable `f(instance, filename) -> str` para paths totalmente
-  dinámicos.
+  dinámicos — ver [Rutas dinámicas](#rutas-dinámicas) abajo.
 
 `storage` acepta una instancia `Storage`, un alias resuelto contra
 `settings.STORAGES` (por defecto `"default"`), o `None` para diferir
 la búsqueda hasta el primer uso. Sobre `null=True` mira el bloque de
 config más abajo — muy recomendado.
+
+#### Rutas dinámicas
+
+Cuando necesitas calcular la ruta del storage a partir de la instancia
+— carpetas aisladas por tenant, ruteo por extensión, layouts
+content-addressed — pasa un callable en lugar de un string. dorm lo
+invoca como `upload_to(instance, filename)` al guardar y usa la
+cadena devuelta como nombre completo del storage.
+
+```python
+def upload_owner_scoped(instance, filename):
+    """Los uploads de cada usuario viven bajo su propio prefijo para
+    que un ACL mal configurado no filtre datos entre cuentas."""
+    return f"users/{instance.owner_id}/{filename}"
+
+
+class Document(dorm.Model):
+    owner = dorm.ForeignKey(User, on_delete=dorm.CASCADE)
+    attachment = dorm.FileField(upload_to=upload_owner_scoped, null=True)
+```
+
+El callable recibe la instancia *completamente poblada*, así que
+cualquier atributo que esté seteado al guardar es libre uso:
+
+```python
+import os, hashlib
+
+def upload_by_extension(instance, filename):
+    """Rutea los uploads a buckets por mime-type para que las reglas
+    de cache del CDN puedan tratar cada tipo distinto."""
+    bucket = {".pdf": "documents", ".png": "images", ".jpg": "images"}
+    _, ext = os.path.splitext(filename)
+    return f"{bucket.get(ext.lower(), 'other')}/{filename}"
+
+
+def upload_content_addressed(instance, filename):
+    """Layout content-addressed — el nombre del storage es el hash de
+    la identidad del modelo. Útil para storage que dedupe."""
+    digest = hashlib.sha256(
+        f"{instance.owner_id}|{filename}".encode()
+    ).hexdigest()[:16]
+    _, ext = os.path.splitext(filename)
+    return f"cas/{digest}{ext}"
+```
+
+Los lambdas también funcionan:
+
+```python
+attachment = dorm.FileField(
+    upload_to=lambda instance, filename: f"by-name/{instance.slug}/{filename}",
+)
+```
+
+**Round-trip de migraciones.** `dorm makemigrations` puede serializar
+un callable **a nivel de módulo** emitiendo
+`upload_to=upload_owner_scoped` más el import correspondiente
+`from yourapp.uploads import upload_owner_scoped` en la cabecera de
+la migración. **Los lambdas y funciones anidadas no se pueden
+round-tripear** (no tienen nombre importable estable); el writer
+deja una marca `FIXME` en el archivo generado y el usuario lo edita
+a mano. Así que si el modelo va a pasar por makemigrations alguna
+vez, declara el callable a nivel de módulo:
+
+```python
+# yourapp/uploads.py — module-level, importable.
+def upload_owner_scoped(instance, filename):
+    return f"users/{instance.owner_id}/{filename}"
+
+# yourapp/models.py
+from .uploads import upload_owner_scoped
+
+class Document(dorm.Model):
+    attachment = dorm.FileField(upload_to=upload_owner_scoped)
+```
+
+**Seguridad de paths.** El basename que devuelve el callable pasa
+por `Storage.get_valid_name` (elimina separadores de path, normaliza
+caracteres unsafe), y `FileSystemStorage._resolve_path` rechaza
+cualquier ruta final que escape de la raíz del storage. Aunque tu
+callable empalme accidentalmente un string controlado por el usuario
+en la parte del directorio, el writer subyacente no puede ser
+engañado para salirse de `location`.
 
 #### Storage backends
 
