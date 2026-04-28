@@ -45,6 +45,16 @@ dev = [
     # feature is gated behind ``djanorm[s3]`` but the tests cover the
     # wiring end-to-end.
     "boto3>=1.42.96",
+    # FastAPI integration is documented (docs/fastapi.md) but not a
+    # runtime dep of dorm itself. The tests in
+    # ``tests/test_fastapi_filefield.py`` spin up a real ASGI app via
+    # ``TestClient`` to validate the multipart-upload → FileField
+    # pipeline end-to-end. ``httpx`` is what TestClient uses under
+    # the hood; ``python-multipart`` is FastAPI's runtime dep for
+    # ``UploadFile`` / ``Form`` parsing.
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
 ]
 # Standalone group for users who want to wire dorm.contrib.otel — kept
 # separate from ``dev`` so production installs don't pull SDK + exporters.

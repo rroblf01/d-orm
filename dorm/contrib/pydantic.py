@@ -104,6 +104,16 @@ def _coerce_field_file_to_str(value: Any) -> Any:
     accept ``str`` / ``None`` / anything with a ``.name`` attribute,
     and fall back to ``str(value)`` so user-defined ``File`` subclasses
     still work as long as their ``__str__`` returns the storage name.
+
+    A ``FieldFile`` with no associated file has ``.name == ""``; we
+    pass the empty string through unchanged. We *don't* collapse it
+    to ``None``: when the Pydantic schema says ``Annotated[str, …] |
+    None``, the ``BeforeValidator`` runs on the str arm and a
+    ``None`` return there fails union resolution. Rendering "no
+    file" as an empty string keeps the round-trip working; callers
+    who want the JSON to show ``null`` can wire ``model_dump(
+    exclude_none=True)`` or convert ``""`` → ``None`` in the route
+    handler.
     """
     if value is None or isinstance(value, str):
         return value
