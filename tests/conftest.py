@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import time
+import psycopg
 from dorm import configure
 
 import pytest
@@ -375,5 +376,23 @@ def clean_db(configure_dorm):
 def db_connection():
     """Fixture para manejar la conexión a la base de datos SQLite."""
     conn = sqlite3.connect(":memory:")  # Base de datos en memoria
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def direct_pg_connection(db_config):
+    """Fixture para obtener una
+    conexión directa a PostgreSQL usando db_config."""
+    if db_config.get("ENGINE") != "postgresql":
+        pytest.skip("Este test requiere PostgreSQL como backend.")
+
+    conn = psycopg.connect(
+        dbname=db_config.get("NAME"),
+        user=db_config.get("USER"),
+        password=db_config.get("PASSWORD"),
+        host=db_config.get("HOST", "localhost"),
+        port=db_config.get("PORT", 5432),
+    )
     yield conn
     conn.close()
