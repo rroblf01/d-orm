@@ -2,11 +2,13 @@ import json
 import os
 import tempfile
 import time
+from dorm import configure
 
 import pytest
+import sqlite3
 
-import dorm
 from dorm.db.connection import reset_connections
+
 # Re-export the transactional_db fixtures so test files can request them
 # by name. They live in dorm.test for end users; here we make them
 # part of the conftest so our own suite exercises them too.
@@ -20,6 +22,7 @@ os.close(_db_fd)
 def _docker_available() -> bool:
     try:
         import docker  # installed as a testcontainers dependency
+
         docker.from_env().ping()
         return True
     except Exception:
@@ -37,6 +40,7 @@ def _minio_test_deps_available() -> bool:
     try:
         import boto3  # noqa: F401
         from testcontainers.minio import MinioContainer  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -89,6 +93,7 @@ def _shared_admin_dsn(tmp_path_factory, worker_id: str) -> dict:
     lock_path = shared_root / "shared_pg.lock"
 
     import fcntl
+
     fh = open(str(lock_path), "a+")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -102,6 +107,7 @@ def _shared_admin_dsn(tmp_path_factory, worker_id: str) -> dict:
         # workers leaving stale conns across event-loop transitions don't
         # exhaust the server (default 100 is tight for 4 workers × pools).
         from testcontainers.postgres import PostgresContainer
+
         pg = PostgresContainer("postgres:16-alpine")
         pg.with_command(["postgres", "-c", "max_connections=500"])
         pg.start()
@@ -140,6 +146,7 @@ def _shared_minio_endpoint(tmp_path_factory, worker_id: str) -> dict:
     lock_path = shared_root / "shared_minio.lock"
 
     import fcntl
+
     fh = open(str(lock_path), "a+")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -171,8 +178,9 @@ def _shared_minio_endpoint(tmp_path_factory, worker_id: str) -> dict:
         fh.close()
 
 
-def _wait_for_minio(endpoint_url: str, access_key: str, secret_key: str,
-                    timeout: float = 30.0) -> None:
+def _wait_for_minio(
+    endpoint_url: str, access_key: str, secret_key: str, timeout: float = 30.0
+) -> None:
     """Poll the MinIO endpoint until it answers a ``list_buckets`` call.
 
     ``MinioContainer.start()`` returns when Docker reports the
@@ -229,6 +237,7 @@ def minio_endpoint(tmp_path_factory, worker_id):
 
 def _wait_for_postgres(host, port, user, password, timeout: float = 30.0) -> None:
     import psycopg
+
     deadline = time.time() + timeout
     last_exc: Exception | None = None
     while time.time() < deadline:
@@ -277,9 +286,7 @@ def db_config(request, tmp_path_factory, worker_id):
             cur.execute(
                 sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(worker_db))
             )
-            cur.execute(
-                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(worker_db))
-            )
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(worker_db)))
     finally:
         admin_conn.close()
 
@@ -303,12 +310,13 @@ def db_config(request, tmp_path_factory, worker_id):
 @pytest.fixture(scope="session", autouse=True)
 def configure_dorm(db_config):
     reset_connections()
-    dorm.configure(
+    configure(
         DATABASES={"default": db_config},
         INSTALLED_APPS=["tests"],
     )
     yield
     from dorm.db.connection import close_all
+
     close_all()
 
 
@@ -349,7 +357,11 @@ def clean_db(configure_dorm):
 
     # Junction table for Article.tags (ManyToManyField)
     vendor = getattr(conn, "vendor", "sqlite")
-    pk_type = "INTEGER PRIMARY KEY AUTOINCREMENT" if vendor == "sqlite" else "SERIAL PRIMARY KEY"
+    pk_type = (
+        "INTEGER PRIMARY KEY AUTOINCREMENT"
+        if vendor == "sqlite"
+        else "SERIAL PRIMARY KEY"
+    )
     conn.execute_script(
         f'CREATE TABLE IF NOT EXISTS "articles_tags" (\n'
         f'  "id" {pk_type},\n'
@@ -357,3 +369,11 @@ def clean_db(configure_dorm):
         f'  "tag_id" BIGINT NOT NULL REFERENCES "tags"("id")\n'
         f")"
     )
+
+
+@pytest.fixture
+def db_connection():
+    """Fixture para manejar la conexión a la base de datos SQLite."""
+    conn = sqlite3.connect(":memory:")  # Base de datos en memoria
+    yield conn
+    conn.close()
