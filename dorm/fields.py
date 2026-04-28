@@ -862,12 +862,14 @@ class FileField(Field[Any]):
         doc.attachment.delete()  # removes file + clears the column
     """
 
-    # Marker the model metaclass checks for to decide whether to route
-    # assignment through ``__set__`` (descriptor path) or write the raw
-    # value to ``__dict__`` directly. FileField installs itself as a
-    # class-level descriptor and needs the ``__set__`` path so the
-    # pending-upload tracking actually runs.
-    _uses_class_descriptor: bool = True
+    # Public marker that ``Model.__init__`` checks to route assignment
+    # through ``__set__`` (the descriptor path) instead of writing to
+    # ``__dict__`` directly. Set this to ``True`` on any custom Field
+    # subclass that installs itself as a class-level descriptor and
+    # needs ``__set__`` to fire on assignment — see the
+    # :ref:`Custom fields with descriptors` note in
+    # :doc:`docs/models.md`.
+    uses_class_descriptor: bool = True
 
     def __init__(
         self,

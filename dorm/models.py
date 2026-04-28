@@ -263,14 +263,18 @@ class Model(metaclass=ModelBase):
             if isinstance(field, RelatedField) and key == field.name:
                 # Use FK descriptor so model instances get their PK extracted
                 setattr(self, key, value)
-            elif type(self).__dict__.get(field.attname) is field or hasattr(
-                type(field), "_uses_class_descriptor"
+            elif type(self).__dict__.get(field.attname) is field or getattr(
+                type(field), "uses_class_descriptor", False
             ):
                 # The field installed itself as a class-level descriptor
                 # (FileField, future custom fields). Route through
                 # ``setattr`` so ``__set__`` fires — bypassing it would
                 # write the raw value past the descriptor's logic
-                # (pending-upload tracking, etc.).
+                # (pending-upload tracking, etc.). The
+                # ``uses_class_descriptor`` class attribute is the
+                # documented opt-in for custom fields that need this
+                # behaviour; see :class:`dorm.FileField` for the
+                # canonical example.
                 setattr(self, key, value)
             else:
                 # NOTE: ``field.to_python`` may raise ValidationError

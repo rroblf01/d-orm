@@ -26,6 +26,12 @@ from typing import Any
 
 
 # Map data_type → (FieldClass, extra kwargs)
+#
+# Order is irrelevant — this is a dict lookup. The 2.2 additions
+# (``DurationField``, ``CITextField``, the range family) match the
+# native PostgreSQL types so a project adopting dorm against an
+# existing schema gets sensible field classes instead of
+# ``TextField`` placeholders.
 _PG_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     "integer": ("IntegerField", {}),
     "smallint": ("SmallIntegerField", {}),
@@ -44,11 +50,21 @@ _PG_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     "timestamp": ("DateTimeField", {}),
     "timestamp without time zone": ("DateTimeField", {}),
     "timestamp with time zone": ("DateTimeField", {}),
+    "interval": ("DurationField", {}),
     "json": ("JSONField", {}),
     "jsonb": ("JSONField", {}),
     "uuid": ("UUIDField", {}),
     "bytea": ("BinaryField", {}),
     "inet": ("GenericIPAddressField", {}),
+    "citext": ("CITextField", {}),
+    # Range types — psycopg surfaces them with these exact ``data_type``
+    # strings. Each maps to the corresponding ``RangeField`` subclass.
+    "int4range": ("IntegerRangeField", {}),
+    "int8range": ("BigIntegerRangeField", {}),
+    "numrange": ("DecimalRangeField", {}),
+    "daterange": ("DateRangeField", {}),
+    "tsrange": ("DateTimeRangeField", {}),
+    "tstzrange": ("DateTimeRangeField", {}),
 }
 
 

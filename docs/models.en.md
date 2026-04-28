@@ -404,6 +404,47 @@ class Post(TimestampedModel):                 # inherits the timestamps
 `abstract = True` means: no DB table, no migrations; concrete subclasses
 inherit the field declarations as if they had been written there.
 
+### Custom fields with descriptors
+
+A regular `Field` subclass writes its value straight into the
+instance dict — `Model.__init__` calls `field.to_python(value)` and
+stores the result. That's enough for 95% of column types.
+
+Some fields, though, need to *react* to assignment: track a pending
+upload, invalidate a cache, snapshot the previous value. For those,
+override `__get__` and `__set__` and opt into the **class-descriptor
+path** with one line:
+
+```python
+import dorm
+
+
+class MyEncryptedField(dorm.CharField):
+    uses_class_descriptor = True
+
+    def contribute_to_class(self, cls, name):
+        # Reinstall as a class-level descriptor — the metaclass would
+        # otherwise strip Field instances out of class attrs.
+        super().contribute_to_class(cls, name)
+        setattr(cls, name, self)
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        ...
+
+    def __set__(self, instance, value):
+        # Custom logic — encryption, audit logging, lazy decryption.
+        instance.__dict__[self.attname] = self._encrypt(value)
+```
+
+`uses_class_descriptor = True` is the documented opt-in: when
+`Model.__init__` sees that flag (or finds the field installed
+directly on the class), it routes `Model(field=value)` through
+`setattr` so `__set__` fires. `FileField` is the canonical built-in
+example — it stashes a pending `File` until `model.save()` flushes
+it to storage.
+
 ## Type safety
 
 Every field is `Field[T]` (a `Generic` parameterised by the stored

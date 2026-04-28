@@ -52,6 +52,10 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 - **Streaming** — `iterator()` / `aiterator()` for memory-efficient row-by-row processing
 - **Convenience** — `get_or_none()` / `aget_or_none()` returns `None` instead of raising `DoesNotExist`
 - **Efficient bulk operations** — `bulk_create()` uses a single multi-row INSERT per batch; `bulk_update()` rewrites N rows in one `UPDATE ... SET col = CASE pk WHEN ...` per batch (1 query, not N)
+- **File storage** — `FileField` with a pluggable `Storage` abstraction. Local-disk default plus an opt-in S3 backend (`dorm.contrib.storage.s3.S3Storage`) that talks to AWS S3, MinIO, Cloudflare R2 or Backblaze B2 via the `djanorm[s3]` extra. Switching backends is a `STORAGES` setting change — application code is identical.
+- **Async signals** — every signal accepts both regular and `async def` receivers. `Model.asave` / `Model.adelete` await coroutine receivers sequentially via `Signal.asend`; the sync `send` path skips them with a `WARNING` so missed work is never silent.
+- **Rich field catalogue** — beyond the basics: `JSONField`, `BinaryField`, `ArrayField` (PG), `GeneratedField`, `DurationField`, `EnumField` (any `enum.Enum`), `CITextField`, and the full PostgreSQL range family (`IntegerRangeField`, `DecimalRangeField`, `DateRangeField`, `DateTimeRangeField`, `BigIntegerRangeField`).
+- **JSON fixtures** — `dorm dumpdata` and `dorm loaddata` produce / consume a Django-compatible JSON shape. M2M relations restore in a second phase, the whole load runs inside `atomic()`, and signals are bypassed for deterministic seeding.
 
 ---
 
@@ -66,6 +70,12 @@ pip install "djanorm[postgresql]"
 
 # Both
 pip install "djanorm[sqlite,postgresql]"
+
+# Add file uploads on S3 / MinIO / Cloudflare R2 / Backblaze B2
+pip install "djanorm[postgresql,s3]"
+
+# FastAPI + Pydantic schemas
+pip install "djanorm[postgresql,pydantic]"
 
 # With uv
 uv add "djanorm[sqlite]"

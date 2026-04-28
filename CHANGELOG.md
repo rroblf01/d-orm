@@ -6,6 +6,57 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-04-28
+
+The 2.2 release adds **file storage** as a first-class concern of the
+ORM (FieldField + pluggable backends), four field types that 2.1
+left on the roadmap, async signal receivers, and JSON fixture
+loading. Every feature ships against both SQLite and PostgreSQL; the
+S3 backend is exercised end-to-end against MinIO in CI.
+
+### Fixed — Migration writer
+- **`makemigrations` now serialises every public field type.**
+  ``_FIELD_IMPORTS`` and ``_serialize_field`` were stuck at the 2.0
+  set, so a model with an ``EnumField`` produced ``EnumField()``
+  with no enum class (silently broken migration), and
+  ``DurationField`` / ``CITextField`` / ``ArrayField`` /
+  ``GeneratedField`` / the range family / ``PositiveSmallIntegerField``
+  / ``FileField`` were missing their import lines (``NameError`` at
+  load). The writer now covers every type, recurses into
+  ``ArrayField.base_field`` / ``GeneratedField.output_field``, and
+  emits the user-side ``from <module> import <Enum>`` line for
+  ``EnumField`` references. Round-trip tests in
+  ``tests/test_migration_writer_new_fields.py`` execute every
+  generated file to catch regressions.
+
+### Added — Operational tooling
+- **`dorm doctor` audits `STORAGES`.** Warns when the ``default``
+  alias is missing, when ``FileSystemStorage.location`` is not a
+  writable directory, when ``S3Storage`` is missing ``bucket_name``
+  or has hardcoded ``access_key`` / ``secret_key`` (a near-universal
+  prod red flag), or when ``endpoint_url`` uses plain HTTP for a
+  non-local host. Adds a note when ``FileField`` is in use but
+  ``STORAGES`` is unset (dorm falls back to ``./media``).
+- **`dorm inspectdb` recognises 2.2's PG types.** ``INTERVAL`` →
+  ``DurationField``, ``CITEXT`` → ``CITextField``, ``int4range`` /
+  ``int8range`` / ``numrange`` / ``daterange`` / ``tstzrange`` →
+  the matching ``RangeField`` subclass. Projects adopting dorm
+  against a pre-existing schema get the right field classes
+  instead of the ``TextField`` fallback.
+- **`dorm init` settings template includes commented `STORAGES`
+  blocks** for ``FileSystemStorage``, AWS S3, and S3-compatible
+  services (MinIO / R2 / B2) — see ``cmd_init``.
+
+### Changed — Public API
+- **`Field.uses_class_descriptor`** (renamed from
+  ``_uses_class_descriptor``) is now a documented opt-in for custom
+  field subclasses that install themselves as class-level
+  descriptors and need ``__set__`` to fire on assignment. The leading
+  underscore signalled "private", but third-party fields with the
+  same need (encryption, audit, lazy resolution) want the same hook —
+  the rename promotes it to a stable extension point. ``FileField``
+  is the canonical built-in user.
+
 ### Added — File storage
 - **`FileField(upload_to=, storage=, max_length=)`** — pluggable file
   storage. The column is a ``VARCHAR(max_length)`` holding the

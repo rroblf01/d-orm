@@ -799,6 +799,93 @@ def cmd_doctor(args):
             "(network blips, RDS failover) will surface to callers without retry."
         )
 
+    # 4. STORAGES (file backends for ``dorm.FileField``).
+    #    Three classes of finding:
+    #      - hard misconfig that would crash at first save (no ``default``
+    #        alias when FileField is used);
+    #      - production smell (FileSystemStorage location not present /
+    #        not writable, or S3 backend with hardcoded credentials);
+    #      - silent reliance on the implicit default (FileField in use,
+    #        STORAGES unset → falls back to ``./media``, fine for dev
+    #        but rarely what users want in prod).
+    from .fields import FileField
+
+    file_field_models = []
+    for label, model in _model_registry.items():
+        if "." in label or model._meta.abstract:
+            continue
+        for f in model._meta.fields:
+            if isinstance(f, FileField):
+                file_field_models.append(f"{model.__name__}.{f.name}")
+
+    storages = getattr(settings, "STORAGES", {}) or {}
+    if file_field_models and not storages:
+        info.append(
+            f"FileField in use ({', '.join(file_field_models[:3])}"
+            f"{'…' if len(file_field_models) > 3 else ''}) but STORAGES is "
+            "unset — dorm will write to ./media on the runner's working "
+            "directory. Set STORAGES explicitly for prod."
+        )
+
+    if storages and "default" not in storages:
+        warnings.append(
+            "STORAGES is set but missing the required 'default' alias; "
+            "FieldFile lookups will fail with ImproperlyConfigured."
+        )
+
+    for alias, spec in storages.items():
+        backend = (spec or {}).get("BACKEND", "")
+        opts = (spec or {}).get("OPTIONS") or {}
+        if not backend:
+            warnings.append(
+                f"STORAGES[{alias!r}]: missing 'BACKEND' — every entry "
+                "needs the dotted import path of a Storage subclass."
+            )
+            continue
+        if backend.endswith("FileSystemStorage"):
+            location = opts.get("location")
+            if location:
+                from pathlib import Path as _Path
+                if not _Path(location).is_dir():
+                    warnings.append(
+                        f"STORAGES[{alias!r}]: location {location!r} is not "
+                        "a directory; first save will fail unless your "
+                        "deploy creates it."
+                    )
+                elif not _os.access(location, _os.W_OK):
+                    warnings.append(
+                        f"STORAGES[{alias!r}]: location {location!r} is not "
+                        "writable by the current user."
+                    )
+            else:
+                info.append(
+                    f"STORAGES[{alias!r}]: FileSystemStorage with no "
+                    "'location' falls back to ./media on the runner — "
+                    "fine for dev, set explicitly in production."
+                )
+        elif "S3Storage" in backend:
+            if not opts.get("bucket_name"):
+                warnings.append(
+                    f"STORAGES[{alias!r}]: S3Storage requires 'bucket_name' "
+                    "in OPTIONS."
+                )
+            if opts.get("access_key") or opts.get("secret_key"):
+                # Hardcoded creds in settings → near-universal red flag.
+                # IAM role on EC2/ECS/Lambda is the right answer in prod.
+                warnings.append(
+                    f"STORAGES[{alias!r}]: 'access_key' / 'secret_key' "
+                    "set explicitly — fine for local MinIO / dev but in "
+                    "production let boto3 pick them up from the IAM role "
+                    "/ env vars / ~/.aws/ instead."
+                )
+            endpoint = opts.get("endpoint_url") or ""
+            if endpoint and endpoint.startswith("http://") and "localhost" not in endpoint and "127.0.0.1" not in endpoint:
+                warnings.append(
+                    f"STORAGES[{alias!r}]: endpoint_url={endpoint!r} uses "
+                    "plain HTTP for a non-local host. Use https:// to "
+                    "avoid sending credentials in cleartext."
+                )
+
     # ── Output
     print(f"dorm doctor — {len(warnings)} warning(s), {len(info)} note(s)")
     print()

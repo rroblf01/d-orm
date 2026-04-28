@@ -14,6 +14,7 @@ _FIELD_IMPORTS = {
     "BigIntegerField": "from dorm.fields import BigIntegerField",
     "SmallIntegerField": "from dorm.fields import SmallIntegerField",
     "PositiveIntegerField": "from dorm.fields import PositiveIntegerField",
+    "PositiveSmallIntegerField": "from dorm.fields import PositiveSmallIntegerField",
     "FloatField": "from dorm.fields import FloatField",
     "DecimalField": "from dorm.fields import DecimalField",
     "BooleanField": "from dorm.fields import BooleanField",
@@ -21,6 +22,7 @@ _FIELD_IMPORTS = {
     "DateField": "from dorm.fields import DateField",
     "TimeField": "from dorm.fields import TimeField",
     "DateTimeField": "from dorm.fields import DateTimeField",
+    "DurationField": "from dorm.fields import DurationField",
     "EmailField": "from dorm.fields import EmailField",
     "URLField": "from dorm.fields import URLField",
     "SlugField": "from dorm.fields import SlugField",
@@ -29,6 +31,17 @@ _FIELD_IMPORTS = {
     "GenericIPAddressField": "from dorm.fields import GenericIPAddressField",
     "JSONField": "from dorm.fields import JSONField",
     "BinaryField": "from dorm.fields import BinaryField",
+    "ArrayField": "from dorm.fields import ArrayField",
+    "GeneratedField": "from dorm.fields import GeneratedField",
+    "FileField": "from dorm.fields import FileField",
+    "EnumField": "from dorm.fields import EnumField",
+    "CITextField": "from dorm.fields import CITextField",
+    "RangeField": "from dorm.fields import RangeField",
+    "IntegerRangeField": "from dorm.fields import IntegerRangeField",
+    "BigIntegerRangeField": "from dorm.fields import BigIntegerRangeField",
+    "DecimalRangeField": "from dorm.fields import DecimalRangeField",
+    "DateRangeField": "from dorm.fields import DateRangeField",
+    "DateTimeRangeField": "from dorm.fields import DateTimeRangeField",
     "ForeignKey": "from dorm.fields import ForeignKey",
     "OneToOneField": "from dorm.fields import OneToOneField",
     "ManyToManyField": "from dorm.fields import ManyToManyField",
@@ -36,16 +49,99 @@ _FIELD_IMPORTS = {
 
 
 def _serialize_field(field) -> str:
-    """Return Python source for recreating this field."""
+    """Return Python source that, when ``eval``'d in a namespace where
+    every needed name is imported, reconstructs *field*.
+
+    The serialization is intentionally *not* a generic ``deconstruct``
+    pass — each field type that requires special handling (FK targets,
+    nested fields, enum classes) gets a hand-written branch so we can
+    keep migration files easy to diff and read by humans. Field types
+    not listed here fall through to ``ClassName()`` plus the common
+    null/blank/default kwargs, which is enough for every "no-arg"
+    column type (``DurationField``, ``CITextField``, the range
+    family, …).
+    """
     cls_name = field.__class__.__name__
-    kwargs_parts = []
+    args_parts: list[str] = []   # positional args (FK target, enum class, …)
+    kwargs_parts: list[str] = []
+
+    # ── Type-specific positional / kwargs ────────────────────────────────────
 
     if cls_name in ("CharField", "EmailField", "URLField", "SlugField") and field.max_length:
         kwargs_parts.append(f"max_length={field.max_length!r}")
 
-    if cls_name == "DecimalField":
+    elif cls_name == "DecimalField":
         kwargs_parts.append(f"max_digits={field.max_digits!r}")
         kwargs_parts.append(f"decimal_places={field.decimal_places!r}")
+
+    elif cls_name in ("ForeignKey", "OneToOneField"):
+        rel = field.remote_field_to
+        if isinstance(rel, str):
+            args_parts.append(f"{rel!r}")
+        else:
+            args_parts.append(f"'{rel.__name__}'")
+        on_delete = getattr(field, "on_delete", "CASCADE")
+        kwargs_parts.append(f"on_delete={on_delete!r}")
+
+    elif cls_name == "ManyToManyField":
+        rel = field.remote_field_to
+        if isinstance(rel, str):
+            args_parts.append(f"{rel!r}")
+        else:
+            args_parts.append(f"'{rel.__name__}'")
+
+    elif cls_name == "EnumField":
+        # The enum class is positional. Refer to it by its bare name —
+        # the user-side import is added by ``_collect_user_imports``.
+        # Nested enums (``Foo.Status``) are rejected: round-tripping a
+        # qualified attribute access would force the migration to know
+        # the outer class's import path too, which is fragile.
+        enum_cls = field.enum_cls
+        if "." in enum_cls.__qualname__:
+            raise ValueError(
+                f"EnumField for {enum_cls.__qualname__!r}: nested enum "
+                "classes are not supported in migrations. Move the enum "
+                "to module top-level so makemigrations can import it."
+            )
+        args_parts.append(enum_cls.__name__)
+        # ``EnumField.__init__`` derives ``max_length`` from the enum's
+        # longest member by default; only persist it if the user
+        # overrode the default. There's no clean way to detect that
+        # post-construction, so emit it whenever ``max_length`` is set
+        # — round-trips are still equivalent because the default
+        # would compute the same value.
+        if getattr(field, "_is_string", False) and field.max_length is not None:
+            kwargs_parts.append(f"max_length={field.max_length!r}")
+
+    elif cls_name == "FileField":
+        upload_to = getattr(field, "upload_to", "")
+        if callable(upload_to):
+            # Callables can't round-trip safely (they live in user
+            # code and may capture closures). Emit a clear marker so
+            # the user notices and edits the migration by hand.
+            kwargs_parts.append("upload_to=''  # FIXME: original upload_to was a callable")
+        elif upload_to:
+            kwargs_parts.append(f"upload_to={upload_to!r}")
+        if field.max_length and field.max_length != 255:
+            kwargs_parts.append(f"max_length={field.max_length!r}")
+        # ``storage`` is intentionally omitted: it resolves at runtime
+        # from ``settings.STORAGES``. Hardcoding a string alias here
+        # would freeze a production setting into the migration file.
+
+    elif cls_name == "ArrayField":
+        # Recurse on the base field. The base field's import is also
+        # collected by the import gatherer.
+        kwargs_parts.append(f"base_field={_serialize_field(field.base_field)}")
+
+    elif cls_name == "GeneratedField":
+        kwargs_parts.append(f"expression={field.expression!r}")
+        kwargs_parts.append(
+            f"output_field={_serialize_field(field.output_field)}"
+        )
+        if not getattr(field, "stored", True):
+            kwargs_parts.append("stored=False")
+
+    # ── Type-agnostic kwargs (apply to every field) ──────────────────────────
 
     if field.null:
         kwargs_parts.append("null=True")
@@ -60,25 +156,58 @@ def _serialize_field(field) -> str:
 
     from ..fields import NOT_PROVIDED
     if field.default is not NOT_PROVIDED and not callable(field.default):
-        kwargs_parts.append(f"default={field.default!r}")
-
-    if cls_name in ("ForeignKey", "OneToOneField"):
-        rel = field.remote_field_to
-        if isinstance(rel, str):
-            kwargs_parts.insert(0, f"{rel!r}")
+        # Enum defaults need the enum's bare name reference, not its
+        # repr (``<Status.LOW: 'low'>`` would not eval). Emit the
+        # canonical attribute access.
+        import enum as _enum
+        if isinstance(field.default, _enum.Enum):
+            cls = type(field.default)
+            kwargs_parts.append(f"default={cls.__name__}.{field.default.name}")
         else:
-            kwargs_parts.insert(0, f"'{rel.__name__}'")
-        on_delete = getattr(field, "on_delete", "CASCADE")
-        kwargs_parts.append(f"on_delete={on_delete!r}")
+            kwargs_parts.append(f"default={field.default!r}")
 
-    if cls_name == "ManyToManyField":
-        rel = field.remote_field_to
-        if isinstance(rel, str):
-            kwargs_parts.insert(0, f"{rel!r}")
-        else:
-            kwargs_parts.insert(0, f"'{rel.__name__}'")
+    return f"{cls_name}({', '.join(args_parts + kwargs_parts)})"
 
-    return f"{cls_name}({', '.join(kwargs_parts)})"
+
+def _collect_user_imports(operations) -> list[str]:
+    """Gather user-side imports a migration file needs to re-evaluate.
+
+    Currently only ``EnumField`` produces these — the migration source
+    references the enum class by its bare name, so the file has to
+    ``from <module> import <ClassName>`` it. We also walk into
+    ``ArrayField.base_field`` and ``GeneratedField.output_field`` so
+    nested enums get their imports too.
+    """
+    extra: set[str] = set()
+
+    def _walk(field) -> None:
+        cls_name = field.__class__.__name__
+        if cls_name == "EnumField":
+            enum_cls = getattr(field, "enum_cls", None)
+            if enum_cls is None:
+                return
+            module = getattr(enum_cls, "__module__", None) or "<unknown>"
+            qualname = getattr(enum_cls, "__qualname__", enum_cls.__name__)
+            # The serializer rejects nested enums up-front, so we know
+            # __qualname__ has no dots here and matches __name__.
+            extra.add(f"from {module} import {enum_cls.__name__}")
+            del qualname  # silence ty's "assigned but unused" check
+        elif cls_name == "ArrayField":
+            base = getattr(field, "base_field", None)
+            if base is not None:
+                _walk(base)
+        elif cls_name == "GeneratedField":
+            output = getattr(field, "output_field", None)
+            if output is not None:
+                _walk(output)
+
+    for op in operations:
+        if hasattr(op, "fields"):
+            for _, field in op.fields:
+                _walk(field)
+        if hasattr(op, "field"):
+            _walk(op.field)
+    return sorted(extra)
 
 
 def _collect_imports(operations) -> list[str]:
@@ -199,6 +328,12 @@ from dorm.migrations.operations import (
     for imp in sorted(field_imports):
         content += imp + "\n"
 
+    # User-side imports for symbols referenced by ``_serialize_field``
+    # (right now only ``EnumField`` enum classes). Without these, the
+    # migration file would ``NameError`` at load time.
+    for imp in _collect_user_imports(operations):
+        content += imp + "\n"
+
     content += f"""
 dependencies = {dep_str}
 
@@ -212,15 +347,34 @@ operations = [
 
 
 def _gather_field_imports(op, imports: set):
-    if hasattr(op, "fields"):
-        for fname, field in op.fields:
-            cls_name = field.__class__.__name__
-            if cls_name in _FIELD_IMPORTS:
-                imports.add(_FIELD_IMPORTS[cls_name])
-    if hasattr(op, "field") and op.field is not None:
-        cls_name = op.field.__class__.__name__
+    """Walk *op* and add ``from dorm.fields import …`` lines for every
+    field type it references.
+
+    Recurses into ``ArrayField.base_field`` and
+    ``GeneratedField.output_field`` so a migration that says
+    ``ArrayField(base_field=CharField(max_length=20))`` gets *both*
+    ``ArrayField`` *and* ``CharField`` in scope.
+    """
+
+    def _walk(field) -> None:
+        if field is None:
+            return
+        cls_name = field.__class__.__name__
         if cls_name in _FIELD_IMPORTS:
             imports.add(_FIELD_IMPORTS[cls_name])
+        # Nested fields the writer recursively serialises.
+        base_field = getattr(field, "base_field", None)
+        if base_field is not None:
+            _walk(base_field)
+        output_field = getattr(field, "output_field", None)
+        if output_field is not None:
+            _walk(output_field)
+
+    if hasattr(op, "fields"):
+        for _, field in op.fields:
+            _walk(field)
+    if hasattr(op, "field") and op.field is not None:
+        _walk(op.field)
 
 
 def _serialize_operation(op) -> str:
@@ -324,6 +478,8 @@ from dorm.migrations.operations import (
     for op in operations:
         _gather_field_imports(op, field_imports)
     for imp in sorted(field_imports):
+        content += imp + "\n"
+    for imp in _collect_user_imports(operations):
         content += imp + "\n"
 
     content += f"""

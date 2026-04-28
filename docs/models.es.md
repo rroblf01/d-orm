@@ -410,6 +410,46 @@ class Post(TimestampedModel):                 # hereda timestamps
 `abstract = True` significa: sin tabla en BD, sin migraciones; las
 subclases concretas heredan los campos como si los hubieran declarado.
 
+### Campos custom con descriptores
+
+Una subclase normal de `Field` escribe el valor directo en el dict de
+la instancia — `Model.__init__` llama a `field.to_python(value)` y
+guarda el resultado. Suficiente para el 95% de tipos de columna.
+
+Algunos campos, sin embargo, necesitan *reaccionar* a la asignación:
+trackear un upload pendiente, invalidar un cache, capturar el valor
+anterior. Para eso, sobreescribe `__get__` y `__set__` y opta-in al
+**class-descriptor path** con una línea:
+
+```python
+import dorm
+
+
+class MyEncryptedField(dorm.CharField):
+    uses_class_descriptor = True
+
+    def contribute_to_class(self, cls, name):
+        # Reinstala como descriptor a nivel de clase — la metaclass
+        # eliminaría las instancias de Field de los class attrs si no.
+        super().contribute_to_class(cls, name)
+        setattr(cls, name, self)
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        ...
+
+    def __set__(self, instance, value):
+        # Lógica propia — encriptado, audit logging, lazy decrypt.
+        instance.__dict__[self.attname] = self._encrypt(value)
+```
+
+`uses_class_descriptor = True` es el opt-in documentado: cuando
+`Model.__init__` ve ese flag (o encuentra el field instalado en la
+clase directamente), enruta `Model(field=value)` por `setattr` para
+que dispare `__set__`. `FileField` es el ejemplo canónico — guarda
+un `File` pendiente hasta que `model.save()` lo flushea al storage.
+
 ## Tipado
 
 Cada campo es `Field[T]` (un `Generic` parametrizado por el tipo
