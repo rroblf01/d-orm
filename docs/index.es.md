@@ -50,6 +50,11 @@ async for a in Author.objects.filter(age__gte=18):
   logs de queries lentas.
 - **PostgreSQL y SQLite** — el mismo código de modelos, las mismas
   migraciones; cambias entre ellos editando una línea.
+- **Almacenamiento de archivos pluggable** — `FileField` escribe a
+  disco local por defecto y a **AWS S3** (o cualquier servicio
+  compatible con S3: **MinIO**, **Cloudflare R2**,
+  **Backblaze B2**) cambiando `settings.STORAGES`. El código de la
+  app no cambia.
 
 ## Instalación
 
@@ -57,6 +62,9 @@ async for a in Author.objects.filter(age__gte=18):
 pip install "djanorm[sqlite]"
 pip install "djanorm[postgresql]"
 pip install "djanorm[sqlite,postgresql,pydantic]"
+
+# Añade el extra s3 cuando guardes uploads en AWS S3 / MinIO / R2 / B2
+pip install "djanorm[postgresql,s3]"
 ```
 
 ## Referencia rápida
@@ -68,5 +76,6 @@ pip install "djanorm[sqlite,postgresql,pydantic]"
 - Transacciones → [Transacciones](transactions.md)
 - FastAPI / Pydantic → [Integración con FastAPI](fastapi.md)
 - CLI `dorm` → [Referencia del CLI](cli.md)
+- Subida de archivos (disco local / S3 / MinIO) → [Modelos: Archivos](models.md#archivos)
 - Pasar a producción → [Despliegue en producción](production.md)
 - Atascado con algo → [Resolución de problemas](troubleshooting.md)

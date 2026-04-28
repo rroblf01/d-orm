@@ -49,6 +49,10 @@ async for a in Author.objects.filter(age__gte=18):
   OpenTelemetry / Datadog / Prometheus, slow-query logs.
 - **Both PostgreSQL and SQLite** — same model code, same migrations,
   switch by editing one line.
+- **Pluggable file storage** — `FileField` writes to local disk by
+  default and to **AWS S3** (or any S3-compatible service:
+  **MinIO**, **Cloudflare R2**, **Backblaze B2**) by changing
+  `settings.STORAGES`. Application code doesn't change.
 
 ## Install
 
@@ -56,6 +60,9 @@ async for a in Author.objects.filter(age__gte=18):
 pip install "djanorm[sqlite]"
 pip install "djanorm[postgresql]"
 pip install "djanorm[sqlite,postgresql,pydantic]"
+
+# Add the s3 extra when storing uploads on AWS S3 / MinIO / R2 / B2
+pip install "djanorm[postgresql,s3]"
 ```
 
 ## Quick reference
@@ -67,5 +74,6 @@ pip install "djanorm[sqlite,postgresql,pydantic]"
 - Transactions → [Transactions](transactions.md)
 - FastAPI / Pydantic → [FastAPI integration](fastapi.md)
 - `dorm` command line → [CLI reference](cli.md)
+- File uploads (local disk / S3 / MinIO) → [Models: Files](models.md#files)
 - Going live → [Production deployment](production.md)
 - Stuck on something → [Troubleshooting](troubleshooting.md)

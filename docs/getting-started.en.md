@@ -13,6 +13,8 @@ uv add "djanorm[sqlite]"
 ```
 
 For PostgreSQL: `pip install "djanorm[postgresql]"`.
+For S3 file uploads: `pip install "djanorm[s3]"` (works with AWS S3,
+MinIO, Cloudflare R2, Backblaze B2).
 
 ## 2. Scaffold a project
 
@@ -28,8 +30,12 @@ This creates:
 ├── blog/
 │   ├── __init__.py
 │   └── models.py        # starter User model
-└── settings.py          # commented-out DB blocks
+└── settings.py          # commented-out DB and STORAGES blocks
 ```
+
+The generated `settings.py` includes commented templates for both
+SQLite/PostgreSQL and the file-storage `STORAGES` (local disk, AWS S3,
+and S3-compatible MinIO). Uncomment whichever ones you need.
 
 ## 3. Configure the database
 
@@ -141,3 +147,5 @@ and queries stay identical.
 - [Querying](queries.md) — filter, exclude, Q, F, aggregations
 - [Async patterns](async.md) — `acreate`, `aiterator`, `aatomic`
 - [Tutorial](tutorial.md) — wire it up with FastAPI
+- [File uploads with `FileField`](models.md#files) — local disk by
+  default, switch to S3 / MinIO / R2 with a `STORAGES` change

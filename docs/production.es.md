@@ -278,6 +278,53 @@ Algunos puntos a tener en cuenta en despliegues de producción:
   transacción, reestructura: lee las PKs a una lista fuera del bloque
   y luego itera sobre ellas.
 
+## File storage
+
+`FileField` escribe a través de `settings.STORAGES`. En producción:
+
+- **No hardcodees credenciales.** boto3 lee creds de la cadena
+  estándar — rol IAM en EC2/ECS/Lambda, env vars
+  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`),
+  `~/.aws/credentials`. Deja `access_key` / `secret_key` sin definir
+  en `STORAGES` para que el runtime elija las correctas; reserva
+  esas opciones para dev local y MinIO.
+- **IAM con mínimo privilegio.** El rol necesita `s3:PutObject`,
+  `s3:GetObject`, `s3:DeleteObject` y `s3:ListBucket` (solo para el
+  check de colisión de `get_available_name`) sobre el bucket
+  configurado. No hace falta tocar ACLs de bucket-policy si dejas
+  `default_acl="private"` y dependes de URLs presignadas.
+- **TTL de URL presignada.** El default `querystring_expire=3600`
+  es una hora — suficiente para que el usuario haga clic, suficiente
+  corto para que un enlace exfiltrado caduque antes de ser útil. No
+  lo subas a días.
+- **Entrega vía CDN público.** Para assets estáticos detrás de
+  CloudFront / Cloudflare, configura `custom_domain` con el hostname
+  de la CDN. La URL que devuelve `S3Storage.url(name)` se salta el
+  baile del firmado y apunta directamente a la CDN, que tira del
+  bucket vía Origin Access Identity. Ahorra CPU del firmado por
+  petición y juega bien con el cache del navegador.
+- **Lifecycle del bucket.** Configura reglas de lifecycle en S3
+  para mover uploads fríos a Glacier o expirarlos tras N días. dorm
+  no rastrea la antigüedad del upload; expirar es trabajo del
+  bucket.
+- **Backups de `FileSystemStorage`.** Si sigues usando disco local
+  en producción (apps mono-máquina, deploys on-prem), respalda el
+  directorio `location` junto con la BD — la fila en `documents` y
+  los bytes en `/var/app/media/...` son el mismo registro lógico
+  partido en dos almacenes. Restáuralos juntos o ninguno.
+- **Guardia anti path-traversal.** `FileSystemStorage._resolve_path`
+  rechaza cualquier nombre que escape de `location` —
+  defensa-en-profundidad contra callables `upload_to` controlados
+  por el usuario. El backend S3 no tiene filesystem que escapar,
+  pero su `get_valid_name` también filtra componentes de path.
+- **No pongas `MEDIA_ROOT` dentro del codebase.** Configura
+  `location` en una ruta de un volumen montado aparte para que un
+  redeploy no borre los uploads de los usuarios.
+
+Para el lado FastAPI de los uploads (handling de multipart, descarga
+en streaming, respuestas con URL presignada), ver
+[FastAPI: Subida de archivos](fastapi.md#subida-de-archivos).
+
 ## Checklist
 
 - [ ] `MAX_POOL_SIZE × workers ≤ max_connections de Postgres / 2`
@@ -288,6 +335,9 @@ Algunos puntos a tener en cuenta en despliegues de producción:
 - [ ] `pre_query` / `post_query` trazado a tu APM
 - [ ] Tests async con event loop session-scoped
 - [ ] Router de réplica definido si el tráfico supera una caja
+- [ ] `STORAGES` usa creds del rol IAM / env vars (sin keys hardcodeadas)
+- [ ] `MEDIA_ROOT` en un volumen persistente (si FileSystemStorage)
+- [ ] TTL de URLs presignadas ajustado a tus requisitos de auditoría / compliance
 
 ## Configuración por URL/DSN (2.1+)
 

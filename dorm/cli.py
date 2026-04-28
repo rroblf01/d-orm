@@ -563,6 +563,56 @@ Uncomment the DATABASES block for the backend you want to use.
 # Apps are autodiscovered from any directory next to settings.py that has
 # both __init__.py and models.py. Set INSTALLED_APPS explicitly to override.
 # INSTALLED_APPS = []
+
+# ── File storage (dorm.FileField) ─────────────────────────────────────────────
+# Uncomment one of the blocks below if you use ``dorm.FileField``. If left
+# unset, dorm falls back to a default ``FileSystemStorage`` rooted at
+# ``./media`` — fine for local dev / single-machine apps.
+#
+# Local filesystem (default):
+# STORAGES = {
+#     "default": {
+#         "BACKEND": "dorm.storage.FileSystemStorage",
+#         "OPTIONS": {
+#             "location": "/var/app/media",   # absolute path on disk
+#             "base_url": "/media/",           # URL prefix your web server / CDN exposes
+#         },
+#     }
+# }
+#
+# AWS S3 (requires `pip install "djanorm[s3]"`):
+# STORAGES = {
+#     "default": {
+#         "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+#         "OPTIONS": {
+#             "bucket_name": "my-app-uploads",
+#             "region_name": "eu-west-1",
+#             # Leave access_key/secret_key unset in production — boto3
+#             # picks them up from the IAM role / env vars / ~/.aws/.
+#             "default_acl": "private",
+#             "querystring_auth": True,        # generate presigned URLs
+#             "querystring_expire": 3600,
+#         },
+#     }
+# }
+#
+# S3-compatible (MinIO / Cloudflare R2 / Backblaze B2). Same backend; add
+# endpoint_url and force path-style addressing because most non-AWS
+# endpoints don't support virtual-hosted sub-domains over IP:
+# STORAGES = {
+#     "default": {
+#         "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+#         "OPTIONS": {
+#             "bucket_name": "dev-uploads",
+#             "endpoint_url": "http://localhost:9000",
+#             "access_key": "minioadmin",
+#             "secret_key": "minioadmin",
+#             "region_name": "us-east-1",
+#             "signature_version": "s3v4",
+#             "addressing_style": "path",
+#         },
+#     }
+# }
 '''
 
 _MODELS_TEMPLATE = '''import dorm

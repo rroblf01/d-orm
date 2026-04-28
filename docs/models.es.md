@@ -193,20 +193,66 @@ pip install 'djanorm[s3]'
 ```
 
 ```python
+# settings.py — AWS S3 producción
 STORAGES = {
     "default": {
         "BACKEND": "dorm.contrib.storage.s3.S3Storage",
         "OPTIONS": {
             "bucket_name": "my-app-uploads",
             "region_name": "eu-west-1",
+            # Las credenciales se toman del rol IAM / env vars / `~/.aws/`
+            # por defecto — no las hardcodees en código fuente. Las
+            # opciones ``access_key`` / ``secret_key`` existen para
+            # escenarios de desarrollo (MinIO abajo); en producción
+            # déjalas vacías para que boto3 use la cadena de credenciales
+            # del entorno.
             "default_acl": "private",
             "querystring_auth": True,     # URLs firmadas
             "querystring_expire": 3600,
-            # endpoint_url= para MinIO / R2 / Backblaze B2.
         },
     }
 }
 ```
+
+El mismo `S3Storage` funciona contra cualquier servicio compatible con
+S3 — **MinIO** para desarrollo local, **Cloudflare R2**,
+**Backblaze B2**, **DigitalOcean Spaces**. Configura `endpoint_url` y
+fuerza path-style (la mayoría de endpoints no-AWS no soportan
+sub-dominios virtual-hosted sobre IP):
+
+```bash
+# Levanta MinIO localmente — sin cuenta AWS, sin coste.
+docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+  -e "MINIO_ROOT_USER=minioadmin" \
+  -e "MINIO_ROOT_PASSWORD=minioadmin" \
+  minio/minio server /data --console-address ":9001"
+
+# Crea el bucket por la consola en http://localhost:9001
+# (login: minioadmin / minioadmin) o con `mc`.
+```
+
+```python
+# settings.py — desarrollo local contra MinIO.
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": "dev-uploads",
+            "endpoint_url": "http://localhost:9000",
+            "access_key": "minioadmin",
+            "secret_key": "minioadmin",
+            "region_name": "us-east-1",     # MinIO la ignora pero boto3 necesita *algo*
+            "signature_version": "s3v4",
+            "addressing_style": "path",     # obligatorio: MinIO sobre IP no soporta virtual-hosted
+        },
+    }
+}
+```
+
+El código de la aplicación es idéntico — mismo `FileField`, mismo
+`obj.attachment.save(...)`, misma `obj.attachment.url`. Cambiar entre
+FileSystemStorage local, MinIO y AWS es puramente un cambio de
+`STORAGES`.
 
 Puedes mezclar backends — declara varios alias y eliges por campo:
 

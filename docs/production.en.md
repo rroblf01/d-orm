@@ -270,6 +270,52 @@ A few sharp edges worth keeping in mind for production deployments:
   inside a transaction, restructure the workload (e.g. read PKs into a
   list outside the block, then iterate them).
 
+## File storage
+
+`FileField` writes through `settings.STORAGES`. In production:
+
+- **Don't hardcode credentials.** boto3 reads creds from the standard
+  chain — IAM role on EC2/ECS/Lambda, env vars
+  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`),
+  `~/.aws/credentials`. Leave `access_key` / `secret_key` unset in
+  `STORAGES` so the runtime picks the right ones; reserve those
+  options for local dev and MinIO.
+- **Least-privilege IAM.** The role needs `s3:PutObject`,
+  `s3:GetObject`, `s3:DeleteObject`, and `s3:ListBucket` (only for
+  `get_available_name`'s collision check) on the configured bucket.
+  No bucket-policy ACLs needed if you keep `default_acl="private"` and
+  rely on presigned URLs.
+- **Presigned URL expiry.** The default `querystring_expire=3600`
+  is one hour — long enough for the user to click through, short
+  enough that an exfiltrated link goes stale before it's useful.
+  Don't crank it to days.
+- **Public-CDN delivery.** For static assets behind CloudFront /
+  Cloudflare, set `custom_domain` to the CDN hostname. The URL
+  `S3Storage.url(name)` returns will skip the signing dance and
+  point straight at the CDN, which then fetches from the bucket via
+  Origin Access Identity. Saves the per-request signing CPU and
+  works with browser caching.
+- **Bucket-side lifecycle.** Configure S3 lifecycle rules to
+  transition cold uploads to Glacier or expire them after N days.
+  dorm doesn't track upload age; expiry is the bucket's job.
+- **`FileSystemStorage` backups.** If you keep using local disk in
+  production (single-machine apps, on-prem deploys), back the
+  `location` directory up alongside the database — the row in
+  `documents` and the bytes in `/var/app/media/...` are the same
+  logical record split across two stores. Restore both or neither.
+- **Path-traversal guard.** `FileSystemStorage._resolve_path` rejects
+  any name that would escape `location` — defence-in-depth against
+  user-controlled `upload_to` callables. The S3 backend has no
+  filesystem to escape, but its `get_valid_name` still strips path
+  components.
+- **Don't put `MEDIA_ROOT` inside the codebase.** Set `location` to
+  a path on a separately-mounted volume so a redeploy doesn't wipe
+  user uploads.
+
+For the FastAPI side of file uploads (multipart handling, streaming
+downloads, presigned-URL responses), see
+[FastAPI: File uploads](fastapi.md#file-uploads).
+
 ## Checklist
 
 - [ ] `MAX_POOL_SIZE × workers ≤ Postgres max_connections / 2`
@@ -280,6 +326,9 @@ A few sharp edges worth keeping in mind for production deployments:
 - [ ] `pre_query` / `post_query` traced into your APM
 - [ ] Async tests use a session-scoped event loop
 - [ ] Replica router defined if traffic > 1 box
+- [ ] `STORAGES` uses IAM role / env-var creds (no hardcoded keys)
+- [ ] `MEDIA_ROOT` on a persistent volume (if FileSystemStorage)
+- [ ] Presigned-URL expiry tuned for your audit / compliance needs
 
 ## URL/DSN configuration (2.1+)
 

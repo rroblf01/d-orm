@@ -246,6 +246,105 @@ Para tests de integración con PostgreSQL, usa
 [`testcontainers`](https://testcontainers-python.readthedocs.io/)
 para levantar un Postgres efímero por sesión.
 
+## Cambiar `FileField` entre disco local y S3 sin tocar código
+
+`FileField` lee el storage backend desde `settings.STORAGES` en
+*cada* acceso, así que pasar de disco local → MinIO → AWS S3 es un
+cambio de configuración, no de código.
+
+```python
+class Document(dorm.Model):
+    name = dorm.CharField(max_length=100)
+    attachment = dorm.FileField(upload_to="docs/%Y/%m/", null=True, blank=True)
+```
+
+**Disco local** — el default si `STORAGES` no se define, útil para
+tests / SQLite / dev en una sola máquina:
+
+```python
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.storage.FileSystemStorage",
+        "OPTIONS": {"location": "/var/app/media", "base_url": "/media/"},
+    }
+}
+```
+
+**MinIO** — para paridad de dev local con producción S3 sin cuenta
+AWS. Lanza `docker run -d -p 9000:9000 minio/minio server /data` una
+vez y:
+
+```python
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": "dev-uploads",
+            "endpoint_url": "http://localhost:9000",
+            "access_key": "minioadmin",
+            "secret_key": "minioadmin",
+            "region_name": "us-east-1",
+            "signature_version": "s3v4",
+            "addressing_style": "path",
+        },
+    }
+}
+```
+
+**AWS S3 en producción** — boto3 toma las credenciales de la cadena
+ambiente (rol IAM en EC2/ECS/Lambda, env vars, `~/.aws/`):
+
+```python
+STORAGES = {
+    "default": {
+        "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": "myapp-prod-uploads",
+            "region_name": "eu-west-1",
+            "default_acl": "private",
+            "querystring_auth": True,
+            "querystring_expire": 3600,
+        },
+    }
+}
+```
+
+El código de la aplicación — `doc.attachment = ContentFile(...)`,
+`doc.save()`, `doc.attachment.url`, `doc.attachment.delete()` — es
+idéntico en las tres configuraciones. Pilota la elección desde el
+entorno para que la misma imagen despliegue en todos lados:
+
+```python
+# settings.py
+import os
+
+if os.environ.get("DORM_STORAGE") == "s3":
+    STORAGES = {
+        "default": {
+            "BACKEND": "dorm.contrib.storage.s3.S3Storage",
+            "OPTIONS": {
+                "bucket_name": os.environ["S3_BUCKET"],
+                "region_name": os.environ.get("AWS_REGION", "us-east-1"),
+                "default_acl": "private",
+            },
+        }
+    }
+else:
+    STORAGES = {
+        "default": {
+            "BACKEND": "dorm.storage.FileSystemStorage",
+            "OPTIONS": {"location": os.environ.get("MEDIA_ROOT", "media")},
+        }
+    }
+```
+
+Trampa común: al cambiar a S3, **no esperes que las filas existentes
+se migren solas** — los nombres se almacenan tal cual, así que una
+fila apuntando a `docs/2026/04/q1.pdf` en disco local buscará la
+misma clave en S3. O bien rellenas el bucket desde el volumen local
+antes del cutover, o escribes una migración `RunPython` puntual que
+re-suba cada archivo a través del nuevo storage.
+
 ## Instrumentación con OpenTelemetry
 
 `dorm.contrib.otel` engancha las señales `pre_query` / `post_query`

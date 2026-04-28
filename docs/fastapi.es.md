@@ -160,6 +160,176 @@ async def delete_author(author_id: int) -> None:
         raise HTTPException(404, "Not found")
 ```
 
+## Subida de archivos
+
+`FileField` integra limpiamente con `UploadFile` de FastAPI. El mismo
+código de endpoint funciona contra `FileSystemStorage` (disco local) y
+`S3Storage` (AWS / MinIO / R2) — solo cambia `settings.STORAGES`.
+
+### Modelo + esquema
+
+```python
+import dorm
+from dorm.contrib.pydantic import DormSchema
+
+
+class Document(dorm.Model):
+    name = dorm.CharField(max_length=100)
+    attachment = dorm.FileField(upload_to="docs/%Y/%m/", null=True, blank=True)
+
+    class Meta:
+        db_table = "documents"
+
+
+class DocumentOut(DormSchema):
+    """El BeforeValidator del adaptador Pydantic desenvuelve el
+    descriptor FieldFile al storage name (un string plano)
+    automáticamente — sin serializador a medida."""
+
+    url: str | None = None      # override explícito, lo rellena la ruta
+
+    class Meta:
+        model = Document
+```
+
+### Endpoint de upload
+
+```python
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+
+router = APIRouter(prefix="/documents")
+
+
+@router.post("", response_model=DocumentOut)
+async def upload_document(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Acepta un upload multipart, persiste los bytes vía el storage
+    configurado, y devuelve la fila guardada + una URL descargable.
+
+    ``UploadFile`` expone un ``SpooledTemporaryFile`` bajo ``.file``;
+    envolverlo en :class:`dorm.File` permite a dorm leer el contenido
+    en chunks en lugar de cargar el upload entero en RAM.
+    """
+    if not file.filename:
+        raise HTTPException(400, "Falta el nombre del archivo")
+
+    doc = Document(name=name)
+    doc.attachment = dorm.File(file.file, name=file.filename)
+    await doc.asave()
+
+    out = DocumentOut.model_validate(doc)
+    out.url = doc.attachment.url
+    return out
+```
+
+Una petición como:
+
+```bash
+curl -F 'name=Informe Q1' -F 'file=@/tmp/q1.pdf' http://localhost:8000/documents
+```
+
+devuelve:
+
+```json
+{
+  "id": 1,
+  "name": "Informe Q1",
+  "attachment": "docs/2026/04/q1.pdf",
+  "url": "/media/docs/2026/04/q1.pdf"
+}
+```
+
+— con `FileSystemStorage`. Cambia `STORAGES` a `S3Storage` y `url`
+pasa a ser un enlace presignado
+`https://bucket.s3.amazonaws.com/...?X-Amz-...` que el navegador
+puede descargar directamente. El código del endpoint no cambia.
+
+### Listado + URLs presignadas
+
+```python
+@router.get("", response_model=list[DocumentOut])
+async def list_documents():
+    docs = [d async for d in Document.objects.order_by("-id")]
+    return [
+        DocumentOut.model_validate(d).model_copy(
+            update={"url": d.attachment.url if d.attachment else None}
+        )
+        for d in docs
+    ]
+```
+
+Para S3, cada `.url` es una URL presignada fresca — por defecto TTL
+de 1 hora. Ajusta el TTL por llamada re-instanciando el storage con
+otro `querystring_expire`, o usa `custom_domain=` para enlaces
+permanentes vía CDN público.
+
+### Descarga en streaming (cuando no quieres URL pública)
+
+Para storage privado donde autenticas la descarga en tu app (en lugar
+de repartir URLs presignadas de S3), haz streaming a través de
+FastAPI:
+
+```python
+from fastapi.responses import StreamingResponse
+
+
+@router.get("/{doc_id}/download")
+async def download_document(doc_id: int):
+    doc = await Document.objects.aget(pk=doc_id)
+    if not doc.attachment:
+        raise HTTPException(404, "Sin archivo adjunto")
+
+    handle = await doc.attachment.aopen("rb")
+    return StreamingResponse(
+        handle.chunks(),                         # chunks de 64 KiB
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{doc.name}"',
+            "Content-Length": str(doc.attachment.size),
+        },
+    )
+```
+
+`File.chunks()` está implementado en ambos backends, así que el mismo
+handler hace streaming desde disco local y desde el body de
+`get_object` de S3.
+
+### Servir un `MEDIA_ROOT` local en desarrollo
+
+`FileSystemStorage` solo escribe los bytes — servirlos es trabajo de
+tu framework. Para dev, monta la ubicación bajo el prefijo URL que
+configuraste como `base_url`:
+
+```python
+from fastapi.staticfiles import StaticFiles
+
+app.mount("/media", StaticFiles(directory="/var/app/media"), name="media")
+```
+
+En producción, delega esto a nginx / CloudFront / la CDN
+correspondiente — ver
+[Producción: file storage](production.md#file-storage).
+
+### Borrar un archivo con la fila
+
+`FieldFile.delete()` elimina los bytes del storage. Cabléalo en tu
+delete handler para que un `DELETE /documents/{id}` no deje
+huérfanos:
+
+```python
+@router.delete("/{doc_id}", status_code=204)
+async def delete_document(doc_id: int):
+    doc = await Document.objects.aget(pk=doc_id)
+    if doc.attachment:
+        await doc.attachment.adelete(save=False)   # borra archivo, no re-guardes la fila
+    await doc.adelete()
+```
+
+`save=False` evita el UPDATE redundante que persistiría la columna
+limpia justo antes de que se borre la fila completa.
+
 ## Endpoint de health check
 
 ```python
