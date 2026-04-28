@@ -22,5 +22,6 @@ wheels/
 example/**/migrations/
 
 .coverage*
+coverage.json
 
 site/*
