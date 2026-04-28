@@ -392,6 +392,117 @@ class Extract(Func):
         return f"EXTRACT({self.unit.upper()} FROM {sql})", params
 
 
+# ── Date-part helpers ─────────────────────────────────────────────────────────
+#
+# Thin subclasses that pin a unit so callers can write
+# ``TruncMonth("created_at")`` instead of ``Trunc("created_at", "month")``.
+# Match Django's ``django.db.models.functions`` surface so the mental
+# model carries over directly.
+
+
+class TruncDate(Trunc):
+    """``DATE_TRUNC('day', expr)`` — strips time-of-day, keeping the
+    date. Equivalent to ``Trunc(expr, "day")``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "day", output_field=output_field)
+
+
+class TruncDay(TruncDate):
+    """Alias for :class:`TruncDate` matching Django's name."""
+
+
+class TruncWeek(Trunc):
+    """``DATE_TRUNC('week', expr)``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "week", output_field=output_field)
+
+
+class TruncMonth(Trunc):
+    """``DATE_TRUNC('month', expr)``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "month", output_field=output_field)
+
+
+class TruncQuarter(Trunc):
+    """``DATE_TRUNC('quarter', expr)``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "quarter", output_field=output_field)
+
+
+class TruncYear(Trunc):
+    """``DATE_TRUNC('year', expr)``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "year", output_field=output_field)
+
+
+class TruncHour(Trunc):
+    """``DATE_TRUNC('hour', expr)``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "hour", output_field=output_field)
+
+
+class TruncMinute(Trunc):
+    """``DATE_TRUNC('minute', expr)``."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "minute", output_field=output_field)
+
+
+class ExtractYear(Extract):
+    """``EXTRACT(YEAR FROM expr)`` — useful inside ``annotate`` for
+    year-based grouping or ordering."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "year", output_field=output_field)
+
+
+class ExtractMonth(Extract):
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "month", output_field=output_field)
+
+
+class ExtractDay(Extract):
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "day", output_field=output_field)
+
+
+class ExtractHour(Extract):
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "hour", output_field=output_field)
+
+
+class ExtractMinute(Extract):
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "minute", output_field=output_field)
+
+
+class ExtractSecond(Extract):
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "second", output_field=output_field)
+
+
+class ExtractWeekDay(Extract):
+    """``EXTRACT(DOW FROM expr)`` — day of week, ``0=Sunday`` through
+    ``6=Saturday`` on PostgreSQL. (Django's convention is ``1=Sunday``;
+    this matches PG and SQLite's ``STRFTIME('%w', …)``.)"""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "dow", output_field=output_field)
+
+
+class ExtractWeek(Extract):
+    """``EXTRACT(WEEK FROM expr)`` — ISO week number."""
+
+    def __init__(self, expression: Any, output_field: Any = None) -> None:
+        super().__init__(expression, "week", output_field=output_field)
+
+
 class Substr(Func):
     """``SUBSTR(expr, pos, length)`` — 1-indexed (matches both backends)."""
 

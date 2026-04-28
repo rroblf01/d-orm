@@ -55,6 +55,10 @@ dev = [
     "fastapi>=0.115",
     "httpx>=0.27",
     "python-multipart>=0.0.9",
+    # Pillow powers tests for ``dorm.ImageField``. Same opt-in
+    # rationale as the other extras; production users only install
+    # ``djanorm[image]`` if they actually use ImageField.
+    "Pillow>=10.0",
 ]
 # Standalone group for users who want to wire dorm.contrib.otel — kept
 # separate from ``dev`` so production installs don't pull SDK + exporters.
@@ -72,6 +76,10 @@ postgresql = ["psycopg[binary,pool]>=3.3.3"]
 # ambient environment (IAM role, ``~/.aws/credentials``, env vars) by
 # default; settings.STORAGES['default']['OPTIONS'] can override.
 s3 = ["boto3>=1.42.96"]
+# Pillow powers ``dorm.ImageField`` — used at assignment time to
+# verify uploads parse as recognisable images before they hit
+# storage. Skip this extra if you only use ``FileField``.
+image = ["Pillow>=10.0"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
 # Email/URL/IP format validation is done by dorm's own field code on
@@ -87,7 +95,7 @@ docs = [
     "mkdocstrings[python]>=1.0.4",
     "mkdocs-static-i18n>=1.3.1",
 ]
-all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel,s3]"]
+all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel,s3,image]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"

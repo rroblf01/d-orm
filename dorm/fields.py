@@ -94,6 +94,127 @@ def _inline_literal(sql: str, params: list) -> str:
     return "".join(out)
 
 
+class CompositePrimaryKey:
+    """Multi-column primary key declaration.
+
+    Set as a model class attribute alongside the column-defining
+    fields; the named fields together become the table's primary
+    key. ``obj.pk`` returns a tuple of the underlying values, and
+    ``Model.objects.get(pk=(a, b))`` decomposes the tuple into
+    per-column lookups.
+
+    Example::
+
+        class OrderLine(dorm.Model):
+            order = dorm.ForeignKey(Order, on_delete=dorm.CASCADE)
+            line_no = dorm.IntegerField()
+            quantity = dorm.IntegerField()
+            pk = dorm.CompositePrimaryKey("order", "line_no")
+
+    Limitations (intentional, to keep the implementation minimal):
+
+    - **Cannot be the target of a `ForeignKey`.** Multi-column FKs
+      would require a sweeping rewrite of the JOIN compiler. Use a
+      surrogate auto-PK plus a ``UniqueConstraint`` over the
+      composite if you need both styles.
+    - **No auto-incrementing component.** All component fields must
+      be supplied explicitly on insert; ``bulk_create`` honours
+      pre-set values.
+
+    The class is *not* a :class:`Field` — it carries no column of
+    its own, just declares which existing fields the metaclass
+    should bundle into the PK constraint.
+    """
+
+    primary_key: bool = True
+    # Make the migration writer / introspection code treat this like
+    # a "field with no column" (similar to ``ManyToManyField``).
+    concrete: bool = False
+    column: str | None = None
+    attname: str = "pk"
+    auto_created: bool = False
+
+    def __init__(self, *field_names: str) -> None:
+        if not field_names:
+            raise ValueError(
+                "CompositePrimaryKey requires at least one field name."
+            )
+        self.field_names = field_names
+        # Match the Field protocol enough that ``_meta.pk`` consumers
+        # don't blow up on missing attributes. ``creation_counter`` is
+        # set by the metaclass at attach time.
+        self.creation_counter = -1
+        self.name: str | None = None
+        self.model: Any = None
+        self.unique = True
+        self.null = False
+        self.blank = False
+        self.editable = True
+        self.serialize = True
+        self.choices = None
+        self.help_text = ""
+        self.verbose_name: str | None = None
+        self.db_column: str | None = None
+        self.db_tablespace: str | None = None
+        self.validators: list = []
+        self.default: Any = NOT_PROVIDED
+        self.db_index = False
+        self.many_to_many = False
+        self.many_to_one = False
+        self.one_to_many = False
+        self.one_to_one = False
+        self.related_model = None
+
+    def contribute_to_class(self, cls: Any, name: str) -> None:
+        # Wire onto Meta but NOT on the class — there's no column to
+        # back, so attribute access goes through the ``Model.pk``
+        # property (which the metaclass overrides for composite PK).
+        from .conf import _validate_identifier
+
+        self.name = name
+        self.model = cls
+        if self.verbose_name is None:
+            self.verbose_name = name.replace("_", " ")
+        for field_name in self.field_names:
+            _validate_identifier(field_name, kind="CompositePrimaryKey field")
+        cls._meta.add_field(self)
+
+    def get_default(self) -> None:
+        return None
+
+    def has_default(self) -> bool:
+        return False
+
+    def to_python(self, value: Any) -> Any:
+        # Accept tuples / lists straight through; let the underlying
+        # field types do their own coercion when each component lands.
+        if value is None:
+            return None
+        if isinstance(value, (tuple, list)):
+            return tuple(value)
+        return value
+
+    def get_db_prep_value(self, value: Any) -> Any:
+        return value
+
+    def from_db_value(self, value: Any) -> Any:
+        return value
+
+    def db_type(self, connection: Any) -> str | None:
+        # No own column — the migration writer emits a separate
+        # ``PRIMARY KEY (col1, col2)`` constraint instead.
+        return None
+
+    def validate(self, value: Any, model_instance: Any) -> None:
+        return None
+
+    def pre_save(self, model_instance: Any, add: bool) -> Any:
+        return None
+
+    def __repr__(self) -> str:
+        return f"CompositePrimaryKey{self.field_names!r}"
+
+
 CASCADE = "CASCADE"
 PROTECT = "PROTECT"
 SET_NULL = "SET NULL"
@@ -1060,6 +1181,82 @@ class FileField(Field[Any]):
 
     def db_type(self, connection: Any) -> str:
         return f"VARCHAR({self.max_length})"
+
+
+class ImageField(FileField):
+    """A :class:`FileField` that validates uploads parse as images.
+
+    Stores the same way as ``FileField`` (storage name in a
+    ``VARCHAR``) but rejects content that ``Pillow`` (PIL) can't open.
+    The validation runs at assignment time, before the bytes hit
+    storage — so a malformed payload never lands.
+
+    Requires the ``image`` extra::
+
+        pip install 'djanorm[image]'
+
+    Example::
+
+        class Avatar(dorm.Model):
+            owner = dorm.ForeignKey(User, on_delete=dorm.CASCADE)
+            picture = dorm.ImageField(upload_to="avatars/%Y/")
+
+        avatar = Avatar(owner=user)
+        avatar.picture = dorm.File(open("photo.jpg", "rb"), name="photo.jpg")
+        avatar.save()  # Pillow check ran in __set__; if it weren't an
+                       # image, the assignment above would have raised.
+
+    String / FieldFile assignments aren't re-validated (those rows
+    are already on storage and the bytes are out of dorm's hands).
+    """
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        from .storage import File, FieldFile
+
+        # Only freshly-assigned ``File`` instances are content the
+        # caller is uploading right now. Strings and ``FieldFile``s
+        # refer to bytes already on storage; re-reading them here just
+        # to validate is wasteful and would force the validation to
+        # depend on storage being reachable.
+        if isinstance(value, File) and not isinstance(value, FieldFile):
+            self._validate_is_image(value)
+        super().__set__(instance, value)
+
+    @staticmethod
+    def _validate_is_image(file_obj: Any) -> None:
+        """Open the file via Pillow and verify it's a recognisable
+        image. Resets the stream after verification so the storage
+        backend reads the same bytes from position zero."""
+        try:
+            from PIL import Image, UnidentifiedImageError
+        except ImportError as exc:
+            raise ImportError(
+                "ImageField requires the 'Pillow' package. Install the "
+                "optional extra: pip install 'djanorm[image]'."
+            ) from exc
+
+        underlying = getattr(file_obj, "file", None)
+        if underlying is None or not hasattr(underlying, "read"):
+            raise ValidationError(
+                "ImageField: cannot read content for image validation."
+            )
+
+        # Snapshot the stream position so a subsequent ``storage.save``
+        # writes the full payload, not the bytes after the verify
+        # cursor. ``Image.open`` is lazy — call ``verify`` to force
+        # parsing without decoding pixels (cheaper than full load).
+        position = underlying.tell() if hasattr(underlying, "tell") else None
+        try:
+            try:
+                im = Image.open(underlying)
+                im.verify()
+            except (UnidentifiedImageError, OSError) as exc:
+                raise ValidationError(
+                    f"ImageField: file is not a recognisable image: {exc}"
+                ) from exc
+        finally:
+            if position is not None and hasattr(underlying, "seek"):
+                underlying.seek(position)
 
 
 class DurationField(Field[datetime.timedelta]):

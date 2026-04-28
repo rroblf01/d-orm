@@ -79,3 +79,75 @@ class StdDev(Aggregate):
 
 class Variance(Aggregate):
     function = "VARIANCE"
+
+
+# ── PostgreSQL-only aggregates ────────────────────────────────────────────────
+#
+# These compile to PG-specific aggregate functions; SQLite has no
+# ``STRING_AGG``/``ARRAY_AGG`` (it has ``GROUP_CONCAT`` for strings but
+# nothing for arrays). The aggregate emits the same SQL on both
+# backends; SQLite will reject ``ARRAY_AGG`` at execute time. For
+# SQLite-portable string concatenation use a vendor-specific raw
+# expression in ``annotate``.
+
+
+class StringAgg(Aggregate):
+    """``STRING_AGG(expr, separator)`` — concatenate values within a
+    GROUP BY using *separator*. PostgreSQL only.
+
+    Example: list every author's books on one row::
+
+        Author.objects.annotate(
+            titles=StringAgg("books__title", separator=", ")
+        )
+    """
+
+    function = "STRING_AGG"
+
+    def __init__(
+        self,
+        expression: str,
+        separator: str = ", ",
+        *,
+        distinct: bool = False,
+        filter: Any = None,
+        output_field: Any = None,
+    ) -> None:
+        self.separator = separator
+        super().__init__(
+            expression,
+            distinct=distinct,
+            filter=filter,
+            output_field=output_field,
+        )
+
+    def as_sql(
+        self,
+        table_alias: str | None = None,
+        *,
+        model: Any = None,
+        **kwargs: Any,
+    ) -> tuple[str, list]:
+        # Resolve the column reference the same way the base class
+        # does, then wedge the separator in as a bound parameter so
+        # special characters in the separator can't break the SQL.
+        distinct = "DISTINCT " if self.distinct else ""
+        expr = self.expression
+        if expr == "pk" and model is not None and model._meta.pk:
+            expr = model._meta.pk.column
+        col = f'"{table_alias}"."{expr}"' if table_alias else f'"{expr}"'
+        return f"STRING_AGG({distinct}{col}, %s)", [self.separator]
+
+
+class ArrayAgg(Aggregate):
+    """``ARRAY_AGG(expr)`` — collect values into a PostgreSQL array.
+
+    Example: every tag's set of article ids::
+
+        Tag.objects.annotate(article_ids=ArrayAgg("articles__id"))
+
+    PostgreSQL only. SQLite has no array type — use ``StringAgg`` (or
+    a JSON aggregate) for cross-vendor work.
+    """
+
+    function = "ARRAY_AGG"

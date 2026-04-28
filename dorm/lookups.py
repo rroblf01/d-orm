@@ -32,6 +32,11 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "isnotnull": ("{col} IS NOT NULL", None),
     "regex": ("{col} REGEXP %s", lambda v: v),
     "iregex": ("LOWER({col}) REGEXP LOWER(%s)", lambda v: v),
+    # Date-part lookups are vendor-aware — the templates here are the
+    # SQLite (``STRFTIME``) form. The PG branch in ``build_lookup_sql``
+    # rewrites them to ``EXTRACT(unit FROM col) = %s``. Without that
+    # rewrite, ``filter(created_at__year=2026)`` would fail on PG with
+    # ``function strftime(unknown, timestamp) does not exist``.
     "date": ("DATE({col}) = %s", lambda v: v),
     "year": ("STRFTIME('%Y', {col}) = %s", lambda v: str(v)),
     "month": ("STRFTIME('%m', {col}) = %s", lambda v: str(v).zfill(2)),
@@ -71,16 +76,41 @@ def parse_lookup_key(key: str) -> tuple[list[str], str]:
     return parts, "exact"
 
 
+# Maps the date-part lookup name to the SQL ``EXTRACT`` unit. PG uses
+# integers for these (``EXTRACT(YEAR FROM ts)`` returns a numeric), so
+# the value transform is to ``int`` rather than the zero-padded string
+# the SQLite ``STRFTIME`` form produces. ``date`` is special-cased
+# because PG has a ``DATE()`` cast (which works there too) and a
+# different unit name for week-day (``ISODOW`` is 1-7 instead of 0-6;
+# we expose ``DOW`` to match SQLite's 0=Sunday convention).
+_PG_DATE_UNITS: dict[str, str] = {
+    "year": "YEAR",
+    "month": "MONTH",
+    "day": "DAY",
+    "hour": "HOUR",
+    "minute": "MINUTE",
+    "second": "SECOND",
+    "week_day": "DOW",
+}
+
+
 def build_lookup_sql(
     col: str, lookup: str, value, vendor: str = "sqlite"
 ) -> tuple[str, list]:
     """Return (sql_fragment, params) for a single lookup condition.
 
-    *vendor* is ``"postgresql"`` or ``"sqlite"`` and currently only
-    influences the ``__in`` lookup: PostgreSQL emits ``col = ANY(%s)``
-    (one prepared-statement shape regardless of list length, so PG's
-    plan cache hits across calls with different list sizes), while
-    SQLite stays on the classic ``col IN (?, ?, ...)``.
+    *vendor* (``"postgresql"`` or ``"sqlite"``) influences:
+    - ``__in``: PG emits ``col = ANY(%s)`` (one prepared-statement
+      shape regardless of list length); SQLite stays on classic
+      ``col IN (?, ?, ...)``.
+    - **Date-part lookups** (``__year``, ``__month``, ``__day``,
+      ``__hour``, ``__minute``, ``__second``, ``__week_day``,
+      ``__date``): PG emits ``EXTRACT(unit FROM col) = %s`` /
+      ``DATE(col) = %s`` (server-side date arithmetic); SQLite
+      stays on ``STRFTIME('%Y', col) = %s`` because it has no
+      ``EXTRACT``. Before this fix, ``Order.objects.filter(created__year=2026)``
+      crashed on PG with ``function strftime(unknown, timestamp)
+      does not exist``.
     """
     if lookup not in LOOKUPS:
         raise ValueError(f"Unsupported lookup: '{lookup}'")
@@ -111,6 +141,19 @@ def build_lookup_sql(
     if lookup == "range":
         lo, hi = value
         return template.format(col=col), [lo, hi]
+
+    # Vendor-aware date-part lookups.
+    if vendor == "postgresql" and lookup in _PG_DATE_UNITS:
+        unit = _PG_DATE_UNITS[lookup]
+        # ``EXTRACT(...)`` returns a numeric on PG; compare against an
+        # int so a caller passing ``year=2026`` (int) and one passing
+        # ``year="2026"`` (str via ``STRFTIME`` historical convention)
+        # both work consistently.
+        return f"EXTRACT({unit} FROM {col}) = %s", [int(value)]
+    if vendor == "postgresql" and lookup == "date":
+        # ``DATE(col)`` works on PG too; only the comparison value
+        # type matters. Accept ``datetime.date`` directly.
+        return f"DATE({col}) = %s", [value]
 
     transformed = transform(value) if transform else value
     return template.format(col=col), [transformed]

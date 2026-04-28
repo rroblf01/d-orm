@@ -38,8 +38,44 @@ class CreateModel(Operation):
     def database_forwards(self, app_label: str, connection, from_state, to_state):
         table = self.options.get("db_table") or f"{app_label}_{self.name.lower()}"
         col_defs = []
+        composite_pk_cols: list[str] | None = None
         for fname, field in self.fields:
-            col_defs.append(_field_to_column_sql(fname, field, connection))
+            # Composite PK declarations carry no column of their own —
+            # they emit a separate ``PRIMARY KEY (col1, col2)``
+            # constraint at the end of the column list. Capture them
+            # here and skip the per-field DDL.
+            from ..fields import CompositePrimaryKey
+
+            if isinstance(field, CompositePrimaryKey):
+                # Resolve component field names → columns by walking
+                # the rest of the field list (the component fields
+                # were already emitted before us).
+                lookup = dict(self.fields)
+                composite_pk_cols = []
+                for component in field.field_names:
+                    comp_field = lookup.get(component)
+                    if comp_field is None:
+                        raise ValueError(
+                            f"CompositePrimaryKey references unknown field "
+                            f"{component!r} on {self.name}."
+                        )
+                    composite_pk_cols.append(
+                        getattr(comp_field, "column", None) or component
+                    )
+                continue
+            sql_def = _field_to_column_sql(fname, field, connection)
+            if sql_def:
+                col_defs.append(sql_def)
+        # Strip ``PRIMARY KEY`` from any single-column DDL when a
+        # composite PK is declared — the table can't have two PKs.
+        if composite_pk_cols:
+            col_defs = [
+                c.replace(" PRIMARY KEY", "")
+                .replace(" AUTOINCREMENT", "")
+                for c in col_defs
+            ]
+            constraint_cols = ", ".join(f'"{c}"' for c in composite_pk_cols)
+            col_defs.append(f"PRIMARY KEY ({constraint_cols})")
         sql = f'CREATE TABLE IF NOT EXISTS "{table}" (\n  {",  ".join(col_defs)}\n)'
         connection.execute_script(sql)
 

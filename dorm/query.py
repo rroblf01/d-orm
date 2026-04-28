@@ -51,6 +51,10 @@ class SQLQuery:
         # SELECT-projection step honours this set.
         self.alias_only_names: set[str] = set()
         self.distinct_flag: bool = False
+        # Populated by ``QuerySet.distinct(*fields)`` on PostgreSQL —
+        # emits ``SELECT DISTINCT ON (col1, col2) …``. SQLite has no
+        # equivalent and raises in :meth:`as_select` if non-empty.
+        self.distinct_on_fields: list[str] = []
         self.for_update_flag: bool = False
         # Detail flags for ``SELECT … FOR UPDATE`` clauses. Only meaningful
         # on PostgreSQL; SQLite raises if any is set (see queryset's
@@ -63,7 +67,10 @@ class SQLQuery:
         self.group_by_fields: list[str] = []
         self.having_nodes: list = []
         self.select_related_fields: list[str] = []
-        self.prefetch_related_fields: list[str] = []
+        # Strings are bare relation names (``"books"``); ``Prefetch``
+        # instances carry an alternate queryset and/or ``to_attr``.
+        # Both shapes are accepted by ``QuerySet.prefetch_related``.
+        self.prefetch_related_fields: list[Any] = []
         # CTEs declared via ``QuerySet.with_cte(name=qs)``. Each entry is
         # (name, queryset). Compiled into a ``WITH name AS (sub)`` prefix
         # in :meth:`as_select`.
@@ -87,6 +94,7 @@ class SQLQuery:
         q.annotations = dict(self.annotations)
         q.alias_only_names = set(self.alias_only_names)
         q.distinct_flag = self.distinct_flag
+        q.distinct_on_fields = list(self.distinct_on_fields)
         q.for_update_flag = self.for_update_flag
         q.for_update_skip_locked = self.for_update_skip_locked
         q.for_update_no_wait = self.for_update_no_wait
@@ -166,20 +174,60 @@ class SQLQuery:
             return "", []
         parts: list[str] = []
         params: list[Any] = []
-        for name, qs in self.ctes:
+        any_recursive = False
+        # Lazy import to avoid the queryset → query circular at import time.
+        from .queryset import CTE as _CTE
+
+        for name, body in self.ctes:
             _validate_identifier(name, "CTE name")
-            sub_sql, sub_params = qs._query.as_subquery_sql(
-                outer_alias=self.model._meta.db_table,
-                outer_model=self.model,
-            )
-            parts.append(f'"{name}" AS ({sub_sql})')
-            params.extend(sub_params)
-        return "WITH " + ", ".join(parts) + " ", params
+            if isinstance(body, _CTE):
+                # Raw-SQL CTE — params survive the outer placeholder
+                # rewrite because they're appended in the same order
+                # as the rendered ``%s`` markers.
+                parts.append(f'"{name}" AS ({body.sql.strip()})')
+                params.extend(body.params)
+                if body.recursive:
+                    any_recursive = True
+            else:
+                sub_sql, sub_params = body._query.as_subquery_sql(
+                    outer_alias=self.model._meta.db_table,
+                    outer_model=self.model,
+                )
+                parts.append(f'"{name}" AS ({sub_sql})')
+                params.extend(sub_params)
+        prefix = "WITH RECURSIVE " if any_recursive else "WITH "
+        return prefix + ", ".join(parts) + " ", params
 
     def as_select(self, connection) -> tuple[str, list]:
         table = self.get_table()
         alias = table
-        distinct = "DISTINCT " if self.distinct_flag else ""
+        # ``distinct_on_fields`` is set by ``QuerySet.distinct(*fields)``
+        # for the PG ``SELECT DISTINCT ON (cols)`` form. Plain
+        # ``distinct()`` (no args) keeps ``distinct_flag=True`` and an
+        # empty ``distinct_on_fields`` list — emits the classic
+        # ``SELECT DISTINCT``.
+        if self.distinct_on_fields:
+            vendor = getattr(connection, "vendor", "sqlite")
+            if vendor != "postgresql":
+                raise NotImplementedError(
+                    "distinct(*fields) → SELECT DISTINCT ON is "
+                    "PostgreSQL-only. SQLite has no equivalent — use "
+                    "a window function or a GROUP BY subquery instead."
+                )
+            # Translate Python field names to DB columns the same way
+            # ``order_by`` does — ``distinct("author")`` on a FK named
+            # ``author`` must emit ``"author_id"``, not the missing
+            # ``"author"`` column.
+            resolved = []
+            for field_name in self.distinct_on_fields:
+                leaf = self._resolve_field([field_name])
+                column = (
+                    leaf.column if leaf is not None and leaf.column else field_name
+                )
+                resolved.append(f'"{table}"."{column}"')
+            distinct = f"DISTINCT ON ({', '.join(resolved)}) "
+        else:
+            distinct = "DISTINCT " if self.distinct_flag else ""
 
         # CTE prefix (``WITH name AS (...) ...``) appears before the SELECT
         # clause — its params are the very first in the bound list.

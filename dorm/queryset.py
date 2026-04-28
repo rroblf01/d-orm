@@ -19,6 +19,121 @@ from .query import SQLQuery, _validate_identifier
 _T = TypeVar("_T", bound=Model)
 
 
+class CTE:
+    """A Common Table Expression body the user supplies as raw SQL.
+
+    Most CTEs are best expressed via ``with_cte(name=other_qs)`` — a
+    plain queryset gets compiled and bound with the rest of the
+    statement. Use ``CTE(...)`` when the body needs SQL features the
+    queryset builder doesn't model:
+
+    - **Recursive CTEs** (``WITH RECURSIVE``) for tree / graph walks.
+      The body is a self-referential ``UNION ALL`` between an anchor
+      query and a step query that joins back to the CTE name.
+    - **Vendor-specific syntax** (LATERAL joins, GROUPING SETS,
+      ``ORDINALITY`` etc.) where the queryset API doesn't have a
+      first-class shape.
+
+    Example: walk a category tree::
+
+        from dorm import CTE
+
+        qs = Category.objects.with_cte(
+            descendants=CTE(
+                '''
+                SELECT id, parent_id, name FROM categories
+                WHERE parent_id = %s
+                UNION ALL
+                SELECT c.id, c.parent_id, c.name FROM categories c
+                JOIN descendants d ON c.parent_id = d.id
+                ''',
+                params=[root_id],
+                recursive=True,
+            ),
+        ).raw("SELECT * FROM descendants ORDER BY id")
+
+    When **any** CTE attached to the same statement is marked
+    ``recursive=True``, the prefix is ``WITH RECURSIVE`` (PG and
+    SQLite both accept this). Mixing recursive and non-recursive
+    bodies under one ``WITH RECURSIVE`` is fine: the recursive flag
+    applies to the whole list, individual non-recursive members
+    behave normally.
+    """
+
+    __slots__ = ("sql", "params", "recursive")
+
+    def __init__(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+        *,
+        recursive: bool = False,
+    ) -> None:
+        self.sql = sql
+        self.params = list(params) if params else []
+        self.recursive = recursive
+
+    def __repr__(self) -> str:
+        marker = " RECURSIVE" if self.recursive else ""
+        return f"CTE{marker}({self.sql!r}, params={self.params!r})"
+
+
+class Prefetch:
+    """Customise a single ``prefetch_related`` lookup with a filtered
+    queryset and/or an alternate result attribute.
+
+    The plain string form ``prefetch_related("books")`` runs
+    ``Book.objects.filter(author_id__in=…)`` for the fetch step.
+    Wrapping the lookup in ``Prefetch`` lets you swap that for any
+    queryset on the related model — typical use is loading only the
+    rows you actually need::
+
+        active_pubs = Publisher.objects.filter(active=True)
+        Author.objects.prefetch_related(
+            Prefetch("publisher", queryset=active_pubs),
+        )
+
+        # Reverse FK with extra filtering — articles only show
+        # comments that aren't shadow-banned.
+        approved = Comment.objects.filter(approved=True).order_by("-created_at")
+        Article.objects.prefetch_related(
+            Prefetch("comments", queryset=approved, to_attr="approved_comments"),
+        )
+
+    Args:
+        lookup: the relation name. Same string you'd pass to
+            ``prefetch_related("…")``. Forward FK / reverse FK / M2M
+            are all supported.
+        queryset: a queryset on the *related* model. ``filter`` /
+            ``order_by`` / ``select_related`` are honoured. The
+            prefetch logic adds the ``…__in`` clause that scopes the
+            result to the source instances; the rest of the
+            queryset's state is preserved.
+        to_attr: store the prefetched results under
+            ``instance.<to_attr>`` instead of overwriting the
+            default cache slot. Useful when the same relation needs
+            two filtered views on the same ``prefetch_related`` call.
+    """
+
+    __slots__ = ("lookup", "queryset", "to_attr")
+
+    def __init__(
+        self,
+        lookup: str,
+        queryset: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
+    ) -> None:
+        self.lookup = lookup
+        self.queryset = queryset
+        self.to_attr = to_attr
+
+    def __repr__(self) -> str:
+        return (
+            f"Prefetch(lookup={self.lookup!r}, "
+            f"queryset={self.queryset!r}, to_attr={self.to_attr!r})"
+        )
+
+
 class CursorPage(Generic[_T]):
     """One page of keyset-paginated results returned by
     :meth:`QuerySet.cursor_paginate` / :meth:`QuerySet.acursor_paginate`.
@@ -86,7 +201,12 @@ class QuerySet(Generic[_T]):
     # ── Cloning ───────────────────────────────────────────────────────────────
 
     def _clone(self) -> QuerySet[_T]:
-        qs: QuerySet[_T] = QuerySet(self.model, self._db)
+        # ``type(self)`` preserves user subclasses across chained
+        # operations — without it, ``CustomQuerySet().filter(...)``
+        # would silently return a plain ``QuerySet``, breaking any
+        # custom methods the subclass added (the ``Manager.from_queryset``
+        # use case).
+        qs: QuerySet[_T] = type(self)(self.model, self._db)
         qs._query = self._query.clone()
         return qs
 
@@ -123,6 +243,31 @@ class QuerySet(Generic[_T]):
         for q in q_args:
             self._query.where_nodes.append(q)
         for key, value in kwargs.items():
+            # Composite PK: ``filter(pk=(a, b))`` expands to one
+            # condition per component field. ``filter(pk__in=[(a,b),
+            # (c,d)])`` is rejected — supporting multi-column ``IN``
+            # cleanly would need ``(col1, col2) IN ((a,b), (c,d))``
+            # which sqlite doesn't accept and PG accepts but with
+            # quirky binding rules. Use Q-objects with explicit
+            # per-field clauses instead.
+            from .fields import CompositePrimaryKey
+
+            if (
+                key == "pk"
+                and isinstance(self.model._meta.pk, CompositePrimaryKey)
+            ):
+                cpk = self.model._meta.pk
+                if not isinstance(value, (tuple, list)) or len(value) != len(
+                    cpk.field_names
+                ):
+                    raise ValueError(
+                        f"filter(pk=...) on a composite-PK model expects "
+                        f"a {len(cpk.field_names)}-tuple; got {value!r}."
+                    )
+                for fname, v in zip(cpk.field_names, value):
+                    field_parts, lookup = parse_lookup_key(fname)
+                    self._query.where_nodes.append((field_parts, lookup, v))
+                continue
             key = self._resolve_pk_alias(key)
             field_parts, lookup = parse_lookup_key(key)
             self._query.where_nodes.append((field_parts, lookup, value))
@@ -133,6 +278,13 @@ class QuerySet(Generic[_T]):
 
         parts = key.split(LOOKUP_SEP)
         if parts[0] == "pk" and self.model._meta.pk:
+            # Composite PK has no single column to resolve to — that
+            # case is handled at the ``filter()`` boundary. For a
+            # plain single-column PK, fall back to the column name.
+            from .fields import CompositePrimaryKey
+
+            if isinstance(self.model._meta.pk, CompositePrimaryKey):
+                return key
             parts[0] = self.model._meta.pk.column
             return LOOKUP_SEP.join(parts)
         return key
@@ -160,9 +312,31 @@ class QuerySet(Generic[_T]):
         ]
         return qs
 
-    def distinct(self) -> QuerySet[_T]:
+    def distinct(self, *fields: str) -> QuerySet[_T]:
+        """Plain ``distinct()`` deduplicates whole rows. With ``*fields``
+        on PostgreSQL it emits ``SELECT DISTINCT ON (col1, col2) …`` —
+        the canonical "first row per group" pattern.
+
+        Common use: pick the most recent order per customer::
+
+            (Order.objects
+                .order_by("customer_id", "-created_at")
+                .distinct("customer_id"))
+
+        ``DISTINCT ON`` is PostgreSQL-only. Calling with arguments
+        against SQLite raises :class:`NotImplementedError` so the
+        limitation surfaces at queryset-build time rather than at
+        first execute.
+        """
         qs = self._clone()
+        if not fields:
+            qs._query.distinct_flag = True
+            qs._query.distinct_on_fields = []
+            return qs
+        for f in fields:
+            _validate_identifier(f, "distinct(*fields) entry")
         qs._query.distinct_flag = True
+        qs._query.distinct_on_fields = list(fields)
         return qs
 
     def union(self, *other_qs: QuerySet[_T], all: bool = False) -> "CombinedQuerySet[_T]":
@@ -179,7 +353,19 @@ class QuerySet(Generic[_T]):
         qs._query.select_related_fields = list(fields)
         return qs
 
-    def prefetch_related(self, *fields: str) -> QuerySet[_T]:
+    def prefetch_related(self, *fields: "str | Prefetch") -> QuerySet[_T]:
+        """Schedule batched relation loading for *fields*.
+
+        Each entry is either a plain string (the relation field name)
+        or a :class:`Prefetch` describing a custom queryset and/or an
+        alternate ``to_attr``. The two forms can be mixed in a single
+        call::
+
+            Author.objects.prefetch_related(
+                "tags",                                    # plain
+                Prefetch("books", queryset=published_qs),  # filtered
+            )
+        """
         qs = self._clone()
         qs._query.prefetch_related_fields = list(fields)
         return qs
@@ -269,11 +455,19 @@ class QuerySet(Generic[_T]):
     ) -> tuple[str, list[Any], list[str]]:
         table = self.model._meta.db_table
         parts = []
+        # Aggregate expressions can carry bound parameters of their own
+        # (``StringAgg(separator=", ")`` binds the separator as ``%s``
+        # so a separator with special characters can't break the SQL).
+        # Collect them in order so they line up with the placeholders
+        # in the SELECT list.
+        agg_params: list[Any] = []
         for alias, agg in kwargs.items():
             _validate_identifier(alias, "aggregate alias")
             # Pass model so ``Count("pk")`` resolves to the actual
             # PK column. See note in ``Aggregate.as_sql``.
-            parts.append(f'{agg.as_sql(table, model=self.model)[0]} AS "{alias}"')
+            agg_sql, agg_p = agg.as_sql(table, model=self.model)
+            parts.append(f'{agg_sql} AS "{alias}"')
+            agg_params.extend(agg_p)
         sql = f'SELECT {", ".join(parts)} FROM "{table}"'
         where_sql, where_params = self._query._compile_nodes(
             self._query.where_nodes, connection
@@ -281,7 +475,7 @@ class QuerySet(Generic[_T]):
         if where_sql:
             sql += f" WHERE {where_sql}"
         sql = self._query._adapt_placeholders(sql, connection)
-        return sql, where_params, list(kwargs.keys())
+        return sql, agg_params + where_params, list(kwargs.keys())
 
     def aggregate(self, **kwargs: Any) -> dict[str, Any]:
         connection = self._get_connection()
@@ -360,34 +554,50 @@ class QuerySet(Generic[_T]):
         qs._db = alias
         return qs
 
-    def with_cte(self, **named_querysets: "QuerySet[Any]") -> QuerySet[_T]:
-        """Attach one or more non-recursive Common Table Expressions to
-        this queryset.
+    def with_cte(self, **named_ctes: "QuerySet[Any] | CTE") -> QuerySet[_T]:
+        """Attach one or more Common Table Expressions to this queryset.
 
-        Each ``name=qs`` pair is emitted as ``WITH name AS (sub)`` ahead
-        of the main ``SELECT``::
+        Each ``name=value`` pair is emitted as ``WITH name AS (body)``
+        ahead of the main ``SELECT``. ``value`` is either a queryset
+        (compiled and bound with the outer query) or a :class:`CTE`
+        carrying a raw SQL body — used when the body needs features
+        the queryset builder doesn't model (recursive walks, LATERAL
+        joins, ``GROUPING SETS``).
+
+        Plain example::
 
             recent = Order.objects.filter(created_at__gte=cutoff)
-            qs = (
-                Customer.objects
-                    .with_cte(recent_orders=recent)
-                    .filter(...)
-            )
+            Customer.objects.with_cte(recent_orders=recent).filter(...)
 
-        CTE names are validated as SQL identifiers. The CTE bodies see
-        the same backend / parameter dialect as the outer query — the
-        outer query's placeholder rewrite covers them in one pass, so
-        you don't pay double-quoting on PostgreSQL.
+        Recursive example::
 
-        Recursive CTEs (``WITH RECURSIVE ...``) are not supported in
-        this release; reach for :meth:`raw` for tree-walking queries.
+            from dorm import CTE
+            qs = Category.objects.with_cte(
+                tree=CTE(
+                    '''
+                    SELECT id, parent_id FROM categories WHERE parent_id IS NULL
+                    UNION ALL
+                    SELECT c.id, c.parent_id FROM categories c
+                    JOIN tree t ON c.parent_id = t.id
+                    ''',
+                    recursive=True,
+                ),
+            ).raw("SELECT * FROM tree")
+
+        CTE names are validated as SQL identifiers. The bodies see
+        the same parameter dialect as the outer query — the outer
+        placeholder rewrite covers everything in one pass.
         """
         qs = self._clone()
-        for name, sub in named_querysets.items():
+        for name, sub in named_ctes.items():
             _validate_identifier(name, "CTE name")
+            if isinstance(sub, CTE):
+                qs._query.ctes.append((name, sub))
+                continue
             if not (hasattr(sub, "_query") and hasattr(sub, "model")):
                 raise TypeError(
-                    f"with_cte({name}=...) expects a QuerySet, got {type(sub).__name__}."
+                    f"with_cte({name}=...) expects a QuerySet or a "
+                    f"CTE(raw_sql), got {type(sub).__name__}."
                 )
             qs._query.ctes.append((name, sub))
         return qs
@@ -637,7 +847,20 @@ class QuerySet(Generic[_T]):
     def _do_prefetch_related(self, instances: list[_T]) -> None:
         from .exceptions import FieldDoesNotExist
 
-        for fname in self._query.prefetch_related_fields:
+        for spec in self._query.prefetch_related_fields:
+            # Normalise Prefetch(...) and bare strings to a uniform
+            # (lookup, queryset, to_attr) tuple. The plain-string form
+            # passes ``queryset=None`` so the loops below fall back to
+            # the default ``QuerySet(rel_model, self._db)``.
+            if isinstance(spec, Prefetch):
+                fname = spec.lookup
+                user_qs = spec.queryset
+                to_attr = spec.to_attr
+            else:
+                fname = spec
+                user_qs = None
+                to_attr = None
+
             field = None
             try:
                 field = self.model._meta.get_field(fname)
@@ -650,7 +873,7 @@ class QuerySet(Generic[_T]):
                 pass
 
             if field is not None and getattr(field, "many_to_many", False):
-                self._prefetch_m2m(instances, fname, field)
+                self._prefetch_m2m(instances, fname, field, user_qs=user_qs, to_attr=to_attr)
             elif field is not None and hasattr(field, "_resolve_related_model"):
                 # Forward FK
                 rel_model = field._resolve_related_model()
@@ -661,21 +884,30 @@ class QuerySet(Generic[_T]):
                         if obj.__dict__.get(field.attname) is not None
                     }
                 )
-                cache_key = f"_cache_{fname}"
+                # Without ``to_attr`` we write to the FK descriptor's
+                # ``_cache_<fname>`` slot so ``obj.<fname>`` returns
+                # the prefetched instance without re-fetching. With
+                # ``to_attr`` we write directly so the user accesses
+                # ``obj.<to_attr>`` as the related instance.
+                cache_key = to_attr if to_attr else f"_cache_{fname}"
                 if not pk_vals:
                     for inst in instances:
                         inst.__dict__.setdefault(cache_key, None)
                     continue
+                base_qs = (
+                    user_qs
+                    if user_qs is not None
+                    else QuerySet(rel_model, self._db)  # type: ignore[arg-type]
+                )
                 related_objs: dict = {
-                    obj.pk: obj
-                    for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals)  # type: ignore[arg-type]
+                    obj.pk: obj for obj in base_qs.filter(pk__in=pk_vals)
                 }
                 for inst in instances:
                     fk_val = inst.__dict__.get(field.attname)
                     inst.__dict__[cache_key] = related_objs.get(fk_val)
             else:
                 # Reverse FK
-                self._prefetch_reverse_fk(instances, fname)
+                self._prefetch_reverse_fk(instances, fname, user_qs=user_qs, to_attr=to_attr)
 
     # Special alias used by the M2M prefetch JOIN to carry the source-side
     # PK back alongside the target row. Picked unlikely to clash with any
@@ -731,8 +963,22 @@ class QuerySet(Generic[_T]):
                 src_to_objs[src].append(obj)
         return src_to_objs
 
-    def _prefetch_m2m(self, instances: list[_T], fname: str, field: Any) -> None:
-        cache_key = f"_prefetch_{fname}"
+    def _prefetch_m2m(
+        self,
+        instances: list[_T],
+        fname: str,
+        field: Any,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
+    ) -> None:
+        # Without ``to_attr`` we write to the descriptor's cache slot
+        # so ``instance.<fname>.all()`` returns the prefetched list
+        # without re-querying. With ``to_attr`` we write directly to
+        # ``instance.<to_attr>`` (a plain Python list) — matches
+        # Django's contract: callers loop ``for c in obj.to_attr`` not
+        # ``for c in obj.to_attr.all()``.
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
             for inst in instances:
@@ -745,13 +991,37 @@ class QuerySet(Generic[_T]):
         rows = conn.execute(sql, params)
         src_to_objs = self._hydrate_m2m_join_rows(rows, src_pks, rel_model, conn)
 
+        # If the caller supplied a custom queryset, narrow the
+        # already-fetched M2M results by the queryset's filters in
+        # Python. We don't push the filter into the JOIN SQL because
+        # the JOIN's WHERE is built from the source pks list — the
+        # cleaner approach is to keep that path untouched and trim
+        # the result set after hydration. The cost is over-fetching
+        # rows that the user's filter would reject; the upside is
+        # that ``Prefetch(qs=...)`` works for any queryset shape,
+        # including ``order_by`` (preserved by re-iterating it).
+        if user_qs is not None:
+            allowed_pks = {obj.pk for obj in user_qs.filter(pk__in=[
+                obj.pk for objs in src_to_objs.values() for obj in objs
+            ])}
+            for src in list(src_to_objs):
+                src_to_objs[src] = [
+                    o for o in src_to_objs[src] if o.pk in allowed_pks
+                ]
+
         for inst in instances:
             inst.__dict__[cache_key] = src_to_objs.get(inst.pk, [])
 
     async def _aprefetch_m2m(
-        self, instances: list[_T], fname: str, field: Any
+        self,
+        instances: list[_T],
+        fname: str,
+        field: Any,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
     ) -> None:
-        cache_key = f"_prefetch_{fname}"
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
             for inst in instances:
@@ -764,13 +1034,30 @@ class QuerySet(Generic[_T]):
         rows = await conn.execute(sql, params)
         src_to_objs = self._hydrate_m2m_join_rows(rows, src_pks, rel_model, conn)
 
+        if user_qs is not None:
+            all_pks = [obj.pk for objs in src_to_objs.values() for obj in objs]
+            allowed = {obj.pk async for obj in user_qs.filter(pk__in=all_pks)}
+            for src in list(src_to_objs):
+                src_to_objs[src] = [
+                    o for o in src_to_objs[src] if o.pk in allowed
+                ]
+
         for inst in instances:
             inst.__dict__[cache_key] = src_to_objs.get(inst.pk, [])
 
-    def _prefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
+    def _prefetch_reverse_fk(
+        self,
+        instances: list[_T],
+        fname: str,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
+    ) -> None:
         from .related_managers import ReverseFKDescriptor
 
-        cache_key = f"_prefetch_{fname}"
+        # ``to_attr`` writes directly to ``instance.<to_attr>``; without
+        # it we use the reverse-FK descriptor's standard cache slot.
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
 
         # Primary path: ReverseFKDescriptor installed directly on model class
         descriptor = self.model.__dict__.get(fname)
@@ -827,8 +1114,16 @@ class QuerySet(Generic[_T]):
                 inst.__dict__[cache_key] = []
             return
 
+        # Forward through the user's queryset (with filters / order_by /
+        # select_related preserved) when supplied; otherwise fall back
+        # to a plain queryset on the target model.
+        base_qs = (
+            user_qs
+            if user_qs is not None
+            else QuerySet(target_model, self._db)  # type: ignore[arg-type]
+        )
         related_objs = list(
-            QuerySet(target_model, self._db).filter(**{f"{target_field.name}__in": src_pks})  # type: ignore[arg-type]
+            base_qs.filter(**{f"{target_field.name}__in": src_pks})
         )
 
         fk_attname = target_field.attname

@@ -65,8 +65,8 @@ class BaseManager(Generic[_T]):
     def order_by(self, *fields: str) -> QuerySet[_T]:
         return self.get_queryset().order_by(*fields)
 
-    def distinct(self) -> QuerySet[_T]:
-        return self.get_queryset().distinct()
+    def distinct(self, *fields: str) -> QuerySet[_T]:
+        return self.get_queryset().distinct(*fields)
 
     def select_related(self, *fields: str) -> QuerySet[_T]:
         return self.get_queryset().select_related(*fields)
@@ -93,8 +93,10 @@ class BaseManager(Generic[_T]):
     def alias(self, **kwargs: Any) -> QuerySet[_T]:
         return self.get_queryset().alias(**kwargs)
 
-    def with_cte(self, **named_querysets: "QuerySet[Any]") -> QuerySet[_T]:
-        return self.get_queryset().with_cte(**named_querysets)
+    def with_cte(self, **named_ctes: Any) -> QuerySet[_T]:
+        # ``named_ctes`` accepts either a ``QuerySet`` or a ``CTE``;
+        # the QuerySet method validates the actual type.
+        return self.get_queryset().with_cte(**named_ctes)
 
     def cursor_paginate(
         self,
@@ -283,6 +285,94 @@ class BaseManager(Generic[_T]):
 
     async def araw(self, sql: str, params: list[Any] | None = None) -> list[_T]:
         return list(await self.raw(sql, params)._afetch_all())
+
+    @classmethod
+    def from_queryset(
+        cls,
+        queryset_class: type,
+        class_name: str | None = None,
+    ) -> type["BaseManager[_T]"]:
+        """Build a Manager subclass that proxies methods of *queryset_class*.
+
+        The canonical Django pattern for adding query-language methods
+        to a manager. Usage::
+
+            class PublishedQuerySet(dorm.QuerySet):
+                def published(self):
+                    return self.filter(is_active=True)
+
+                def recent(self, days=30):
+                    cutoff = ...
+                    return self.filter(created_at__gte=cutoff)
+
+            class Author(dorm.Model):
+                ...
+                objects = dorm.Manager.from_queryset(PublishedQuerySet)()
+
+            # Now both work end-to-end:
+            Author.objects.published().recent()
+            Author.objects.filter(...).published()  # via get_queryset
+
+        Mechanics: the generated subclass overrides ``get_queryset`` to
+        instantiate ``queryset_class``, and reflects every public method
+        on ``queryset_class`` (anything not starting with ``_``) as a
+        manager-level passthrough that calls ``self.get_queryset().method(...)``.
+        That mirrors how the default Manager already proxies the built-in
+        QuerySet API.
+
+        *class_name* customises the generated class's ``__name__`` for
+        nicer reprs in tracebacks; defaults to ``f"{cls.__name__}From{queryset_class.__name__}"``.
+        """
+        from .queryset import QuerySet as _DefaultQuerySet
+
+        if not isinstance(queryset_class, type):
+            raise TypeError(
+                "Manager.from_queryset(queryset_class=…) expects a class, "
+                f"got {queryset_class!r}."
+            )
+        if not issubclass(queryset_class, _DefaultQuerySet):
+            raise TypeError(
+                f"{queryset_class.__name__} must subclass dorm.QuerySet."
+            )
+
+        new_name = class_name or f"{cls.__name__}From{queryset_class.__name__}"
+
+        def get_queryset(self: "BaseManager[_T]") -> "QuerySet[_T]":
+            from .db.connection import router_db_for_read
+            from typing import cast as _cast
+
+            assert self.model is not None
+            alias = self._db
+            if alias == "default":
+                alias = router_db_for_read(self.model, default=alias)
+            # ``queryset_class`` is statically a ``type[QuerySet]``
+            # subclass; ty's narrowing loses the model parameter, so
+            # the call site needs an explicit cast for ``self.model``.
+            return queryset_class(_cast(Any, self.model), alias)
+
+        attrs: dict[str, Any] = {"get_queryset": get_queryset}
+
+        # Reflect each public queryset method onto the manager. Skip
+        # names already defined on BaseManager so we don't shadow the
+        # rich proxy surface (filter / order_by / values / etc.) with
+        # a duplicate. Also skip dunders, private (``_``-prefixed)
+        # methods, and inherited-from-object names.
+        existing = set(dir(cls))
+        for name in dir(queryset_class):
+            if name.startswith("_") or name in existing:
+                continue
+            attr = getattr(queryset_class, name, None)
+            if not callable(attr):
+                continue
+            # Closure capture by default kwarg so each generated proxy
+            # binds *its own* queryset method name.
+            def _proxy(self: "BaseManager[_T]", *args: Any, _name: str = name, **kwargs: Any) -> Any:
+                return getattr(self.get_queryset(), _name)(*args, **kwargs)
+            _proxy.__name__ = name
+            _proxy.__qualname__ = f"{new_name}.{name}"
+            attrs[name] = _proxy
+
+        return type(new_name, (cls,), attrs)
 
 
 class Manager(BaseManager[_T]):

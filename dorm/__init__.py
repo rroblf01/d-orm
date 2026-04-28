@@ -54,7 +54,17 @@ from .exceptions import (
     ValidationError,
 )
 from .expressions import Exists, F, OuterRef, Q, Subquery, Value
-from .aggregates import Avg, Count, Max, Min, StdDev, Sum, Variance
+from .aggregates import (
+    ArrayAgg,
+    Avg,
+    Count,
+    Max,
+    Min,
+    StdDev,
+    StringAgg,
+    Sum,
+    Variance,
+)
 from .functions import (
     Abs,
     Case,
@@ -63,6 +73,14 @@ from .functions import (
     Concat,
     DenseRank,
     Extract,
+    ExtractDay,
+    ExtractHour,
+    ExtractMinute,
+    ExtractMonth,
+    ExtractSecond,
+    ExtractWeek,
+    ExtractWeekDay,
+    ExtractYear,
     FirstValue,
     Greatest,
     Lag,
@@ -80,6 +98,14 @@ from .functions import (
     StrIndex,
     Substr,
     Trunc,
+    TruncDate,
+    TruncDay,
+    TruncHour,
+    TruncMinute,
+    TruncMonth,
+    TruncQuarter,
+    TruncWeek,
+    TruncYear,
     Upper,
     When,
     Window,
@@ -95,6 +121,7 @@ from .fields import (
     BooleanField,
     CharField,
     CITextField,
+    CompositePrimaryKey,
     DateField,
     DateRangeField,
     DateTimeField,
@@ -106,6 +133,7 @@ from .fields import (
     EnumField,
     FileField,
     FloatField,
+    ImageField,
     ForeignKey,
     GeneratedField,
     GenericIPAddressField,
@@ -147,7 +175,7 @@ from .storage import (
 from .models import Model
 from .manager import Manager
 from .indexes import Index
-from .queryset import CombinedQuerySet, CursorPage, QuerySet, RawQuerySet
+from .queryset import CTE, CombinedQuerySet, CursorPage, Prefetch, QuerySet, RawQuerySet
 from .validators import (
     EmailValidator,
     MaxLengthValidator,
@@ -183,11 +211,14 @@ __all__ = [
     "QuerySet",
     "CombinedQuerySet",
     "CursorPage",
+    "CTE",
+    "Prefetch",
     "RawQuerySet",
     # Fields
     "AutoField",
     "BigAutoField",
     "SmallAutoField",
+    "CompositePrimaryKey",
     "CharField",
     "TextField",
     "IntegerField",
@@ -216,6 +247,7 @@ __all__ = [
     "EnumField",
     "CITextField",
     "FileField",
+    "ImageField",
     # Storage
     "Storage",
     "FileSystemStorage",
@@ -257,6 +289,9 @@ __all__ = [
     "Min",
     "StdDev",
     "Variance",
+    # PG-only aggregates
+    "StringAgg",
+    "ArrayAgg",
     # Functions
     "Case",
     "When",
@@ -272,7 +307,23 @@ __all__ = [
     "Least",
     "Round",
     "Trunc",
+    "TruncDate",
+    "TruncDay",
+    "TruncWeek",
+    "TruncMonth",
+    "TruncQuarter",
+    "TruncYear",
+    "TruncHour",
+    "TruncMinute",
     "Extract",
+    "ExtractYear",
+    "ExtractMonth",
+    "ExtractDay",
+    "ExtractHour",
+    "ExtractMinute",
+    "ExtractSecond",
+    "ExtractWeekDay",
+    "ExtractWeek",
     "Substr",
     "Replace",
     "StrIndex",

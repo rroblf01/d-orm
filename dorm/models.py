@@ -127,11 +127,18 @@ class ModelBase(type):
 
         # Collect fields from class attributes
         declared_fields = []
+        composite_pk = None
         for k, v in list(attrs.items()):
-            from .fields import Field
+            from .fields import CompositePrimaryKey, Field
             if isinstance(v, Field):
                 declared_fields.append((k, v))
                 # Remove from class so descriptor works
+                if k in new_class.__dict__:
+                    delattr(new_class, k)
+            elif isinstance(v, CompositePrimaryKey):
+                # Pulled out separately — composite PKs aren't Fields,
+                # they're a constraint over existing fields.
+                composite_pk = (k, v)
                 if k in new_class.__dict__:
                     delattr(new_class, k)
 
@@ -145,8 +152,8 @@ class ModelBase(type):
         # Sort by creation counter to preserve declaration order
         declared_fields.sort(key=lambda x: x[1].creation_counter)
 
-        # Check if there's an existing pk from parents
-        has_pk = any(f.primary_key for _, f in declared_fields)
+        # Check if there's an existing pk from parents OR a composite.
+        has_pk = any(f.primary_key for _, f in declared_fields) or composite_pk is not None
 
         # Add default pk if needed
         if not has_pk:
@@ -158,6 +165,14 @@ class ModelBase(type):
         # Contribute fields to class
         for fname, field in declared_fields:
             field.contribute_to_class(new_class, fname)
+
+        # Composite PK wires last so the underlying fields are already
+        # attached when ``_meta.pk`` resolves their columns. The
+        # ``add_field`` call inside ``contribute_to_class`` sets
+        # ``opts.pk`` because ``primary_key=True`` on the composite.
+        if composite_pk is not None:
+            cpk_name, cpk = composite_pk
+            cpk.contribute_to_class(new_class, cpk_name)
 
         # Contribute any user-declared Manager instances (custom managers
         # like ``objects = MyCustomManager()``). Without this step the
@@ -286,13 +301,47 @@ class Model(metaclass=ModelBase):
     @property
     def pk(self):
         if self._meta.pk:
+            # Composite PK: read each component field and return a
+            # tuple. The composite has ``column=None`` (no own column),
+            # so we can't fall through to the dict read.
+            from .fields import CompositePrimaryKey
+
+            if isinstance(self._meta.pk, CompositePrimaryKey):
+                return tuple(
+                    self.__dict__.get(
+                        self._meta.get_field(name).attname
+                    )
+                    for name in self._meta.pk.field_names
+                )
             return self.__dict__.get(self._meta.pk.attname)
         return None
 
     @pk.setter
     def pk(self, value):
-        if self._meta.pk:
-            self.__dict__[self._meta.pk.attname] = value
+        if not self._meta.pk:
+            return
+        from .fields import CompositePrimaryKey
+
+        if isinstance(self._meta.pk, CompositePrimaryKey):
+            # Composite PK: distribute the tuple across the component
+            # fields' ``attname`` slots. Accept ``None`` to clear them
+            # all (used by ``delete()`` to invalidate the in-memory
+            # instance after a successful row drop).
+            if value is None:
+                values = (None,) * len(self._meta.pk.field_names)
+            else:
+                if not isinstance(value, (tuple, list)) or len(value) != len(
+                    self._meta.pk.field_names
+                ):
+                    raise ValueError(
+                        f"CompositePrimaryKey expects a "
+                        f"{len(self._meta.pk.field_names)}-tuple; got {value!r}."
+                    )
+                values = tuple(value)
+            for fname, v in zip(self._meta.pk.field_names, values):
+                self.__dict__[self._meta.get_field(fname).attname] = v
+            return
+        self.__dict__[self._meta.pk.attname] = value
 
     # ── Sync persistence ──────────────────────────────────────────────────────
 
@@ -308,7 +357,7 @@ class Model(metaclass=ModelBase):
 
         conn = get_connection(using)
         meta = self._meta
-        adding = force_insert or self.pk is None
+        adding = force_insert or self._is_unsaved()
 
         pre_save.send(
             self.__class__,
@@ -352,6 +401,15 @@ class Model(metaclass=ModelBase):
 
         query = SQLQuery(self.__class__)
         sql, params = query.as_insert(fields, values, conn)
+        # Composite PK has no single column to RETURNING; the user
+        # supplied all components by hand. Skip the auto-pk dance —
+        # ``execute_write`` runs the INSERT without trying to read
+        # back a generated id.
+        from .fields import CompositePrimaryKey
+
+        if isinstance(meta.pk, CompositePrimaryKey):
+            conn.execute_write(sql, params)
+            return
         pk_col = meta.pk.column if meta.pk else "id"
         pk = conn.execute_insert(sql, params, pk_col=pk_col)
         if meta.pk and pk is not None:
@@ -381,10 +439,47 @@ class Model(metaclass=ModelBase):
             col_kwargs[field.column] = field.get_db_prep_value(val)
 
         query = SQLQuery(self.__class__)
-        pk_field = meta.pk
-        query.where_nodes.append(([pk_field.column], "exact", self.pk))
+        self._add_pk_where_nodes(query)
         sql, params = query.as_update(col_kwargs, conn)
         conn.execute_write(sql, params)
+
+    def _is_unsaved(self) -> bool:
+        """True when the instance has no PK assigned yet — i.e.
+        ``save()`` should INSERT, not UPDATE.
+
+        Single-column PK: ``pk is None``.
+        Composite PK: ``pk`` is a tuple, so ``is None`` is always
+        False; check that *every* component is None instead. A
+        partially-filled tuple counts as unsaved (the user is mid-
+        construction); ``Manager.create`` populates everything before
+        calling ``save``.
+        """
+        from .fields import CompositePrimaryKey
+
+        if isinstance(self._meta.pk, CompositePrimaryKey):
+            return all(v is None for v in self.pk or ())
+        return self.pk is None
+
+    def _add_pk_where_nodes(self, query: Any) -> None:
+        """Append per-row WHERE clauses that match this instance's PK.
+
+        Single-column PK: one ``WHERE pk_col = pk_value`` node.
+        Composite PK: one ``WHERE col_i = component_i`` node per
+        component field, AND-combined by the compiler. Used by
+        update / delete on a single instance to address its row.
+        """
+        from .fields import CompositePrimaryKey
+
+        meta = self._meta
+        pk_field = meta.pk
+        if isinstance(pk_field, CompositePrimaryKey):
+            for fname in pk_field.field_names:
+                comp = meta.get_field(fname)
+                query.where_nodes.append(
+                    ([comp.column], "exact", self.__dict__.get(comp.attname))
+                )
+            return
+        query.where_nodes.append(([pk_field.column], "exact", self.pk))
 
     def _handle_on_delete(self, using: str = "default") -> None:
         """Apply Python-level on_delete behaviour for all reverse FK relations."""
@@ -430,8 +525,7 @@ class Model(metaclass=ModelBase):
         pre_delete.send(self.__class__, instance=self, using=using)
 
         query = SQLQuery(self.__class__)
-        pk_field = self._meta.pk
-        query.where_nodes.append(([pk_field.column], "exact", self.pk))
+        self._add_pk_where_nodes(query)
         sql, params = query.as_delete(conn)
         count = conn.execute_write(sql, params)
 
@@ -453,7 +547,7 @@ class Model(metaclass=ModelBase):
 
         conn = get_async_connection(using)
         meta = self._meta
-        adding = force_insert or self.pk is None
+        adding = force_insert or self._is_unsaved()
 
         await pre_save.asend(
             self.__class__,
@@ -529,8 +623,7 @@ class Model(metaclass=ModelBase):
             col_kwargs[field.column] = field.get_db_prep_value(val)
 
         query = SQLQuery(self.__class__)
-        pk_field = meta.pk
-        query.where_nodes.append(([pk_field.column], "exact", self.pk))
+        self._add_pk_where_nodes(query)
         sql, params = query.as_update(col_kwargs, conn)
         await conn.execute_write(sql, params)
 
@@ -545,8 +638,7 @@ class Model(metaclass=ModelBase):
         await pre_delete.asend(self.__class__, instance=self, using=using)
 
         query = SQLQuery(self.__class__)
-        pk_field = self._meta.pk
-        query.where_nodes.append(([pk_field.column], "exact", self.pk))
+        self._add_pk_where_nodes(query)
         sql, params = query.as_delete(conn)
         count = await conn.execute_write(sql, params)
 
