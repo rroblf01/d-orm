@@ -2186,13 +2186,26 @@ class QuerySet(Generic[_T]):
             for qs, fname, default in set_default_specs
         ]
         if cascade_coros or update_coros:
-            # asyncio.gather returns a heterogeneous list (cascade coros
-            # return ``(int, dict)``, update coros return ``int``). The
-            # type hint loses that structure; cast to Any when indexing
-            # so the type checker doesn't block on the union.
+            # ``return_exceptions=True`` keeps a single failing branch
+            # from cascading-cancelling the others mid-flight: a
+            # cancelled async cursor under psycopg can leave the
+            # underlying connection in a state the pool can no longer
+            # recycle, and we've seen that turn into deadlocks /
+            # worker crashes under ``pytest -n 4``. Re-raise the first
+            # exception (with the originals chained) so the caller
+            # still sees the error rather than a silently-empty count.
+            #
+            # The shape is heterogeneous: cascade coros return
+            # ``(int, dict)``, update coros return ``int``. Cast to
+            # Any for indexing so the type checker doesn't fight us.
             results: list[Any] = list(
-                await asyncio.gather(*cascade_coros, *update_coros)
+                await asyncio.gather(
+                    *cascade_coros, *update_coros, return_exceptions=True
+                )
             )
+            for r in results:
+                if isinstance(r, BaseException):
+                    raise r
             for cascade_result in results[: len(cascade_coros)]:
                 sub_detail = cascade_result[1]
                 for label, cnt in sub_detail.items():

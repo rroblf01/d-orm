@@ -802,27 +802,66 @@ class PostgreSQLAsyncDatabaseWrapper:
         """Release the held pool from a non-async context.
 
         Called from :func:`dorm.db.connection.reset_connections` and the
-        atexit hook. If the loop the pool was opened on is still alive we
-        schedule ``pool.close()`` on it; otherwise we drop the references
-        and rely on socket reclamation at process exit. We never block
-        the caller — sync teardown can't await."""
+        atexit hook. The graceful path schedules ``pool.close()`` on
+        the loop the pool was opened on (if that loop is still alive);
+        regardless of that, we then synchronously **finish every
+        pgconn** in the pool's idle deque. That last step matters: the
+        pool's ``__del__`` running on a dead loop has been observed to
+        take a CPython worker down with a SIGSEGV / abort under
+        ``pytest -n 4`` on Python 3.14 + FastAPI ``TestClient`` (each
+        request creates its own portal loop, so the pool quickly
+        accumulates references tied to closed loops). Closing the
+        underlying libpq sockets up front guarantees the pool is inert
+        by the time the GC reaches it.
+
+        Never blocks — sync teardown can't await.
+        """
         pool = self._pool
         loop = self._loop
         autocommit_conn = self._autocommit_conn
         self._pool = None
         self._loop = None
         self._autocommit_conn = None
-        if loop is not None and not loop.is_closed():
-            if pool is not None:
+        if pool is not None:
+            if loop is not None and not loop.is_closed():
                 try:
                     asyncio.run_coroutine_threadsafe(pool.close(), loop)
                 except RuntimeError:
                     pass
-            if autocommit_conn is not None:
+            # Defensive teardown of the libpq layer. ``pgconn.finish``
+            # is the sync C-level close — safe from any thread because
+            # libpq's connection objects aren't bound to an event loop.
+            # Wrapped in best-effort try/except: by the time the
+            # process gets here the pool may already be in a partially
+            # torn-down state, and the only thing worse than leaking a
+            # connection is raising while trying to release one.
+            for conn in list(getattr(pool, "_pool", None) or ()):
+                try:
+                    pgconn = getattr(conn, "pgconn", None)
+                    if pgconn is not None:
+                        pgconn.finish()
+                except Exception:
+                    pass
+            try:
+                pool._pool.clear()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                pool._closed = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if autocommit_conn is not None:
+            if loop is not None and not loop.is_closed():
                 try:
                     asyncio.run_coroutine_threadsafe(autocommit_conn.close(), loop)
                 except RuntimeError:
                     pass
+            try:
+                pgconn = getattr(autocommit_conn, "pgconn", None)
+                if pgconn is not None:
+                    pgconn.finish()
+            except Exception:
+                pass
 
     async def notify(self, channel: str, payload: str = "") -> None:
         """Send a ``NOTIFY`` to *channel* with optional *payload*.
