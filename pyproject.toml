@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "2.3.0"
+version = "2.3.1"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -33,6 +33,11 @@ dev = [
     "ruff>=0.15.11",
     "testcontainers[postgres,minio]>=4.14.2",
     "pytest-xdist>=3.8.0",
+    # ``pytest-timeout`` is mandatory in the test suite — pyproject's
+    # ``[tool.pytest.ini_options]`` sets ``timeout = 60`` so the runner
+    # surfaces a hanging test as a fast failure (with a faulthandler
+    # stack dump) instead of letting the whole CI job stall.
+    "pytest-timeout>=2.4.0",
     # Used by tests for ``dorm.contrib.otel``. The runtime feature is
     # opt-in (raises ImportError if the user calls ``instrument()``
     # without installing OTel themselves), but the test suite exercises
@@ -115,6 +120,16 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+# Hard ceiling per test. CI was hanging silently when a psycopg async
+# cursor got cancelled mid-flight and left the pool wedged — the
+# runner would time out the whole job with no signal pointing at the
+# culprit. ``timeout_method = "thread"`` dumps the hanging thread's
+# stack via ``faulthandler`` before raising, so the next regression
+# tells us *which* test (and which line) is stuck. 60 s is well above
+# every legitimate slow path in the suite (~2.7 s setup + ~0.5 s call
+# for the slowest stress test).
+timeout = 60
+timeout_method = "thread"
 
 [tool.ty.src]
 # `example/` ships demo / FastAPI code that imports optional packages

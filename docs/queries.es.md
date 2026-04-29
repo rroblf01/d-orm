@@ -279,6 +279,33 @@ for author in Author.objects.prefetch_related("books"):
 Para M2M, `prefetch_related` ejecuta un único JOIN contra la tabla
 intermedia (sin el "fetch through y luego fetch targets" en dos pasos).
 
+#### FKs polimórficas (`GenericForeignKey`)
+
+`prefetch_related("target")` también funciona sobre un
+`GenericForeignKey`. Sin él, cada lectura del descriptor hace su
+propio `get(pk=…)` — N+1 cuando iteras una queryset de N tags
+apuntando a K content types distintos. Con él, dorm agrupa las
+instancias por `content_type_id`, recupera todos los `ContentType`
+referenciados en un único SELECT, y luego emite un
+`filter(pk__in=…)` por content type — total: **1 + 1 + K** queries.
+
+```python
+# 3 tags apuntando a 2 articles + 2 books
+# = 1 (tags) + 1 (content_types) + 2 (uno por CT) = 4 queries
+for tag in Tag.objects.prefetch_related("target"):
+    print(tag.target)        # servido desde la caché, sin query extra
+```
+
+Dos notas de compatibilidad:
+
+- Un `Prefetch("target", queryset=…)` personalizado **no está
+  soportado** — una sola queryset no puede filtrar todos los
+  targets de un GFK heterogéneo. Si necesitas filtrar, prefetcha
+  cada relación concreta explícitamente con su propio `Prefetch`.
+- `to_attr=…` tampoco está soportado en un GFK; dorm rellena el
+  propio slot de caché del descriptor, así que `instance.target`
+  devuelve el objeto resuelto sin una segunda query.
+
 ## Carga parcial
 
 ```python
@@ -414,12 +441,10 @@ Los tipos base permitidos incluyen `INTEGER`, `BIGINT`, `SMALLINT`,
 `ImproperlyConfigured` inmediatamente en construcción del queryset,
 para que un typo o input no saneado nunca llegue al SQL.
 
-## Consultas avanzadas (2.1+)
+## Consultas avanzadas
 
-La release 2.1 añade los bloques para las queries de reporting no
-triviales — lo que de otra forma te obligaría a `RawQuerySet`. En
-[Novedades en 2.1](whats-new-2.1.md) está el set completo; el
-resumen mínimo:
+Bloques para las queries de reporting no triviales — lo que de
+otra forma te obligaría a `RawQuerySet`:
 
 - **`Subquery(qs)` / `Exists(qs)` / `OuterRef("col")`** —
   subconsultas correlacionadas que componen con `filter()` /
@@ -429,14 +454,11 @@ resumen mínimo:
   `LastValue` — ranking, totales acumulados, deltas sin bajar a
   SQL crudo.
 - **`QuerySet.with_cte(name=qs)`** — CTEs no recursivos.
-- **Funciones escalares nuevas**: `Greatest`, `Least`, `Round`,
-  `Trunc`, `Extract`, `Substr`, `Replace`, `StrIndex`.
+- **Funciones escalares**: `Greatest`, `Least`, `Round`, `Trunc`,
+  `Extract`, `Substr`, `Replace`, `StrIndex`.
 - **Búsqueda full-text (PostgreSQL)** vía
   `dorm.search.SearchVector` / `SearchQuery` / `SearchRank` y el
   lookup `__search`.
 - **`QuerySet.cursor_paginate(...)` /
   `acursor_paginate(...)`** — paginación por cursor con ordenación
   estable y coste O(1) en páginas profundas.
-
-Cada feature tiene un ejemplo concreto en las [notas de release
-2.1](whats-new-2.1.md).

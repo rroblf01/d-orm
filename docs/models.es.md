@@ -611,6 +611,14 @@ round-trip por acceso. Si tus tests recrean modelos o truncan la
 tabla, llama a `ContentType.objects.clear_cache()` para
 invalidar.
 
+Cuando iteras una queryset de filas con tags polimórficos, usa
+`prefetch_related("target")` — el `get(pk=…)` por fila del
+descriptor se reduce a **1 + 1 + K** queries (una para los tags,
+una para todos los `ContentType` referenciados en bulk, una por
+cada modelo target concreto). Ver
+[FKs polimórficas en `prefetch_related`](queries.md#fks-polimorficas-genericforeignkey)
+en la guía de consultas.
+
 ## Opciones comunes de campo
 
 Todo campo acepta:

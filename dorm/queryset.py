@@ -168,6 +168,28 @@ class CursorPage(Generic[_T]):
         return f"CursorPage(items={len(self.items)}, has_next={self.has_next})"
 
 
+def _is_generic_foreign_key(field: Any) -> bool:
+    """Return True if *field* is a :class:`GenericForeignKey` instance.
+
+    The check is duck-typed (``ct_field`` + ``fk_field`` + ``concrete is
+    False``) before falling back to an isinstance import. This lets the
+    dispatcher in :meth:`QuerySet._do_prefetch_related` route the
+    polymorphic branch without forcing :mod:`dorm.contrib.contenttypes`
+    to load when a project doesn't use it.
+    """
+    if not (
+        hasattr(field, "ct_field")
+        and hasattr(field, "fk_field")
+        and getattr(field, "concrete", True) is False
+    ):
+        return False
+    try:
+        from .contrib.contenttypes.fields import GenericForeignKey
+    except ImportError:  # pragma: no cover — contrib is always available
+        return False
+    return isinstance(field, GenericForeignKey)
+
+
 def _explain_row_to_str(row: Any) -> str:
     """Render a single ``EXPLAIN`` output row as a string. PG returns one
     column per row containing the plan line; SQLite returns multiple
@@ -874,6 +896,15 @@ class QuerySet(Generic[_T]):
 
             if field is not None and getattr(field, "many_to_many", False):
                 self._prefetch_m2m(instances, fname, field, user_qs=user_qs, to_attr=to_attr)
+            elif field is not None and _is_generic_foreign_key(field):
+                # Polymorphic FK: takes its own bulk path keyed by
+                # content_type. Must be checked *before* the FK branch
+                # below because GFK has no ``_resolve_related_model``
+                # and would otherwise fall through to reverse-FK
+                # resolution and raise.
+                self._prefetch_gfk(
+                    instances, fname, field, user_qs=user_qs, to_attr=to_attr
+                )
             elif field is not None and hasattr(field, "_resolve_related_model"):
                 # Forward FK
                 rel_model = field._resolve_related_model()
@@ -1044,6 +1075,103 @@ class QuerySet(Generic[_T]):
 
         for inst in instances:
             inst.__dict__[cache_key] = src_to_objs.get(inst.pk, [])
+
+    def _prefetch_gfk(
+        self,
+        instances: list[_T],
+        fname: str,
+        gfk_field: Any,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
+    ) -> None:
+        """Bulk-resolve a :class:`GenericForeignKey` across *instances*.
+
+        The descriptor's per-row read does ``model.objects.get(pk=oid)``,
+        which costs one query per row when iterating a queryset of
+        polymorphic-tagged instances (classic N+1). Group the rows by
+        ``content_type_id``, fetch each group's targets in a single
+        ``filter(pk__in=…)`` per content type, and stamp the cache slot
+        the descriptor reads from. Total queries: 1 + K, where K is the
+        number of distinct content types referenced.
+
+        ``user_qs`` is rejected — a custom queryset can only target one
+        model class, but a GFK by definition spans many. Users who want
+        per-target filtering should ``prefetch_related`` *each* concrete
+        relation explicitly with its own ``Prefetch(queryset=…)``.
+        ``to_attr`` is similarly unsupported for now: the descriptor
+        cache slot is the natural integration point and matches Django's
+        behaviour.
+        """
+        if user_qs is not None:
+            raise NotImplementedError(
+                f"prefetch_related({fname!r}) on a GenericForeignKey does "
+                f"not accept a custom Prefetch(queryset=…) — a GFK targets "
+                f"multiple models, so a single queryset can't filter all of "
+                f"them. Prefetch each concrete relation explicitly instead."
+            )
+        if to_attr is not None:
+            raise NotImplementedError(
+                f"prefetch_related({fname!r}) on a GenericForeignKey does "
+                f"not support to_attr=…; the descriptor's own cache slot "
+                f"is updated so ``instance.{fname}`` returns the resolved "
+                f"object without a second query."
+            )
+
+        ct_attname = f"{gfk_field.ct_field}_id"
+        fk_attname = gfk_field.fk_field
+        cache_key = gfk_field.get_cache_name()
+
+        # Group instances by content_type_id, dropping rows that have
+        # neither side set (the descriptor returns None for those — no
+        # SQL needed).
+        by_ct: dict[Any, list[Any]] = {}
+        for inst in instances:
+            ct_id = inst.__dict__.get(ct_attname)
+            obj_id = inst.__dict__.get(fk_attname)
+            if ct_id is None or obj_id is None:
+                inst.__dict__[cache_key] = None
+                continue
+            by_ct.setdefault(ct_id, []).append(inst)
+
+        if not by_ct:
+            return
+
+        # Resolve every referenced ContentType in a single round-trip,
+        # then warm the manager's ``(app_label, model)`` cache so any
+        # subsequent ``get_for_model`` / ``get_for_id`` from the same
+        # process is served in-memory. Without the warm-up the
+        # per-group ``get_for_id`` falls back to one SELECT per CT,
+        # turning 1+K into 1+2K.
+        from .contrib.contenttypes.models import ContentType
+
+        ct_by_id: dict[Any, Any] = {
+            ct.pk: ct
+            for ct in ContentType.objects.filter(pk__in=list(by_ct))
+        }
+        for ct in ct_by_id.values():
+            ContentType.objects._cache[(ct.app_label, ct.model)] = ct
+
+        for ct_id, group in by_ct.items():
+            ct = ct_by_id.get(ct_id)
+            target_model = ct.model_class() if ct is not None else None
+            if target_model is None:
+                # The CT row was deleted, or the model class isn't
+                # registered (renamed app). Mirror the descriptor's
+                # per-row ``return None``.
+                for inst in group:
+                    inst.__dict__[cache_key] = None
+                continue
+
+            obj_ids = list({inst.__dict__[fk_attname] for inst in group})
+            related = {
+                obj.pk: obj
+                for obj in target_model.objects.filter(pk__in=obj_ids)
+            }
+            for inst in group:
+                inst.__dict__[cache_key] = related.get(
+                    inst.__dict__[fk_attname]
+                )
 
     def _prefetch_reverse_fk(
         self,
@@ -1662,6 +1790,82 @@ class QuerySet(Generic[_T]):
     def __aiter__(self) -> AsyncIterator[_T]:
         return self._aiterator()
 
+    async def _aprefetch_gfk(
+        self, instances: list[_T], fname: str, gfk_field: Any
+    ) -> None:
+        """Async counterpart of :meth:`_prefetch_gfk`.
+
+        Same algorithm — group by content_type, fan out one
+        ``afilter(pk__in=…)`` per group — with the per-content-type
+        bulk fetches dispatched concurrently via ``asyncio.gather`` so
+        K content types cost one round-trip's worth of latency, not K.
+        """
+        ct_attname = f"{gfk_field.ct_field}_id"
+        fk_attname = gfk_field.fk_field
+        cache_key = gfk_field.get_cache_name()
+
+        by_ct: dict[Any, list[Any]] = {}
+        for inst in instances:
+            ct_id = inst.__dict__.get(ct_attname)
+            obj_id = inst.__dict__.get(fk_attname)
+            if ct_id is None or obj_id is None:
+                inst.__dict__[cache_key] = None
+                continue
+            by_ct.setdefault(ct_id, []).append(inst)
+
+        if not by_ct:
+            return
+
+        from .contrib.contenttypes.models import ContentType
+
+        # Bulk-fetch every referenced ContentType in one round-trip
+        # (mirrors the sync path) and warm the manager cache.
+        ct_by_id: dict[Any, Any] = {}
+        async for ct in QuerySet(ContentType, self._db).filter(  # type: ignore[arg-type]
+            pk__in=list(by_ct)
+        ):
+            ct_by_id[ct.pk] = ct
+            ContentType.objects._cache[(ct.app_label, ct.model)] = ct
+
+        async def _fetch_one(ct_id: Any, group: list[Any]) -> None:
+            ct = ct_by_id.get(ct_id)
+            target_model = ct.model_class() if ct is not None else None
+            if target_model is None:
+                for inst in group:
+                    inst.__dict__[cache_key] = None
+                return
+            obj_ids = list({inst.__dict__[fk_attname] for inst in group})
+            related: dict[Any, Any] = {}
+            async for obj in QuerySet(target_model, self._db).filter(  # type: ignore[arg-type]
+                pk__in=obj_ids
+            ):
+                related[obj.pk] = obj
+            for inst in group:
+                inst.__dict__[cache_key] = related.get(
+                    inst.__dict__[fk_attname]
+                )
+
+        # ``return_exceptions=True`` mirrors :meth:`_ado_prefetch_related`'s
+        # safety: a single failing fetch must not cancel its siblings,
+        # because a mid-flight cancellation on a psycopg async cursor
+        # can leave the underlying connection in a state the pool can't
+        # safely recycle, deadlocking subsequent acquires (the symptom
+        # we see in CI as the suite hanging at ~94%). Re-raise the
+        # first failure with the content type id attached so the
+        # traceback says *which* group blew up rather than burying it
+        # inside ``gather``.
+        ct_ids = list(by_ct)
+        results = await asyncio.gather(
+            *(_fetch_one(ct_id, by_ct[ct_id]) for ct_id in ct_ids),
+            return_exceptions=True,
+        )
+        for ct_id, result in zip(ct_ids, results):
+            if isinstance(result, BaseException):
+                raise RuntimeError(
+                    f"prefetch_related GFK fetch for content_type_id={ct_id} "
+                    f"failed: {result}"
+                ) from result
+
     async def _aprefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
         """Async counterpart of :meth:`_prefetch_reverse_fk`."""
         from .related_managers import ReverseFKDescriptor
@@ -1780,6 +1984,8 @@ class QuerySet(Generic[_T]):
 
             if field is not None and getattr(field, "many_to_many", False):
                 coros.append(self._aprefetch_m2m(instances, fname, field))
+            elif field is not None and _is_generic_foreign_key(field):
+                coros.append(self._aprefetch_gfk(instances, fname, field))
             elif field is not None and hasattr(field, "_resolve_related_model"):
                 coros.append(_one_forward_fk(fname, field))
             else:

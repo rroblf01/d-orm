@@ -6,6 +6,43 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-04-29
+
+### Performance — `prefetch_related` on `GenericForeignKey`
+
+- **N+1 query collapsed to 1 + K + 1.** Iterating a queryset of
+  polymorphic-tagged rows used to do one ``model.objects.get(pk=oid)``
+  per row inside the descriptor — for a list of N tags pointing at K
+  distinct content types that's N round-trips. ``prefetch_related("target")``
+  now groups instances by ``content_type_id``, bulk-fetches every
+  referenced :class:`ContentType` in a single SELECT (warming the
+  manager's ``(app_label, model)`` cache as it goes), and then issues
+  one ``filter(pk__in=…)`` per content type. The descriptor's read path
+  still hits the same cache slot, so existing user code lights up
+  automatically the moment ``prefetch_related("target")`` is added.
+- **Async parity.** ``_aprefetch_gfk`` runs the per-content-type bulk
+  fetches concurrently via ``asyncio.gather``; K content types cost
+  one round-trip's worth of latency, not K.
+- **Mixed prefetches work.** ``prefetch_related("target", "content_type")``
+  on the same queryset routes the GFK and the regular FK through their
+  respective dispatcher branches in one call.
+- **Misuse is rejected up front.** ``Prefetch("target", queryset=…)``
+  and ``Prefetch("target", to_attr="…")`` both raise
+  ``NotImplementedError`` with a hint pointing the user at
+  per-concrete-relation prefetches — a single user-supplied queryset
+  can't filter all targets of a heterogeneous GFK.
+- **Tests** in ``tests/test_gfk_prefetch.py`` (22 cases) pin the
+  query budget (1 + 1 + K), descriptor cache reuse (0 SELECTs after
+  warm-up), correctness across two content types, dangling targets,
+  empty / null cases, async parity, and the validation errors.
+
+### Fixed — Manager type hint
+
+- ``Manager.prefetch_related`` now declares ``*fields: str | Prefetch``
+  instead of just ``str``. The runtime always accepted both, but
+  ``ty`` rightly flagged ``Manager.objects.prefetch_related(Prefetch(…))``
+  as a type error. No behaviour change.
+
 ## [2.3.0] - 2026-04-29
 
 The 2.3 release sharpens the **FastAPI / Pydantic** integration so

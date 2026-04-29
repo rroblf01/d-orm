@@ -265,15 +265,12 @@ Three operations help you avoid `AccessExclusiveLock` on hot tables:
   `NOT VALID` + `VALIDATE` pattern for adding FKs / CHECKs to large
   tables without an `AccessExclusiveLock`.
 
-Worked example in [What's new in 2.1 → Migration safety](whats-new-2.1.md#migration-safety).
+## Constraints and generated columns
 
-## Constraints and generated columns (2.1+)
-
-`Meta.constraints` now accepts `CheckConstraint` and
+`Meta.constraints` accepts `CheckConstraint` and
 `UniqueConstraint(condition=...)` (partial unique index — the
 canonical "only one active row per user" pattern). The autodetector
 emits `AddConstraint` / `RemoveConstraint`.
 
 `GeneratedField` declares a database-computed column (PG ≥ 12,
-SQLite ≥ 3.31). See [What's new in 2.1 →
-Schema](whats-new-2.1.md#schema).
+SQLite ≥ 3.31).

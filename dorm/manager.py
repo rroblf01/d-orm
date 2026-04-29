@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Generic, Iterator, TypeVar
 from .models import Model
 
 if TYPE_CHECKING:
-    from .queryset import QuerySet, RawQuerySet, ValuesListQuerySet
+    from .queryset import Prefetch, QuerySet, RawQuerySet, ValuesListQuerySet
 
 _T = TypeVar("_T", bound=Model)
 
@@ -71,7 +71,7 @@ class BaseManager(Generic[_T]):
     def select_related(self, *fields: str) -> QuerySet[_T]:
         return self.get_queryset().select_related(*fields)
 
-    def prefetch_related(self, *fields: str) -> QuerySet[_T]:
+    def prefetch_related(self, *fields: "str | Prefetch") -> QuerySet[_T]:
         return self.get_queryset().prefetch_related(*fields)
 
     def select_for_update(

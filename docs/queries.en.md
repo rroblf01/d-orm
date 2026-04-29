@@ -279,6 +279,32 @@ for author in Author.objects.prefetch_related("books"):
 For M2M, `prefetch_related` issues a single JOIN against the through
 table (no separate "fetch through then fetch targets" round-trip).
 
+#### Polymorphic FKs (`GenericForeignKey`)
+
+`prefetch_related("target")` works on a `GenericForeignKey` too.
+Without it, every descriptor read does its own `get(pk=…)` — N+1
+across a queryset of N tags pointing at K distinct content types.
+With it, dorm groups instances by `content_type_id`, fetches every
+referenced `ContentType` in a single SELECT, and then issues one
+`filter(pk__in=…)` per content type — total: **1 + 1 + K** queries.
+
+```python
+# 3 tags pointing at 2 articles + 2 books
+# = 1 (tags) + 1 (content_types) + 2 (one per CT) = 4 queries
+for tag in Tag.objects.prefetch_related("target"):
+    print(tag.target)        # served from cache, no extra query
+```
+
+Two compatibility notes:
+
+- A custom `Prefetch("target", queryset=…)` is **not supported** —
+  one queryset can't filter all targets of a heterogeneous GFK. If
+  you need filtering, prefetch each concrete relation explicitly with
+  its own `Prefetch`.
+- `to_attr=…` is also unsupported on a GFK; the descriptor's own
+  cache slot is what dorm fills, so `instance.target` returns the
+  resolved object without a second query.
+
 ## Partial loading
 
 ```python
@@ -410,12 +436,10 @@ Allowed base types include `INTEGER`, `BIGINT`, `SMALLINT`, `REAL`,
 typo or unsanitised input can never reach the SQL.
 
 
-## Advanced querying (2.1+)
+## Advanced querying
 
-The 2.1 release adds the building blocks for non-trivial reporting
-queries — what you'd otherwise drop to `RawQuerySet` for. See
-[What's new in 2.1](whats-new-2.1.md) for the full set; the
-shortest summary:
+Building blocks for non-trivial reporting queries — what you'd
+otherwise drop to `RawQuerySet` for:
 
 - **`Subquery(qs)` / `Exists(qs)` / `OuterRef("col")`** — correlated
   subqueries that compose with `filter()` / `annotate()`.
@@ -424,12 +448,9 @@ shortest summary:
   `LastValue` — ranking, running totals, deltas without bailing to
   raw SQL.
 - **`QuerySet.with_cte(name=qs)`** — non-recursive CTEs.
-- **New scalar functions**: `Greatest`, `Least`, `Round`, `Trunc`,
+- **Scalar functions**: `Greatest`, `Least`, `Round`, `Trunc`,
   `Extract`, `Substr`, `Replace`, `StrIndex`.
 - **Full-text search (PostgreSQL)** via `dorm.search.SearchVector` /
   `SearchQuery` / `SearchRank` and the `__search` lookup.
 - **`QuerySet.cursor_paginate(...)` / `acursor_paginate(...)`** —
   keyset pagination with stable ordering, O(1) deep-page cost.
-
-Each feature has a worked example in [the 2.1 release
-notes](whats-new-2.1.md).

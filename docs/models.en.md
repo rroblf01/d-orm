@@ -601,6 +601,13 @@ process — repeated polymorphic lookups don't pay a round-trip per
 access. If your tests recreate models or truncate the table, call
 `ContentType.objects.clear_cache()` to invalidate.
 
+When you iterate a queryset of polymorphic-tagged rows, reach for
+`prefetch_related("target")` — the descriptor's per-row `get(pk=…)`
+collapses to **1 + 1 + K** queries (one for the tags, one for every
+referenced `ContentType` in bulk, one per concrete target model). See
+[`prefetch_related` polymorphic FKs](queries.md#polymorphic-fks-genericforeignkey)
+in the queries guide.
+
 ## Common field options
 
 Every field accepts:

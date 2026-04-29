@@ -277,16 +277,12 @@ tablas calientes:
   `NOT VALID` + `VALIDATE` para añadir FKs / CHECKs a tablas
   grandes sin `AccessExclusiveLock`.
 
-Ejemplo trabajado en [Novedades en 2.1 →
-Seguridad de migraciones](whats-new-2.1.md#seguridad-de-migraciones).
+## Restricciones y columnas calculadas
 
-## Restricciones y columnas calculadas (2.1+)
-
-`Meta.constraints` acepta ya `CheckConstraint` y
+`Meta.constraints` acepta `CheckConstraint` y
 `UniqueConstraint(condition=...)` (índice único parcial — el patrón
 canónico de "solo una fila activa por usuario"). El autodetector
 emite `AddConstraint` / `RemoveConstraint`.
 
 `GeneratedField` declara una columna calculada por la BD (PG ≥ 12,
-SQLite ≥ 3.31). Ver [Novedades en 2.1 →
-Esquema](whats-new-2.1.md#esquema).
+SQLite ≥ 3.31).
