@@ -6,6 +6,120 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-04-29
+
+The 2.3 release sharpens the **FastAPI / Pydantic** integration so
+field-level constraints declared on dorm models actually surface at the
+API boundary (HTTP 422 + OpenAPI), fixes a **connection-leak class** that
+was producing random ``ResourceWarning`` and intermittent CI hangs on
+Python 3.14, and adds **178 new tests** that close several coverage gaps
+across content types, the Pydantic layer, and the SQLite backend.
+
+### Added — Pydantic constraint translation
+
+- **`max_length` propagates to the schema.** ``CharField(max_length=N)``,
+  ``EmailField`` (default 254), ``URLField`` (default 200), ``SlugField``
+  (default 50), ``FileField``, and ``EnumField`` of strings now generate
+  ``Annotated[str, Field(max_length=N)]`` — and by extension
+  ``"maxLength": N`` in ``Schema.model_json_schema()``. Previously the
+  constraint was enforced only at ``full_clean`` / DB time, so FastAPI
+  accepted oversize strings and the user only saw the failure deep
+  inside the request handler.
+- **`DecimalField.max_digits` / `decimal_places`** translate to
+  Pydantic's ``Field(max_digits=…, decimal_places=…)``.
+- **`choices=[…]` becomes `Literal[…]`** in the annotation. Both
+  the canonical ``[(value, label), …]`` shape and the flat ``[value, …]``
+  shape are accepted. Members render as an ``"enum": […]`` array in the
+  JSON Schema; non-members are rejected with the usual Pydantic error.
+- **`PositiveIntegerField` / `PositiveSmallIntegerField`** carry a
+  ``ge=0`` / ``"minimum": 0`` constraint instead of just ``int``.
+- **`EmailField` / `URLField` advertise their format hint** —
+  ``"format": "email"`` / ``"format": "uri"`` — so OpenAPI clients
+  render the right input affordance and downstream code generators
+  pick the right type, *without* dragging in the optional
+  ``email-validator`` dependency.
+- **Built-in validators are translated.** ``MinValueValidator`` →
+  ``ge=N``, ``MaxValueValidator`` → ``le=N``, ``MinLengthValidator`` →
+  ``min_length=N``, ``MaxLengthValidator`` → ``max_length=N``,
+  ``RegexValidator`` → ``pattern=str``. When a validator and a native
+  field constraint disagree the *strictest* wins (e.g.
+  ``CharField(max_length=20, validators=[MaxLengthValidator(5)])``
+  effectively bounds the schema at 5).
+
+### Fixed — Default value propagation
+
+- **Field defaults are now exposed in the schema.** ``BooleanField(default=False)``
+  / ``IntegerField(default=3)`` / ``CharField(default="anon")`` previously
+  produced ``T | None`` with default ``None`` — meaning a request body
+  that omitted the field arrived at the model as ``None`` instead of
+  the field's real default. The schema now exposes the actual default
+  (or ``default_factory`` for callable defaults), and the annotation
+  stays the bare type ``T`` (no spurious ``| None``). Nullable columns
+  without a default still render as ``T | None`` with default ``None``.
+
+### Fixed — Connection leaks under `pytest -n 4` / Python 3.14
+
+- **Async SQLite connections are now closed deterministically across
+  event-loop boundaries.** ``SQLiteAsyncDatabaseWrapper._check_loop``
+  used to drop the held aiosqlite connection by setting
+  ``self._conn = None`` whenever a new event loop was detected; the
+  underlying ``sqlite3.Connection`` was finalised by the GC later as
+  ``ResourceWarning: unclosed database`` and an aiosqlite worker
+  thread stayed parked on its queue. The new ``_force_close_sync``
+  helper drives ``aiosqlite.Connection.stop()`` and joins the worker
+  thread (5 s bounded) so the handle is gone before we move on. New
+  ``force_close_sync()`` method on the async wrappers, called by
+  ``reset_connections`` and the atexit hook, plugs the same hole at
+  test-teardown / process-exit time.
+- **Sync SQLite wrapper now closes connections from every thread.**
+  ``SQLiteDatabaseWrapper`` mirrors its ``threading.local`` cache in
+  a thread-id-keyed dict, so ``close()`` releases the handles opened
+  in worker threads as well as the calling thread's. Previously,
+  cross-thread connections leaked silently.
+- **Validation runs *before* `sqlite3.connect`** in both sync and
+  async ``_new_connection``. An ``ImproperlyConfigured`` raised on a
+  bad ``OPTIONS["journal_mode"]`` no longer leaks the just-opened
+  handle to the GC.
+- **Test-suite teardown closes async wrappers explicitly** in the
+  session-scoped fixture, eliminating the warnings pytest's
+  ``unraisableexception`` plugin used to flush near the end of each
+  run.
+
+### Added — Coverage uplift (178 new tests)
+
+- **`dorm.contrib.contenttypes` 75% → 96%.** New tests cover
+  ``GenericForeignKey.aget`` (async resolution, cache hits, deleted
+  target, unset descriptor), ``_GenericRelatedManager`` extras
+  (``exclude``, ``exists``, ``first``, ``add``, ``acreate``,
+  ``_act_filter`` round-trip), descriptor-on-class access for both
+  ``GenericForeignKey`` and ``GenericRelation``,
+  ``GenericRelation._resolve_related`` happy / sad / class-target
+  paths, and explicit ``ContentType.objects.clear_cache``
+  invalidation.
+- **`dorm.contrib.pydantic` constraint-edge cases.** Validator
+  merging (``MinLengthValidator`` + ``MaxLengthValidator``, multiple
+  ``MaxValueValidator``s), recursive types (``ArrayField`` element
+  type, ``GeneratedField`` delegating to ``output_field``),
+  ``_coerce_field_file_to_str`` fallback for objects without
+  ``.name``, ``Meta.nested`` with FK / M2M / unknown-field error,
+  ``Meta.fields`` + ``Meta.exclude`` mutual exclusion, missing
+  ``Meta.model``, and explicit user annotations winning over the
+  auto-derived ones.
+- **`dorm/db/backends/sqlite.py` 81% → 84%.** ``_is_single_statement``
+  edge cases (empty input, semicolons inside string literals /
+  double-quoted identifiers), ``_validate_journal_mode`` error
+  paths, sync wrapper auto-reconnect on a stale handle, multi-thread
+  ``close()``, idempotent close, ``set_autocommit`` flipping
+  ``isolation_level`` on the live connection, ``get_table_columns`` /
+  ``pool_stats`` parity with the async wrapper, and a regression
+  guard that asserts an invalid ``journal_mode`` doesn't emit a
+  ``ResourceWarning``.
+- **`dorm/db/connection.py` 85% → 88%.** ``DATABASE_ROUTERS``
+  branches (router missing ``db_for_read``, raising router falling
+  through, falsy alias ignored), unknown-alias error, ``health_check``
+  / ``pool_stats`` happy + uninitialised paths, idempotent
+  ``force_close_sync``, ``close_all_async`` clearing the registry.
+
 ### Added — Tier 3 Django-parity features
 
 - **`CompositePrimaryKey(*field_names)`** — declare a primary key

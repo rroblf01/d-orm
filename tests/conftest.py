@@ -316,8 +316,20 @@ def configure_dorm(db_config):
         INSTALLED_APPS=["tests"],
     )
     yield
-    from dorm.db.connection import close_all
+    # Force sync release of any async wrappers left behind by the final
+    # test before close_all(): otherwise pytest's unraisableexception
+    # plugin runs gc.collect() during teardown and surfaces warnings for
+    # SQLite connections the wrappers were still holding.
+    from dorm.db.connection import _async_connections, close_all
 
+    for conn in _async_connections.values():
+        force = getattr(conn, "force_close_sync", None)
+        if force is not None:
+            try:
+                force()
+            except Exception:
+                pass
+    _async_connections.clear()
     close_all()
 
 

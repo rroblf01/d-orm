@@ -362,10 +362,18 @@ def test_async_sqlite_no_deprecation_across_loops(tmp_path: Path):
         await wrapper.execute_script("CREATE TABLE IF NOT EXISTS t (x INTEGER)")
         await wrapper.execute("SELECT 1")
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        asyncio.run(use_it())
-        asyncio.run(use_it())
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            asyncio.run(use_it())
+            asyncio.run(use_it())
+    finally:
+        # The wrapper isn't registered in dorm's connection cache, so
+        # nothing else will close it for us. Without this, the aiosqlite
+        # connection from the second asyncio.run leaks and emits
+        # ``ResourceWarning: ... was deleted before being closed`` at
+        # GC time.
+        wrapper.force_close_sync()
 
     deps = [
         w for w in caught

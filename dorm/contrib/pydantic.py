@@ -47,11 +47,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, Type
+from typing import Annotated, Any, Literal, Type
 from uuid import UUID
 
 try:
-    from pydantic import BaseModel, ConfigDict, create_model
+    from pydantic import BaseModel, ConfigDict, Field as PydField, create_model
     from pydantic.functional_validators import BeforeValidator
 except ImportError as e:
     raise ImportError(
@@ -93,6 +93,13 @@ from ..fields import (
     UUIDField,
 )
 from ..models import Model
+from ..validators import (
+    MaxLengthValidator,
+    MaxValueValidator,
+    MinLengthValidator,
+    MinValueValidator,
+    RegexValidator,
+)
 
 def _coerce_field_file_to_str(value: Any) -> Any:
     """Pydantic input adapter for :class:`dorm.FileField` columns.
@@ -176,41 +183,206 @@ _FIELD_TYPE_MAP: list[tuple[type, Any]] = [
 ]
 
 
-def _field_to_type(field: Any) -> Any:
-    """Map a dorm field instance to its Python type for Pydantic.
+def _base_type_for(field: Any) -> Any:
+    """Look up the bare Python type for *field* in :data:`_FIELD_TYPE_MAP`,
+    without applying constraints.
 
-    Per-instance shapes (``EnumField`` exposing its enum class,
-    ``ArrayField`` parameterised by element type, ``GeneratedField``
-    delegating to ``output_field``) are handled here before falling
-    back to :data:`_FIELD_TYPE_MAP`.
-    """
-    # FK / O2O serialize as the underlying PK column value (int by default).
+    Recursive cases (``EnumField`` exposing its enum class, ``ArrayField``
+    parameterised by element type, ``GeneratedField`` delegating to
+    ``output_field``, FK/O2O collapsing to the FK column type) are
+    resolved here so callers don't have to special-case them."""
     if isinstance(field, (ForeignKey, OneToOneField)):
         return int
     if isinstance(field, EnumField):
-        # Pydantic v2 accepts an ``enum.Enum`` subclass as a type
-        # annotation and validates membership automatically — perfect
-        # match for our value semantics.
         return field.enum_cls
     if isinstance(field, GeneratedField):
-        # The DB computes the value; for Pydantic purposes its type is
-        # whatever ``output_field`` declares (``DecimalField`` →
-        # ``Decimal``, etc.).
-        return _field_to_type(field.output_field)
+        return _base_type_for(field.output_field)
     if isinstance(field, ArrayField):
-        # ``list[T]`` where T is whatever the base field maps to. The
-        # inner mapping recurses, so an ``ArrayField(EnumField(Status))``
-        # surfaces as ``list[Status]``.
-        inner = _field_to_type(field.base_field)
-        # ``list[inner]`` is a runtime ``GenericAlias``, which is what
-        # Pydantic's ``create_model`` expects. Hoisting the lookup out
-        # of the subscript also keeps ty happy — it rejects function
-        # calls inside type-expression positions otherwise.
+        inner = _base_type_for(field.base_field)
         return list[inner]
     for field_cls, py_type in _FIELD_TYPE_MAP:
         if isinstance(field, field_cls):
             return py_type
     return Any
+
+
+def _validator_kwargs(validators: list) -> dict[str, Any]:
+    """Translate dorm's built-in validator instances into Pydantic
+    ``Field()`` kwargs. Unknown validators are skipped — the dorm-side
+    ``validate()`` still runs at ``full_clean`` time, so dropping them
+    here only loses the up-front rejection at the API boundary, never
+    the underlying check."""
+    kwargs: dict[str, Any] = {}
+    for v in validators:
+        if isinstance(v, MinValueValidator):
+            kwargs["ge"] = v.limit_value
+        elif isinstance(v, MaxValueValidator):
+            kwargs["le"] = v.limit_value
+        elif isinstance(v, MinLengthValidator):
+            kwargs["min_length"] = v.min_length
+        elif isinstance(v, MaxLengthValidator):
+            existing = kwargs.get("max_length")
+            kwargs["max_length"] = (
+                v.max_length if existing is None else min(existing, v.max_length)
+            )
+        elif isinstance(v, RegexValidator):
+            # Pydantic uses Rust regex syntax via pydantic-core. Most
+            # Python patterns work; users with truly Python-only regex
+            # (look-arounds, named groups beyond Rust's grammar) can
+            # override the field annotation manually.
+            kwargs["pattern"] = v.regex.pattern
+    return kwargs
+
+
+def _field_constraint_kwargs(field: Any, base_type: Any) -> dict[str, Any]:
+    """Build the kwargs for ``pydantic.Field(...)`` reflecting every
+    constraint dorm enforces at assignment / clean time. Returns an
+    empty dict when the field has no translatable constraints — callers
+    use that to skip the ``Annotated`` wrapper entirely."""
+    kwargs: dict[str, Any] = {}
+
+    # String length: every Char-derived field plus FileField. The
+    # ``max_length`` attribute lives directly on the field. ``FileField``
+    # maps to ``Annotated[str, BeforeValidator(...)]`` (not bare ``str``),
+    # so peek through ``Annotated`` before deciding whether to apply.
+    string_like = base_type is str or getattr(base_type, "__origin__", None) is str
+    if string_like:
+        max_length = getattr(field, "max_length", None)
+        if max_length:
+            kwargs["max_length"] = max_length
+
+    # DecimalField: max_digits / decimal_places line up 1:1 with
+    # Pydantic's Field options. Both are always populated on dorm's
+    # DecimalField (defaults 10 / 2).
+    if isinstance(field, DecimalField):
+        kwargs["max_digits"] = field.max_digits
+        kwargs["decimal_places"] = field.decimal_places
+
+    # Positive integer fields enforce >=0 at assignment time; surface
+    # that to the schema so OpenAPI shows ``minimum: 0`` and Pydantic
+    # rejects negatives at the boundary.
+    if isinstance(field, (PositiveIntegerField, PositiveSmallIntegerField)):
+        kwargs["ge"] = 0
+
+    # OpenAPI ``format`` hints: keep the type as ``str`` (avoids the
+    # email-validator dep) but document the intent so generated client
+    # code and the docs UI render the right input affordance.
+    if isinstance(field, EmailField):
+        extra = dict(kwargs.get("json_schema_extra") or {})
+        extra.setdefault("format", "email")
+        kwargs["json_schema_extra"] = extra
+    elif isinstance(field, URLField):
+        extra = dict(kwargs.get("json_schema_extra") or {})
+        extra.setdefault("format", "uri")
+        kwargs["json_schema_extra"] = extra
+
+    # User-supplied validators. Merged after built-ins so an explicit
+    # MaxLengthValidator(N) can tighten — never loosen — the field's
+    # own ``max_length``.
+    if getattr(field, "validators", None):
+        for k, v in _validator_kwargs(field.validators).items():
+            if k == "max_length" and "max_length" in kwargs:
+                kwargs["max_length"] = min(kwargs["max_length"], v)
+            elif k == "min_length" and "min_length" in kwargs:
+                kwargs["min_length"] = max(kwargs["min_length"], v)
+            elif k == "ge" and "ge" in kwargs:
+                kwargs["ge"] = max(kwargs["ge"], v)
+            elif k == "le" and "le" in kwargs:
+                kwargs["le"] = min(kwargs["le"], v)
+            else:
+                kwargs[k] = v
+
+    return kwargs
+
+
+def _field_to_type(field: Any) -> Any:
+    """Map a dorm field instance to a Pydantic-ready type annotation.
+
+    Returns one of:
+
+    * The bare base type (``str``, ``int``, …) when the field has no
+      translatable constraints — keeps things simple for callers that
+      compare annotations directly against the underlying type.
+    * ``Annotated[base, Field(...)]`` carrying ``max_length``,
+      ``max_digits`` / ``decimal_places``, ``ge=0`` for positive ints,
+      OpenAPI ``format`` hint, and any user-supplied validators
+      (``MinValueValidator``, ``RegexValidator``, …) translated into
+      Pydantic kwargs.
+    * ``Literal[*values]`` when the field declares ``choices`` —
+      enumerated in the JSON Schema, not just enforced server-side.
+
+    The annotation never includes ``| None``; optionality is composed
+    by :func:`_finalize_annotation`."""
+    # Enum fields bring their own membership semantics via the enum
+    # class; never reduce them to a Literal even though they expose
+    # auto-derived ``choices`` for the admin layer.
+    if isinstance(field, EnumField):
+        return field.enum_cls
+
+    # Choices take precedence over the type table: a ``CharField(choices=...)``
+    # should validate as ``Literal[...]``, not as a free-form string.
+    choices = getattr(field, "choices", None)
+    if choices:
+        # dorm stores choices as a list of (value, label) pairs in the
+        # canonical case; tolerate the simpler list-of-values form too.
+        values = tuple(c[0] if isinstance(c, (tuple, list)) else c for c in choices)
+        if values:
+            return Literal[values]  # ty: ignore[invalid-type-form]
+
+    base = _base_type_for(field)
+    constraint_kwargs = _field_constraint_kwargs(field, base)
+    if not constraint_kwargs:
+        return base
+    return Annotated[base, PydField(**constraint_kwargs)]
+
+
+def _finalize_annotation(annotation: Any, *, optional: bool) -> Any:
+    """Compose the field annotation with optionality.
+
+    Two shapes — picked by whether the field needs a per-arm validator
+    (the only case today is :class:`FileField`, which carries a
+    ``BeforeValidator`` that returns ``None`` for ``None`` input):
+
+    * No ``BeforeValidator``: ``Annotated[base | None, Field(...)]``.
+      ``model_fields[name].annotation`` reads back as ``base | None``,
+      so existing call sites that compare against ``(str | None)`` /
+      ``(int | None)`` keep working while constraints survive in
+      ``model_fields[name].metadata`` and in the JSON Schema.
+    * ``BeforeValidator`` on the non-None arm: ``Annotated[base,
+      Field(...)] | None``. Putting the constraint *inside* the union
+      arm prevents ``max_length`` from being applied to ``None`` after
+      the validator returns ``None`` (otherwise pydantic-core raises
+      ``TypeError: Unable to apply constraint 'max_length' to supplied
+      value None`` under the flattened layout).
+    """
+    if not optional:
+        return annotation
+    if hasattr(annotation, "__metadata__") and any(
+        type(m).__name__ == "BeforeValidator" for m in annotation.__metadata__
+    ):
+        return annotation | None
+    if hasattr(annotation, "__metadata__"):
+        inner = annotation.__origin__
+        return Annotated[inner | None, *annotation.__metadata__]
+    return annotation | None
+
+
+def _field_default(field: Any, *, optional: bool) -> Any:
+    """Return the default value to pair with the schema annotation.
+
+    Precedence (most specific first):
+    1. The dorm Field's own ``default`` (callable → ``default_factory``).
+    2. ``None`` for fields the schema has marked optional (``null=True``,
+       ``AutoField``, or listed in ``optional=`` / ``Meta.optional``).
+    3. ``...`` (required) otherwise.
+    """
+    if field.has_default():
+        if callable(field.default):
+            return PydField(default_factory=field.default)
+        return field.default
+    if optional:
+        return None
+    return ...
 
 
 def schema_for(
@@ -258,17 +430,19 @@ def schema_for(
             continue
 
         py_type = _field_to_type(f)
-        # A field is "optional" in Pydantic terms when it has a default
-        # (auto-incrementing PK, server defaults, nullable, or explicitly
-        # marked) — meaning callers can omit it from input.
+        # A field is "optional" in Pydantic terms when callers can omit
+        # it from the input — auto-incrementing PK, nullable column,
+        # or explicit per-call opt-in. ``has_default()`` does NOT make
+        # the annotation nullable: the default value pairs with the
+        # bare type, so omitted input gets the field's real default
+        # (e.g. ``False`` for ``BooleanField(default=False)``) instead
+        # of being silently coerced to ``None``.
         is_optional = (
-            f.null or isinstance(f, AutoField) or f.name in optional or f.has_default()
+            f.null or isinstance(f, AutoField) or f.name in optional
         )
-
-        if is_optional:
-            fields[f.name] = (py_type | None, None)
-        else:
-            fields[f.name] = (py_type, ...)
+        annotation = _finalize_annotation(py_type, optional=is_optional)
+        default = _field_default(f, optional=is_optional)
+        fields[f.name] = (annotation, default)
 
     cls_name = name or f"{model_cls.__name__}Schema"
     # Setting model_config *after* create_model() doesn't take effect —
@@ -394,13 +568,18 @@ def _meta_apply(cls_name: str, namespace: dict, meta_cls: type) -> None:
             f.null
             or isinstance(f, AutoField)
             or f.name in meta_optional
-            or f.has_default()
         )
-        if is_optional:
-            annotations[f.name] = py_type | None
+        annotations[f.name] = _finalize_annotation(py_type, optional=is_optional)
+        # Pair the annotation with the field's real default (or ``None``
+        # for nullable / optional). Skipping ``setdefault`` for required
+        # fields lets Pydantic surface the missing-field error.
+        if f.has_default():
+            if callable(f.default):
+                namespace.setdefault(f.name, PydField(default_factory=f.default))
+            else:
+                namespace.setdefault(f.name, f.default)
+        elif is_optional:
             namespace.setdefault(f.name, None)
-        else:
-            annotations[f.name] = py_type
 
     # Detect typos / extras in Meta.nested early so the user knows.
     for nested_name in meta_nested:

@@ -284,13 +284,36 @@ def reset_connections():
             except Exception:
                 pass
     _sync_connections.clear()
-    # Async pools can only be closed with await; they will be GC'd.
+    # Async wrappers can't be awaited from here, but each backend exposes
+    # a ``force_close_sync`` that releases its underlying handles
+    # deterministically — without it the GC finalises the SQLite
+    # connection later (``ResourceWarning: unclosed database``) and
+    # leaves the aiosqlite worker thread parked on its queue, which under
+    # ``pytest -n 4`` can keep the interpreter from exiting.
+    for conn in _async_connections.values():
+        force = getattr(conn, "force_close_sync", None)
+        if force is not None:
+            try:
+                force()
+            except Exception:
+                pass
     _async_connections.clear()
 
 
 def _atexit_close() -> None:
-    """Close sync connections at process exit. Async connections rely on
-    their daemon worker thread being torn down by the interpreter."""
+    """Close all connections at process exit, sync and async.
+
+    Async wrappers can't be awaited from an atexit hook, but each one
+    exposes :meth:`force_close_sync` to release its underlying handles
+    deterministically (closing the sqlite3 connection or scheduling the
+    pool close on its original loop)."""
+    for conn in _async_connections.values():
+        force = getattr(conn, "force_close_sync", None)
+        if force is not None:
+            try:
+                force()
+            except Exception:
+                pass
     _async_connections.clear()
     close_all()
 

@@ -110,21 +110,40 @@ class SQLiteDatabaseWrapper:
         self.settings = settings
         self.database = settings.get("NAME", ":memory:")
         self._local = threading.local()
+        # ``threading.local`` only gives the calling thread access to its
+        # own connection, so :meth:`close` running in one thread couldn't
+        # release connections opened by sibling threads — they leaked as
+        # ``ResourceWarning: unclosed database`` on GC. We mirror every
+        # opened connection in a thread-id-keyed dict (guarded by
+        # ``_conns_lock``) so :meth:`close` and :meth:`close_all_threads`
+        # can release every live one.
+        self._conns: dict[int, sqlite3.Connection] = {}
+        self._conns_lock = threading.Lock()
         self._autocommit: bool = False
 
     def _new_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.database, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        # Validate before we open: an ImproperlyConfigured raised after
+        # ``sqlite3.connect`` would leak the just-opened handle to the GC
+        # (``ResourceWarning: unclosed database``).
         journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
-        if journal_mode:
-            mode = _validate_journal_mode(journal_mode)
-            # SQL is selected from a hard-coded mapping, not concatenated
-            # from ``mode``, so even a future change that weakens the
-            # validator can't reach this execute() with attacker bytes.
-            conn.execute(_JOURNAL_MODE_SQL[mode])
-        if self._autocommit:
-            conn.isolation_level = None
+        mode = _validate_journal_mode(journal_mode) if journal_mode else None
+        conn = sqlite3.connect(self.database, check_same_thread=False)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            if mode is not None:
+                # SQL is selected from a hard-coded mapping, not concatenated
+                # from ``mode``, so even a future change that weakens the
+                # validator can't reach this execute() with attacker bytes.
+                conn.execute(_JOURNAL_MODE_SQL[mode])
+            if self._autocommit:
+                conn.isolation_level = None
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
         return conn
 
     def get_connection(self) -> sqlite3.Connection:
@@ -141,10 +160,14 @@ class SQLiteDatabaseWrapper:
                     conn.close()
                 except Exception:
                     pass
+                with self._conns_lock:
+                    self._conns.pop(threading.get_ident(), None)
                 conn = None
         if conn is None:
             conn = self._new_connection()
             self._local.conn = conn
+            with self._conns_lock:
+                self._conns[threading.get_ident()] = conn
         return conn
 
     @property
@@ -340,8 +363,21 @@ class SQLiteDatabaseWrapper:
         return {"open": conn is not None, "vendor": "sqlite"}
 
     def close(self):
-        if hasattr(self._local, "conn") and self._local.conn:
-            self._local.conn.close()
+        # Close every connection opened against this wrapper, regardless of
+        # which thread opened it. ``check_same_thread=False`` is set on
+        # creation so cross-thread close is safe. The thread-local on the
+        # calling thread is also reset; sibling threads that still hold a
+        # reference will fall through ``get_connection``'s liveness probe
+        # on next use and reopen.
+        with self._conns_lock:
+            conns = list(self._conns.values())
+            self._conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if getattr(self._local, "conn", None) is not None:
             self._local.conn = None
 
 
@@ -361,19 +397,70 @@ class SQLiteAsyncDatabaseWrapper:
     def _adapt(sql: str) -> str:
         return sql.replace("%s", "?")
 
+    @staticmethod
+    def _force_close_sync(conn) -> None:
+        """Tear down an :mod:`aiosqlite` Connection without an event loop.
+
+        Used when the loop a connection was opened on has been closed —
+        ``await conn.close()`` would have to be scheduled on a dead loop.
+        ``aiosqlite.Connection.stop()`` queues a close-and-stop callable
+        on the worker thread (which can run without any event loop and
+        does the actual ``sqlite3.Connection.close``) and survives the
+        no-running-loop case by setting its internal future to ``None``.
+        We join the worker afterwards so the underlying handle is closed
+        before the wrapper's reference is dropped — otherwise the GC
+        finalises the sqlite3 handle later as
+        ``ResourceWarning: unclosed database`` and a few of these were
+        enough under ``pytest -n 4`` to keep the interpreter from
+        exiting cleanly.
+
+        Best-effort: every step is wrapped because the only thing worse
+        than leaking a connection is raising while trying to release one.
+        """
+        try:
+            conn.stop()
+        except Exception:
+            pass
+        worker = getattr(conn, "_thread", None)
+        if worker is not None and worker.is_alive():
+            try:
+                # Five seconds is generous for closing an in-flight sqlite
+                # handle; we don't want a stuck worker to block teardown
+                # indefinitely.
+                worker.join(timeout=5.0)
+            except Exception:
+                pass
+
     async def _check_loop(self) -> None:
         """Reset connection and lock if the running event loop has changed."""
         current_loop = asyncio.get_running_loop()
         if self._loop is not current_loop:
-            # Don't await close() on a connection from a dead loop — its
-            # worker thread is daemonized and will be reaped at exit. Just
-            # drop the reference so the next op opens a fresh connection.
+            old_conn = self._conn
+            old_loop = self._loop
             self._conn = None
             self._loop = current_loop
             self._lock = asyncio.Lock()
+            # Best-effort cleanup of the connection from the previous loop.
+            # If that loop is still alive, schedule the proper async close on
+            # it; otherwise force-close the underlying sqlite3 handle so we
+            # don't leak it to the GC as an unraisable ResourceWarning.
+            if old_conn is not None:
+                if old_loop is not None and not old_loop.is_closed():
+                    try:
+                        asyncio.run_coroutine_threadsafe(old_conn.close(), old_loop)
+                    except RuntimeError:
+                        self._force_close_sync(old_conn)
+                else:
+                    self._force_close_sync(old_conn)
 
     async def _new_connection(self):
         import aiosqlite
+
+        # Validate up front so an ImproperlyConfigured can't fire after the
+        # aiosqlite worker thread has started; the dangling Connection
+        # would otherwise leak as ``ResourceWarning: unclosed database``.
+        journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
+        mode = _validate_journal_mode(journal_mode) if journal_mode else None
 
         isolation = None if self._autocommit else ""
         pending = aiosqlite.connect(self.database, isolation_level=isolation)
@@ -395,12 +482,17 @@ class SQLiteAsyncDatabaseWrapper:
                 stacklevel=2,
             )
         conn = await pending
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA foreign_keys = ON")
-        journal_mode = self.settings.get("OPTIONS", {}).get("journal_mode")
-        if journal_mode:
-            mode = _validate_journal_mode(journal_mode)
-            await conn.execute(_JOURNAL_MODE_SQL[mode])
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            if mode is not None:
+                await conn.execute(_JOURNAL_MODE_SQL[mode])
+        except Exception:
+            try:
+                await conn.close()
+            except Exception:
+                pass
+            raise
         return conn
 
     async def _get_conn(self):
@@ -603,3 +695,20 @@ class SQLiteAsyncDatabaseWrapper:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+
+    def force_close_sync(self) -> None:
+        """Release the held aiosqlite connection from a non-async context.
+
+        Called by the global :func:`dorm.db.connection.reset_connections`
+        and the atexit hook. Always tears down deterministically rather
+        than scheduling an async close on the original loop —
+        ``run_coroutine_threadsafe`` accepts the call when the loop is
+        not closed, but if the loop isn't actively running the close
+        never executes and the underlying sqlite3 handle still leaks at
+        GC time as ``ResourceWarning: unclosed database``.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        self._conn = None
+        self._force_close_sync(conn)

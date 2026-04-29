@@ -247,9 +247,16 @@ class TestDormSchemaWithNewFields:
         # with an unknown priority gets the standard 422.
         with pytest.raises(ValidationError):
             TaskSchema.model_validate({"name": "x", "priority": "urgent"})
-        # ``priority`` has a default in the model so the schema treats
-        # it as optional → ``Priority | None``.
-        assert TaskSchema.model_fields["priority"].annotation == (Priority | None)
+        # ``priority`` has a default in the model: the schema marks
+        # it as not-required AND propagates the real default
+        # (``Priority.LOW``) instead of the placeholder ``None``.
+        # Omitting it now yields the model's real default rather than
+        # silently substituting ``None``.
+        f = TaskSchema.model_fields["priority"]
+        assert f.annotation is Priority
+        assert f.is_required() is False
+        assert f.default is Priority.LOW
+        assert TaskSchema.model_validate({"name": "x"}).priority is Priority.LOW  # type: ignore
 
     def test_array_field_validates_element_type(self):
         class _Article(dorm.Model):

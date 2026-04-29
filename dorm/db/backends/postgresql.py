@@ -798,6 +798,32 @@ class PostgreSQLAsyncDatabaseWrapper:
             _lifecycle.info("async pool closed")
             _lifecycle.debug("async pool closed: db=%s", self._dsn.get("dbname"))
 
+    def force_close_sync(self) -> None:
+        """Release the held pool from a non-async context.
+
+        Called from :func:`dorm.db.connection.reset_connections` and the
+        atexit hook. If the loop the pool was opened on is still alive we
+        schedule ``pool.close()`` on it; otherwise we drop the references
+        and rely on socket reclamation at process exit. We never block
+        the caller — sync teardown can't await."""
+        pool = self._pool
+        loop = self._loop
+        autocommit_conn = self._autocommit_conn
+        self._pool = None
+        self._loop = None
+        self._autocommit_conn = None
+        if loop is not None and not loop.is_closed():
+            if pool is not None:
+                try:
+                    asyncio.run_coroutine_threadsafe(pool.close(), loop)
+                except RuntimeError:
+                    pass
+            if autocommit_conn is not None:
+                try:
+                    asyncio.run_coroutine_threadsafe(autocommit_conn.close(), loop)
+                except RuntimeError:
+                    pass
+
     async def notify(self, channel: str, payload: str = "") -> None:
         """Send a ``NOTIFY`` to *channel* with optional *payload*.
 

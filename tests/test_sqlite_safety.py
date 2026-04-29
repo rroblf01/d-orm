@@ -59,9 +59,15 @@ def test_sync_wrapper_accepts_valid_journal_mode(tmp_path):
     wrapper = SQLiteDatabaseWrapper(
         {"NAME": str(tmp_path / "y.db"), "OPTIONS": {"journal_mode": "wal"}}
     )
-    conn = wrapper.get_connection()
-    row = conn.execute("PRAGMA journal_mode").fetchone()
-    assert row[0].upper() == "WAL"
+    try:
+        conn = wrapper.get_connection()
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        assert row[0].upper() == "WAL"
+    finally:
+        # The wrapper isn't registered in dorm's connection cache so
+        # ``reset_connections`` can't clean it up — close manually to
+        # release the sqlite3 handle.
+        wrapper.close()
 
 
 @pytest.mark.asyncio
@@ -79,10 +85,12 @@ async def test_async_wrapper_accepts_valid_journal_mode(tmp_path):
         {"NAME": str(tmp_path / "b.db"), "OPTIONS": {"journal_mode": "WAL"}}
     )
     conn = await wrapper._new_connection()
-    cur = await conn.execute("PRAGMA journal_mode")
-    row = await cur.fetchone()
-    assert row[0].upper() == "WAL"
-    await conn.close()
+    try:
+        cur = await conn.execute("PRAGMA journal_mode")
+        row = await cur.fetchone()
+        assert row[0].upper() == "WAL"
+    finally:
+        await conn.close()
 
 
 # ── execute_script redundancy + atomic interaction ───────────────────────────
