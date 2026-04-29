@@ -27,6 +27,7 @@ una sola instalación cubres ambos modos.
 
 ## Lifespan de la app
 
+Este paso es opcional pero recomendado para producción.
 Configura dorm en un lifespan de FastAPI y limpia al apagar:
 
 ```python

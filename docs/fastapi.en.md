@@ -25,6 +25,7 @@ their sync counterparts, so a single install covers both modes.
 
 ## App lifespan
 
+This step is optional but recommended for production.
 Configure dorm in a FastAPI lifespan and clean up on shutdown:
 
 ```python
