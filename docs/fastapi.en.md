@@ -133,14 +133,14 @@ async def create_author(payload: AuthorIn) -> Author:
 
 @router.get("/{author_id}", response_model=AuthorOut)
 async def get_author(author_id: int) -> Author:
-    author = await Author.objects.get_or_none(pk=author_id)
+    author = await Author.objects.aget_or_none(pk=author_id)
     if author is None:
         raise HTTPException(404, "Not found")
     return author
 
 @router.get("", response_model=list[AuthorOut])
 async def list_authors() -> list[Author]:
-    return [a async for a in Author.objects.all()]
+    return Author.objects.all()
 
 @router.patch("/{author_id}", response_model=AuthorOut)
 async def patch_author(author_id: int, payload: AuthorIn) -> Author:
@@ -247,7 +247,7 @@ link the browser can fetch directly. The endpoint code doesn't change.
 ```python
 @router.get("", response_model=list[DocumentOut])
 async def list_documents():
-    docs = [d async for d in Document.objects.order_by("-id")]
+    docs = Document.objects.order_by("-id")
     return [
         DocumentOut.model_validate(d).model_copy(
             update={"url": d.attachment.url if d.attachment else None}
