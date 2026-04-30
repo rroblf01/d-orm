@@ -967,7 +967,13 @@ class SQLQuery:
             _validate_identifier(fname)
             col_name = fname
 
-        if self.joins:
+        # Qualify with the table alias whenever JOINs are in flight —
+        # both WHERE-derived FK joins (``self.joins``) and
+        # ``select_related`` joins create the chance of an identical
+        # column name on multiple tables. A bare ``"name"`` would
+        # then trigger ``ambiguous column name`` on PG (and silently
+        # pick the wrong table on SQLite).
+        if self.joins or self.select_related_fields:
             return f'"{current_alias}"."{col_name}"'
         return f'"{col_name}"'
 

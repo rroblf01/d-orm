@@ -473,6 +473,21 @@ class DecimalField(Field[decimal.Decimal]):
             return None
         return decimal.Decimal(str(value))
 
+    def from_db_value(self, value):
+        # SQLite stores NUMERIC with REAL affinity, so the driver
+        # returns a Python ``float`` — not a :class:`decimal.Decimal`
+        # as the field annotation promises. Round-trip through ``str``
+        # so the returned value preserves the column's declared
+        # precision (``Decimal('1.0001')``, not ``1.00009999...``).
+        # PostgreSQL's psycopg adapter already returns ``Decimal`` so
+        # the conversion is a no-op there; explicit guard keeps that
+        # path zero-cost.
+        if value is None:
+            return None
+        if isinstance(value, decimal.Decimal):
+            return value
+        return decimal.Decimal(str(value))
+
     def get_db_prep_value(self, value):
         if value is None:
             return None
