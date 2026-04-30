@@ -66,26 +66,45 @@ jobs:
         # --cov-fail-under floors the line-coverage at the current level
         # so accidental drops break CI. Raise the number whenever you
         # add tests; never silently lower it.
-        run: uv run pytest -n 4 --tb=short -q --cov=dorm --cov-fail-under=83
+        run: uv run pytest -n 2 --tb=short -q --cov=dorm --cov-fail-under=83
 
-      - name: Dump faulthandler traces (worker crashes only)
+      - name: Dump crash diagnostics
         # Worker crashes (``node down: Not properly terminated``) leave
-        # no Python traceback. ``conftest.py`` enables faulthandler to
-        # ``/tmp/dorm-faults/{worker_id}.log`` so the C-level stack
-        # survives the worker's death. Surface those files when the
-        # job fails so a maintainer can read the crash frame.
+        # no Python traceback. Three sources of signal:
+        #  1. faulthandler files — populated only for catchable
+        #     signals (SIGSEGV / SIGABRT / SIGFPE / SIGBUS / SIGILL).
+        #     Empty files mean the worker died from a signal we can't
+        #     intercept, almost always SIGKILL from the OOM killer.
+        #  2. ``dmesg`` — when the OOM killer fires it logs ``Killed
+        #     process N (python) total-vm:..., anon-rss:..., file-rss:...``
+        #     to the kernel ring buffer. That's the smoking gun for
+        #     memory-pressure crashes that bypass faulthandler.
+        #  3. ``free -h`` — current memory state for context.
         if: failure()
         run: |
+          echo "=== faulthandler captures ==="
           if [ -d /tmp/dorm-faults ]; then
-            for f in /tmp/dorm-faults/*.log; do
-              [ -s "$f" ] || continue
-              echo "── $f ──────────────────────────────────────"
-              cat "$f"
-              echo
+            shopt -s nullglob
+            traces=(/tmp/dorm-faults/*.log)
+            empty=1
+            for f in "${traces[@]}"; do
+              if [ -s "$f" ]; then
+                echo "── $f ──────────────────────────────────────"
+                cat "$f"
+                echo
+                empty=0
+              fi
             done
+            [ "$empty" = "1" ] && echo "(all worker fault logs empty — uncatchable signal, see dmesg)"
           else
-            echo "no faulthandler traces captured"
+            echo "(no fault dir created)"
           fi
+          echo
+          echo "=== kernel log (last 100 lines) ==="
+          sudo dmesg -T | tail -100 || dmesg -T | tail -100 || echo "(dmesg unavailable)"
+          echo
+          echo "=== memory ==="
+          free -h || true
 
   # Catch PG-version-specific behavior (advisory locks, IDENTITY columns,
   # syntax differences) by running the suite against the supported range.
@@ -138,23 +157,42 @@ jobs:
         # --cov-fail-under floors the line-coverage at the current level
         # so accidental drops break CI. Raise the number whenever you
         # add tests; never silently lower it.
-        run: uv run pytest -n 4 --tb=short -q --cov=dorm --cov-fail-under=83
+        run: uv run pytest -n 2 --tb=short -q --cov=dorm --cov-fail-under=83
 
-      - name: Dump faulthandler traces (worker crashes only)
+      - name: Dump crash diagnostics
         # Worker crashes (``node down: Not properly terminated``) leave
-        # no Python traceback. ``conftest.py`` enables faulthandler to
-        # ``/tmp/dorm-faults/{worker_id}.log`` so the C-level stack
-        # survives the worker's death. Surface those files when the
-        # job fails so a maintainer can read the crash frame.
+        # no Python traceback. Three sources of signal:
+        #  1. faulthandler files — populated only for catchable
+        #     signals (SIGSEGV / SIGABRT / SIGFPE / SIGBUS / SIGILL).
+        #     Empty files mean the worker died from a signal we can't
+        #     intercept, almost always SIGKILL from the OOM killer.
+        #  2. ``dmesg`` — when the OOM killer fires it logs ``Killed
+        #     process N (python) total-vm:..., anon-rss:..., file-rss:...``
+        #     to the kernel ring buffer. That's the smoking gun for
+        #     memory-pressure crashes that bypass faulthandler.
+        #  3. ``free -h`` — current memory state for context.
         if: failure()
         run: |
+          echo "=== faulthandler captures ==="
           if [ -d /tmp/dorm-faults ]; then
-            for f in /tmp/dorm-faults/*.log; do
-              [ -s "$f" ] || continue
-              echo "── $f ──────────────────────────────────────"
-              cat "$f"
-              echo
+            shopt -s nullglob
+            traces=(/tmp/dorm-faults/*.log)
+            empty=1
+            for f in "${traces[@]}"; do
+              if [ -s "$f" ]; then
+                echo "── $f ──────────────────────────────────────"
+                cat "$f"
+                echo
+                empty=0
+              fi
             done
+            [ "$empty" = "1" ] && echo "(all worker fault logs empty — uncatchable signal, see dmesg)"
           else
-            echo "no faulthandler traces captured"
+            echo "(no fault dir created)"
           fi
+          echo
+          echo "=== kernel log (last 100 lines) ==="
+          sudo dmesg -T | tail -100 || dmesg -T | tail -100 || echo "(dmesg unavailable)"
+          echo
+          echo "=== memory ==="
+          free -h || true
