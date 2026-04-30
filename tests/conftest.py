@@ -1,5 +1,7 @@
+import faulthandler
 import json
 import os
+import sys
 import tempfile
 import time
 import psycopg
@@ -9,6 +11,17 @@ import pytest
 import sqlite3
 
 from dorm.db.connection import reset_connections
+
+
+# Worker crashes on Python 3.14 + PG 16 under ``pytest -n 4`` come back
+# as ``[gw2] node down: Not properly terminated`` with no Python
+# traceback — the interpreter aborted at the C level (psycopg + libpq
+# + asyncio cross-loop pool teardown is the prime suspect). Enabling
+# ``faulthandler`` writes a native stack to stderr on SIGSEGV / SIGABRT,
+# so the next time a worker dies we get the exact C frame in the CI log
+# instead of guessing. Cheap, opt-out via ``DORM_DISABLE_FAULTHANDLER=1``.
+if not os.environ.get("DORM_DISABLE_FAULTHANDLER"):
+    faulthandler.enable(file=sys.stderr, all_threads=True)
 
 # Re-export the transactional_db fixtures so test files can request them
 # by name. They live in dorm.test for end users; here we make them
