@@ -13,15 +13,34 @@ import sqlite3
 from dorm.db.connection import reset_connections
 
 
-# Worker crashes on Python 3.14 + PG 16 under ``pytest -n 4`` come back
-# as ``[gw2] node down: Not properly terminated`` with no Python
-# traceback — the interpreter aborted at the C level (psycopg + libpq
-# + asyncio cross-loop pool teardown is the prime suspect). Enabling
-# ``faulthandler`` writes a native stack to stderr on SIGSEGV / SIGABRT,
-# so the next time a worker dies we get the exact C frame in the CI log
-# instead of guessing. Cheap, opt-out via ``DORM_DISABLE_FAULTHANDLER=1``.
+# Worker crashes on Python 3.14 under ``pytest -n 4`` come back as
+# ``[gwN] node down: Not properly terminated`` with no Python
+# traceback. The interpreter aborts at the C level (psycopg + libpq
+# + asyncio cross-loop pool teardown is the prime suspect on the
+# FastAPI TestClient tests). Writing ``faulthandler`` output to
+# ``sys.stderr`` doesn't help because xdist captures worker stderr
+# through a pipe and the buffer is lost when the worker dies before
+# drain — so we route the native trace to a per-worker file under
+# ``$DORM_FAULT_DIR`` (default ``/tmp/dorm-faults``). The CI step
+# that runs after the suite can ``cat`` those files to surface the C
+# stack in the log. Opt-out via ``DORM_DISABLE_FAULTHANDLER=1``.
 if not os.environ.get("DORM_DISABLE_FAULTHANDLER"):
-    faulthandler.enable(file=sys.stderr, all_threads=True)
+    _fault_dir = os.environ.get("DORM_FAULT_DIR", "/tmp/dorm-faults")
+    try:
+        os.makedirs(_fault_dir, exist_ok=True)
+        # ``PYTEST_XDIST_WORKER`` is set per worker (``gw0`` / ``gw1`` /
+        # ...). When running outside xdist it's unset — fall back to
+        # the pid so two parallel ``pytest`` invocations don't collide.
+        _worker_id = os.environ.get("PYTEST_XDIST_WORKER") or f"pid-{os.getpid()}"
+        _fault_path = os.path.join(_fault_dir, f"{_worker_id}.log")
+        # Open in line-buffered append mode so concurrent workers don't
+        # truncate each other's traces on a re-run.
+        _fault_fp = open(_fault_path, "a", buffering=1)
+        faulthandler.enable(file=_fault_fp, all_threads=True)
+    except OSError:
+        # Fall back to stderr if the fault dir isn't writable — better
+        # than silently disabling the handler.
+        faulthandler.enable(file=sys.stderr, all_threads=True)
 
 # Re-export the transactional_db fixtures so test files can request them
 # by name. They live in dorm.test for end users; here we make them

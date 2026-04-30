@@ -68,6 +68,25 @@ jobs:
         # add tests; never silently lower it.
         run: uv run pytest -n 4 --tb=short -q --cov=dorm --cov-fail-under=83
 
+      - name: Dump faulthandler traces (worker crashes only)
+        # Worker crashes (``node down: Not properly terminated``) leave
+        # no Python traceback. ``conftest.py`` enables faulthandler to
+        # ``/tmp/dorm-faults/{worker_id}.log`` so the C-level stack
+        # survives the worker's death. Surface those files when the
+        # job fails so a maintainer can read the crash frame.
+        if: failure()
+        run: |
+          if [ -d /tmp/dorm-faults ]; then
+            for f in /tmp/dorm-faults/*.log; do
+              [ -s "$f" ] || continue
+              echo "── $f ──────────────────────────────────────"
+              cat "$f"
+              echo
+            done
+          else
+            echo "no faulthandler traces captured"
+          fi
+
   # Catch PG-version-specific behavior (advisory locks, IDENTITY columns,
   # syntax differences) by running the suite against the supported range.
   # Latest Python only — Python compat is covered by the matrix above.
@@ -120,3 +139,22 @@ jobs:
         # so accidental drops break CI. Raise the number whenever you
         # add tests; never silently lower it.
         run: uv run pytest -n 4 --tb=short -q --cov=dorm --cov-fail-under=83
+
+      - name: Dump faulthandler traces (worker crashes only)
+        # Worker crashes (``node down: Not properly terminated``) leave
+        # no Python traceback. ``conftest.py`` enables faulthandler to
+        # ``/tmp/dorm-faults/{worker_id}.log`` so the C-level stack
+        # survives the worker's death. Surface those files when the
+        # job fails so a maintainer can read the crash frame.
+        if: failure()
+        run: |
+          if [ -d /tmp/dorm-faults ]; then
+            for f in /tmp/dorm-faults/*.log; do
+              [ -s "$f" ] || continue
+              echo "── $f ──────────────────────────────────────"
+              cat "$f"
+              echo
+            done
+          else
+            echo "no faulthandler traces captured"
+          fi
