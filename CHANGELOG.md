@@ -6,6 +6,109 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-04-30
+
+The 2.4 release ships four feature additions targeting the
+performance / DX axis: a built-in N+1 detector, ``prefetch_related``
+support for reverse ``GenericRelation``, ``only()`` / ``defer()``
+that compose with ``select_related`` via dotted paths, and the
+``create_schema_for`` / ``update_schema_for`` Pydantic helpers for
+typical CRUD request bodies.
+
+### Added — N+1 detector
+
+- **``dorm.contrib.nplusone.NPlusOneDetector``** — context manager
+  that hooks the :data:`pre_query` signal, normalises every executed
+  SQL to a parameter-stripped template, counts hits per template,
+  and (in strict mode) raises :class:`NPlusOneError` at exit when a
+  template fired more than ``threshold`` times. Strict mode is the
+  default; ``raise_on_detect=False`` produces a non-fatal report
+  via ``detector.report()`` for staging-style auditing.
+- **``assert_no_nplusone()``** — pytest-friendly helper that wraps
+  the detector in strict mode and surfaces the violation as a
+  regular ``AssertionError`` (so pytest's traceback rewriting
+  works). Designed for use inside individual test functions.
+- **DDL noise filtered by default** — ``CREATE`` / ``DROP`` /
+  ``ALTER`` / ``PRAGMA`` / transaction control statements are
+  ignored so test-fixture bookkeeping doesn't trip the detector.
+  Caller can override via ``ignore=`` for custom suppression.
+- Identifiers (``"authors"."id"``) are preserved verbatim during
+  normalisation; only string / numeric / NULL **literals** get
+  collapsed to ``?``. This keeps unrelated queries from accidentally
+  bucketing together while still catching parameter-only variations
+  of the same shape.
+
+### Added — `prefetch_related` on reverse `GenericRelation`
+
+- **Reverse polymorphic relations now batch.**
+  ``Article.objects.prefetch_related("tags")`` resolves every tag
+  pointing at every article in a single SELECT
+  (``content_type = ct AND object_id IN (…)``), groups by
+  ``object_id``, and stamps each article's manager cache. The
+  ``GenericRelation`` manager's ``.all()`` reads from that cache
+  before falling back to the live query — same contract as Django's
+  prefetch + reverse-FK relation.
+- **Async parity** via ``_aprefetch_generic_relation``, dispatched
+  alongside the existing async prefetch coroutines through
+  :func:`asyncio.gather`.
+- **Custom ``Prefetch(queryset=…)`` is honoured** — the user-supplied
+  queryset's filters / ordering / select_related survive; the
+  ``content_type`` + ``object_id__in`` predicates are AND-ed onto it.
+
+### Added — `only()` / `defer()` compose with `select_related`
+
+- **Dotted paths now restrict the related projection.**
+  ``Author.objects.select_related("publisher").only("name", "publisher__name")``
+  emits a single LEFT OUTER JOIN that pulls only ``"authors"."id"``,
+  ``"authors"."name"``, ``"publishers"."id"``, and
+  ``"publishers"."name"`` — previously the projection-restriction
+  short-circuited the JOIN entirely, silently degrading the query
+  to a per-row N+1 on the related side.
+- **PK is always implicit.** Even when the user lists only non-PK
+  related columns, the related model's PK column is added to the
+  projection so the hydrated instance keeps a valid identity.
+- ``defer("publisher__bio")`` is the inverse: keeps every related
+  column except the named one(s).
+- **Bare names retain legacy semantics.** ``only("name")`` (no
+  dotted path) restricts only the parent model; the related side
+  loads in full. The parent and related restrictions live in
+  separate state buckets so combining them
+  (``only("name").defer("publisher__bio")``) works.
+
+### Added — Pydantic Create / Update schema helpers
+
+- **``create_schema_for(model)``** — drops auto-incrementing PKs
+  and ``GeneratedField`` columns automatically (server-controlled),
+  keeps required fields required, propagates real defaults. Plain
+  ``BaseModel`` subclass suitable as a FastAPI request body. Default
+  class name ``f"{Model.__name__}Create"``.
+- **``update_schema_for(model)``** — every remaining column becomes
+  ``T | None`` with default ``None`` (PATCH semantics). Built via
+  :func:`pydantic.create_model` directly so the field-default
+  propagation can be neutralised — a column with ``default=False``
+  must not advertise that default to the client when partial-update
+  semantics say "no change". Constraint translation (``max_length``,
+  ``ge=0``, ``Literal[…]`` for ``choices``, …) still applies — PATCH
+  bodies aren't a free pass on validation.
+- Both helpers accept ``name=``, ``exclude=`` (extends the auto-PK
+  drop), and ``base=`` (custom ``BaseModel`` ancestor).
+
+### Fixed — `select_related` + `only()` was silently a no-op
+
+- The SQL builder used to short-circuit the ``select_related`` JOIN
+  whenever ``only()`` / ``defer()`` was active, on the (incorrect)
+  assumption that the restricted projection would conflict with the
+  aliased SR columns. The aliased columns (``"_sr_<path>_<col>"``)
+  are namespaced by construction, so emitting both is safe. The
+  short-circuit is gone; SR JOINs now run alongside any projection
+  restriction.
+- ``ORDER BY`` now qualifies the parent column with the table name
+  whenever any JOIN is in flight (WHERE-derived **or**
+  select_related). The previous "qualify only when ``self.joins`` is
+  truthy" rule missed the SR case and produced ``ambiguous column
+  name: id`` once a parent ``"id"`` and a related ``"id"`` both
+  showed up unqualified.
+
 ## [2.3.1] - 2026-04-29
 
 ### Performance — `prefetch_related` on `GenericForeignKey`

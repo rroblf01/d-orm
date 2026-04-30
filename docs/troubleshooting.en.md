@@ -84,6 +84,36 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 ```
 
+## My endpoint runs N queries instead of 1
+
+**Cause.** A descriptor read inside a loop hits the DB once per row.
+Common shapes:
+
+* `for author in Author.objects.all(): print(author.publisher.name)`
+  — N selects on `publishers`. Fix with `select_related("publisher")`.
+* `for art in Article.objects.all(): list(art.tags.all())` — N
+  selects on the through table. Fix with `prefetch_related("tags")`.
+
+**How to confirm.** Wrap the suspect block in
+`dorm.contrib.nplusone.NPlusOneDetector`:
+
+```python
+from dorm.contrib.nplusone import NPlusOneDetector
+
+with NPlusOneDetector(threshold=5):
+    handler()                 # raises NPlusOneError if any SQL template
+                              # runs more than 5 times
+```
+
+The error message includes the parameter-stripped SQL template that
+tripped the threshold, so you can grep your code for the offender.
+For tests, use the `assert_no_nplusone()` helper — it raises an
+`AssertionError` so pytest renders it like a regular failure.
+
+For staging-style auditing without failing fast, build the detector
+with `raise_on_detect=False` and read `detector.findings` /
+`detector.report()` after the block.
+
 ## `EmailField` accepts garbage
 
 **Cause.** This was a real bug pre-2.0. If you still see it, you're

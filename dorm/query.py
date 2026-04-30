@@ -67,6 +67,15 @@ class SQLQuery:
         self.group_by_fields: list[str] = []
         self.having_nodes: list = []
         self.select_related_fields: list[str] = []
+        # When ``only()`` / ``defer()`` is called with a dotted path
+        # (``only("name", "publisher__name")``) the trailing parts apply
+        # to a select_related-loaded relation rather than the parent
+        # model. Layout: ``{relation_path: {col_name, …}}``. The PK of
+        # the related model is always implicitly included so the
+        # hydrated instance has a valid identity even when the user
+        # only listed non-PK columns. Empty / missing entry =
+        # "load every column on this relation" (the legacy default).
+        self.selected_related_fields: dict[str, set[str]] = {}
         # Strings are bare relation names (``"books"``); ``Prefetch``
         # instances carry an alternate queryset and/or ``to_attr``.
         # Both shapes are accepted by ``QuerySet.prefetch_related``.
@@ -103,6 +112,9 @@ class SQLQuery:
         q.group_by_fields = list(self.group_by_fields)
         q.having_nodes = list(self.having_nodes)
         q.select_related_fields = list(self.select_related_fields)
+        q.selected_related_fields = {
+            k: set(v) for k, v in self.selected_related_fields.items()
+        }
         q.prefetch_related_fields = list(self.prefetch_related_fields)
         q.ctes = list(self.ctes)
         q._outer_alias = self._outer_alias
@@ -277,7 +289,14 @@ class SQLQuery:
         # select_related: build LEFT OUTER JOINs and prefixed columns (supports nested paths)
         sr_join_clauses: list[str] = []
         sr_extra_cols = ""
-        if self.select_related_fields and self.selected_fields is None:
+        # Previously this short-circuited when ``selected_fields`` was
+        # set (i.e. ``only()`` / ``defer()`` restricted the parent
+        # projection). That meant the user couldn't compose
+        # ``select_related("publisher").only("name", "publisher__name")``
+        # — SR was silently dropped. The aliased SR columns
+        # (``"_sr_<path>_<col>"``) don't collide with the parent
+        # projection by construction, so it's safe to emit both.
+        if self.select_related_fields:
             sr_parts: list[str] = []
             added_aliases: set[str] = set()
             for path_str in self.select_related_fields:
@@ -302,12 +321,21 @@ class SQLQuery:
                             sr_join_clauses.append(
                                 f'LEFT OUTER JOIN "{join_table}" AS "{sr_alias}" ON {on_cond}'
                             )
+                            # ``only()`` / ``defer()`` may restrict which
+                            # columns of this relation we hydrate. The
+                            # restriction set always includes the PK
+                            # (added by ``QuerySet.only``) so the
+                            # hydrated instance keeps its identity.
+                            allowed = self.selected_related_fields.get(step_path)
                             for rf in rel_model._meta.fields:
-                                if rf.column:
-                                    sr_parts.append(
-                                        f'"{sr_alias}"."{rf.column}" '
-                                        f'AS "_sr_{step_path}_{rf.column}"'
-                                    )
+                                if not rf.column:
+                                    continue
+                                if allowed is not None and rf.column not in allowed:
+                                    continue
+                                sr_parts.append(
+                                    f'"{sr_alias}"."{rf.column}" '
+                                    f'AS "_sr_{step_path}_{rf.column}"'
+                                )
                             added_aliases.add(sr_alias)
                         current_model = rel_model
                         current_table_alias = sr_alias
@@ -340,9 +368,14 @@ class SQLQuery:
                     # reference a non-existent ``"publisher"`` column.
                     leaf = self._resolve_field([fname])
                     column = leaf.column if leaf is not None and leaf.column else fname
+                    # Qualify the column whenever JOINs are in flight —
+                    # both WHERE-derived (``self.joins``) and
+                    # select_related JOINs make a bare ``"id"``
+                    # ambiguous because the related table also has one.
+                    needs_qualification = bool(self.joins) or bool(self.select_related_fields)
                     col = (
                         f'"{self.model._meta.db_table}"."{column}"'
-                        if self.joins
+                        if needs_qualification
                         else f'"{column}"'
                     )
                 order_parts.append(f"{col} {'DESC' if desc else 'ASC'}")

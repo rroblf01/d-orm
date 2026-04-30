@@ -190,6 +190,26 @@ def _is_generic_foreign_key(field: Any) -> bool:
     return isinstance(field, GenericForeignKey)
 
 
+def _is_generic_relation(field: Any) -> bool:
+    """Return True if *field* is a :class:`GenericRelation` instance.
+
+    Same duck-type-then-isinstance guard as
+    :func:`_is_generic_foreign_key`: the contenttypes module loads
+    only if the project actually uses it.
+    """
+    if not (
+        hasattr(field, "content_type_field")
+        and hasattr(field, "object_id_field")
+        and getattr(field, "concrete", True) is False
+    ):
+        return False
+    try:
+        from .contrib.contenttypes.fields import GenericRelation
+    except ImportError:  # pragma: no cover — contrib is always available
+        return False
+    return isinstance(field, GenericRelation)
+
+
 def _explain_row_to_str(row: Any) -> str:
     """Render a single ``EXPLAIN`` output row as a string. PG returns one
     column per row containing the plan line; SQLite returns multiple
@@ -393,25 +413,96 @@ class QuerySet(Generic[_T]):
         return qs
 
     def only(self, *fields: str) -> QuerySet[_T]:
+        """Restrict the SELECT projection to a subset of columns.
+
+        Bare names (``only("name", "age")``) restrict the *parent*
+        model. Dotted paths (``only("name", "publisher__country")``)
+        restrict a ``select_related``-joined relation as well — the
+        related-side projection drops every column not listed,
+        keeping the JOIN narrow when you only want a label or two
+        from a fat related table. The PK column of every restricted
+        side is always implicitly included so hydrated instances
+        keep their identity.
+        """
         qs = self._clone()
+        own_fields: list[str] = []
+        related_only: dict[str, set[str]] = {}
+        for spec in fields:
+            if "__" in spec:
+                # ``relation__col`` (one level deep). Resolve the
+                # relation field to find its target model so we can
+                # translate the leaf name to its real column.
+                relation, leaf = spec.split("__", 1)
+                _validate_identifier(relation)
+                rel_field = self.model._meta.get_field(relation)
+                rel_model = rel_field._resolve_related_model()  # type: ignore[attr-defined]
+                pk_col = rel_model._meta.pk.column
+                # Translate Python field name → DB column on the
+                # related model; allow either to be passed.
+                try:
+                    leaf_field = rel_model._meta.get_field(leaf)
+                    leaf_col = leaf_field.column or leaf
+                except Exception:
+                    leaf_col = leaf
+                bucket = related_only.setdefault(relation, {pk_col})
+                bucket.add(leaf_col)
+            else:
+                _validate_identifier(spec)
+                own_fields.append(spec)
+
         pk_col = self.model._meta.pk.column if self.model._meta.pk else "id"
-        field_names = list(fields)
-        if pk_col not in field_names:
-            field_names = [pk_col] + field_names
-        qs._query.selected_fields = field_names
-        qs._query.deferred_loading = True
+        if pk_col not in own_fields:
+            own_fields = [pk_col] + own_fields
+        # Empty ``own_fields`` (only related restrictions provided)
+        # means "all parent columns" — leave selected_fields untouched
+        # so the legacy "select everything on parent" path still runs.
+        if any("__" not in s for s in fields) or not fields:
+            qs._query.selected_fields = own_fields
+            qs._query.deferred_loading = True
+        for relation, cols in related_only.items():
+            qs._query.selected_related_fields[relation] = cols
         return qs
 
     def defer(self, *fields: str) -> QuerySet[_T]:
+        """Inverse of :meth:`only`: drop the named columns from the
+        SELECT.
+
+        Same dotted-path semantics — ``defer("publisher__bio")``
+        keeps every other column of the related ``publisher`` row but
+        excludes ``bio`` from the JOIN projection.
+        """
         qs = self._clone()
-        for f in fields:
-            _validate_identifier(f)
-        defer_set = set(fields)
+        own_defer: set[str] = set()
+        related_defer: dict[str, set[str]] = {}
+        for spec in fields:
+            if "__" in spec:
+                relation, leaf = spec.split("__", 1)
+                _validate_identifier(relation)
+                rel_field = self.model._meta.get_field(relation)
+                rel_model = rel_field._resolve_related_model()  # type: ignore[attr-defined]
+                try:
+                    leaf_field = rel_model._meta.get_field(leaf)
+                    leaf_col = leaf_field.column or leaf
+                except Exception:
+                    leaf_col = leaf
+                related_defer.setdefault(relation, set()).add(leaf_col)
+            else:
+                _validate_identifier(spec)
+                own_defer.add(spec)
+
         pk_col = self.model._meta.pk.column if self.model._meta.pk else "id"
-        all_cols = [f.column for f in self.model._meta.fields if f.column]
-        selected = [c for c in all_cols if c not in defer_set or c == pk_col]
-        qs._query.selected_fields = selected
-        qs._query.deferred_loading = True
+        if own_defer:
+            all_cols = [f.column for f in self.model._meta.fields if f.column]
+            selected = [c for c in all_cols if c not in own_defer or c == pk_col]
+            qs._query.selected_fields = selected
+            qs._query.deferred_loading = True
+        for relation, deferred_cols in related_defer.items():
+            rel_field = self.model._meta.get_field(relation)
+            rel_model = rel_field._resolve_related_model()  # type: ignore[attr-defined]
+            rel_pk = rel_model._meta.pk.column
+            rel_all = [f.column for f in rel_model._meta.fields if f.column]
+            kept = {c for c in rel_all if c not in deferred_cols or c == rel_pk}
+            qs._query.selected_related_fields[relation] = kept
         return qs
 
     def values(self, *fields: str) -> QuerySet[Any]:
@@ -905,6 +996,14 @@ class QuerySet(Generic[_T]):
                 self._prefetch_gfk(
                     instances, fname, field, user_qs=user_qs, to_attr=to_attr
                 )
+            elif field is not None and _is_generic_relation(field):
+                # Reverse polymorphic relation (`GenericRelation`):
+                # bulk-fetch every related row keyed by ``content_type
+                # = ct_for_self`` and ``object_id IN (pk, …)``. Mirrors
+                # the reverse-FK path but with the extra CT predicate.
+                self._prefetch_generic_relation(
+                    instances, fname, field, user_qs=user_qs, to_attr=to_attr
+                )
             elif field is not None and hasattr(field, "_resolve_related_model"):
                 # Forward FK
                 rel_model = field._resolve_related_model()
@@ -1172,6 +1271,66 @@ class QuerySet(Generic[_T]):
                 inst.__dict__[cache_key] = related.get(
                     inst.__dict__[fk_attname]
                 )
+
+    def _prefetch_generic_relation(
+        self,
+        instances: list[_T],
+        fname: str,
+        gr_field: Any,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
+    ) -> None:
+        """Bulk-resolve a :class:`GenericRelation` reverse accessor.
+
+        Without prefetch, ``article.tags.all()`` per row issues one
+        SELECT each — N+1 across a queryset of articles. We instead:
+
+        1. Resolve ``ContentType`` for ``self.model`` once (memoised
+           by :class:`ContentTypeManager`).
+        2. Run a single ``filter(content_type=ct, object_id__in=pks)``
+           against the related model.
+        3. Group the result by ``object_id`` and stash each list under
+           ``_prefetch_<fname>`` (or ``to_attr``) — the manager
+           returned by the descriptor reads from there before falling
+           back to a live query.
+
+        Total queries: 1 (CT lookup, almost always cache hit) + 1
+        (related rows). User-supplied ``Prefetch(queryset=…)`` is
+        honoured (the queryset's filters / ordering / select_related
+        survive); the same ``content_type`` and ``object_id__in``
+        predicates are AND-ed onto it.
+        """
+        from .contrib.contenttypes.models import ContentType
+
+        ct_attname = f"{gr_field.content_type_field}_id"
+        fk_attname = gr_field.object_id_field
+        related_model = gr_field._resolve_related()
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
+
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        if not src_pks:
+            for inst in instances:
+                inst.__dict__[cache_key] = []
+            return
+
+        ct = ContentType.objects.get_for_model(type(instances[0]))
+        base_qs = (
+            user_qs
+            if user_qs is not None
+            else QuerySet(related_model, self._db)  # type: ignore[arg-type]
+        )
+        related_objs = list(
+            base_qs.filter(**{ct_attname: ct.pk, f"{fk_attname}__in": src_pks})
+        )
+
+        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        for obj in related_objs:
+            owner_id = obj.__dict__.get(fk_attname)
+            if owner_id in grouped:
+                grouped[owner_id].append(obj)
+        for inst in instances:
+            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
 
     def _prefetch_reverse_fk(
         self,
@@ -1866,6 +2025,34 @@ class QuerySet(Generic[_T]):
                     f"failed: {result}"
                 ) from result
 
+    async def _aprefetch_generic_relation(
+        self, instances: list[_T], fname: str, gr_field: Any
+    ) -> None:
+        """Async counterpart of :meth:`_prefetch_generic_relation`."""
+        from .contrib.contenttypes.models import ContentType
+
+        ct_attname = f"{gr_field.content_type_field}_id"
+        fk_attname = gr_field.object_id_field
+        related_model = gr_field._resolve_related()
+        cache_key = f"_prefetch_{fname}"
+
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        if not src_pks:
+            for inst in instances:
+                inst.__dict__[cache_key] = []
+            return
+
+        ct = await ContentType.objects.aget_for_model(type(instances[0]))
+        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        async for obj in QuerySet(related_model, self._db).filter(  # type: ignore[arg-type]
+            **{ct_attname: ct.pk, f"{fk_attname}__in": src_pks}
+        ):
+            owner_id = obj.__dict__.get(fk_attname)
+            if owner_id in grouped:
+                grouped[owner_id].append(obj)
+        for inst in instances:
+            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
+
     async def _aprefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
         """Async counterpart of :meth:`_prefetch_reverse_fk`."""
         from .related_managers import ReverseFKDescriptor
@@ -1986,6 +2173,8 @@ class QuerySet(Generic[_T]):
                 coros.append(self._aprefetch_m2m(instances, fname, field))
             elif field is not None and _is_generic_foreign_key(field):
                 coros.append(self._aprefetch_gfk(instances, fname, field))
+            elif field is not None and _is_generic_relation(field):
+                coros.append(self._aprefetch_generic_relation(instances, fname, field))
             elif field is not None and hasattr(field, "_resolve_related_model"):
                 coros.append(_one_forward_fk(fname, field))
             else:

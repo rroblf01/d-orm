@@ -86,6 +86,42 @@ AuthorPatch = schema_for(Author, optional=("name", "age", "email"))
 una instancia dorm directamente a `Schema.model_validate(obj)` o
 usarla como `response_model` de FastAPI.
 
+### `create_schema_for(...)` / `update_schema_for(...)` — bodies de request
+
+En endpoints CRUD típicos la forma del input diverge de la del
+output. Los dos helpers ahorran boilerplate:
+
+```python
+from dorm.contrib.pydantic import (
+    create_schema_for, update_schema_for, schema_for,
+)
+
+AuthorOut = schema_for(Author)              # response_model — fila completa
+AuthorCreate = create_schema_for(Author)    # body POST — sin auto-PK / sin GeneratedField
+AuthorUpdate = update_schema_for(Author)    # body PATCH — cada campo opcional con default None
+```
+
+* `create_schema_for` excluye automáticamente las PKs auto-incrementales
+  y las columnas `GeneratedField` (las rellena el servidor). Los
+  campos requeridos siguen requeridos. Los defaults se propagan —
+  un campo con `default=False` es opcional en Pydantic con el default
+  real.
+* `update_schema_for` además convierte cada campo restante en
+  `T | None` con default `None`, así el cliente puede omitir
+  cualquier subset. En el handler usa
+  `payload.model_dump(exclude_unset=True)` para iterar solo los
+  campos que el cliente realmente envió.
+
+```python
+@app.patch("/authors/{pk}")
+async def patch(pk: int, payload: AuthorUpdate):
+    author = await Author.objects.aget(pk=pk)
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(author, k, v)
+    await author.asave()
+    return AuthorOut.model_validate(author)
+```
+
 ### `DormSchema` — clase declarativa
 
 ```python

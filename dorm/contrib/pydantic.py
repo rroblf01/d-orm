@@ -679,4 +679,116 @@ class DormSchema(BaseModel, metaclass=DormSchemaMeta):
     )
 
 
-__all__ = ["schema_for", "DormSchema", "DormSchemaMeta"]
+def _auto_pk_excludes(model_cls: Type[Model]) -> tuple[str, ...]:
+    """Return the field names to drop for an ``input`` schema (Create
+    / Update). Auto-incrementing PKs and DB-computed ``GeneratedField``
+    columns are server-controlled — never accept them from the
+    request body. Anything else stays in scope so the caller can
+    further trim with ``exclude=`` if they want."""
+    out: list[str] = []
+    for f in model_cls._meta.fields:
+        if isinstance(f, AutoField):
+            out.append(f.name)
+            continue
+        if isinstance(f, GeneratedField):
+            out.append(f.name)
+            continue
+    return tuple(out)
+
+
+def create_schema_for(
+    model_cls: Type[Model],
+    *,
+    name: str | None = None,
+    exclude: tuple[str, ...] = (),
+    base: Type[BaseModel] = BaseModel,
+) -> Type[BaseModel]:
+    """Generate a Pydantic schema tuned for *Create* (POST) bodies.
+
+    Differences from :func:`schema_for`:
+
+    * Auto-incrementing PKs and ``GeneratedField`` columns are dropped
+      automatically — the server fills them. The caller can still
+      pass ``exclude=`` to drop more.
+    * Required dorm fields stay required; nullable dorm fields stay
+      ``T | None``. Defaults still propagate (a field with
+      ``default=False`` is optional in Pydantic terms with the real
+      default).
+
+    The result is a plain ``BaseModel`` subclass (no
+    ``from_attributes`` — Create payloads are dict-shaped, not
+    ORM-shaped). Suitable as a FastAPI ``request body`` model.
+    """
+    cls_name = name or f"{model_cls.__name__}Create"
+    excludes = tuple(set(exclude) | set(_auto_pk_excludes(model_cls)))
+    return schema_for(
+        model_cls, name=cls_name, exclude=excludes, base=base
+    )
+
+
+def update_schema_for(
+    model_cls: Type[Model],
+    *,
+    name: str | None = None,
+    exclude: tuple[str, ...] = (),
+    base: Type[BaseModel] = BaseModel,
+) -> Type[BaseModel]:
+    """Generate a Pydantic schema tuned for *Update* (PATCH) bodies.
+
+    Every column becomes optional with default ``None`` — the partial
+    update contract is "send only the fields you want to change".
+    Auto-incrementing PKs and ``GeneratedField`` columns are dropped
+    automatically (same rationale as :func:`create_schema_for`).
+
+    The handler is responsible for translating "omitted" to "no
+    change", typically via ``model_dump(exclude_unset=True)``::
+
+        @app.patch("/items/{pk}")
+        async def patch(pk: int, payload: ItemUpdate):
+            item = await Item.objects.aget(pk=pk)
+            for k, v in payload.model_dump(exclude_unset=True).items():
+                setattr(item, k, v)
+            await item.asave()
+
+    Built via :func:`pydantic.create_model` directly rather than
+    delegating to :func:`schema_for` so the field-default propagation
+    can be neutralised — every Update field carries default ``None``
+    regardless of the underlying column's ``default=...`` (which only
+    applies on create).
+    """
+    cls_name = name or f"{model_cls.__name__}Update"
+    excludes = set(exclude) | set(_auto_pk_excludes(model_cls))
+
+    fields: dict[str, tuple[Any, Any]] = {}
+    for f in model_cls._meta.fields:
+        if not f.column:
+            continue
+        if isinstance(f, ManyToManyField):
+            continue
+        if f.name in excludes:
+            continue
+        # Force ``T | None`` with default ``None`` regardless of the
+        # field's own ``has_default()``. The Pydantic side mustn't
+        # advertise a fabricated default for the partial-update body —
+        # that'd lie to clients about what gets persisted when they
+        # omit the field.
+        annotation = _finalize_annotation(_field_to_type(f), optional=True)
+        fields[f.name] = (annotation, None)
+
+    base_config = dict(getattr(base, "model_config", {}))
+    base_config.setdefault("arbitrary_types_allowed", True)
+    config = ConfigDict(**base_config)
+    if base is BaseModel:
+        return create_model(cls_name, __config__=config, **fields)  # type: ignore
+    attrs = {"model_config": config}
+    configured_base = type(f"_Configured{base.__name__}", (base,), attrs)
+    return create_model(cls_name, __base__=configured_base, **fields)  # type: ignore
+
+
+__all__ = [
+    "schema_for",
+    "create_schema_for",
+    "update_schema_for",
+    "DormSchema",
+    "DormSchemaMeta",
+]

@@ -84,6 +84,38 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 ```
 
+## Mi endpoint ejecuta N queries en vez de 1
+
+**Causa.** Una lectura de descriptor dentro de un bucle pega a la BD
+una vez por fila. Patrones típicos:
+
+* `for author in Author.objects.all(): print(author.publisher.name)`
+  — N selects sobre `publishers`. Arregla con
+  `select_related("publisher")`.
+* `for art in Article.objects.all(): list(art.tags.all())` — N
+  selects sobre la tabla intermedia. Arregla con
+  `prefetch_related("tags")`.
+
+**Cómo confirmarlo.** Envuelve el bloque sospechoso en
+`dorm.contrib.nplusone.NPlusOneDetector`:
+
+```python
+from dorm.contrib.nplusone import NPlusOneDetector
+
+with NPlusOneDetector(threshold=5):
+    handler()                 # lanza NPlusOneError si cualquier template SQL
+                              # se ejecuta más de 5 veces
+```
+
+El mensaje del error incluye el template SQL (con parámetros
+quitados) que cruzó el umbral, así puedes grepear el origen. Para
+tests usa el helper `assert_no_nplusone()` — lanza un
+`AssertionError` así pytest lo presenta como fallo normal.
+
+Para auditoría tipo staging sin fail-fast, construye el detector con
+`raise_on_detect=False` y lee `detector.findings` /
+`detector.report()` después del bloque.
+
 ## `EmailField` acepta basura
 
 **Causa.** Era un bug real pre-2.0. Si lo sigues viendo, estás en

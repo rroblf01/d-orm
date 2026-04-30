@@ -306,11 +306,54 @@ Dos notas de compatibilidad:
   propio slot de caché del descriptor, así que `instance.target`
   devuelve el objeto resuelto sin una segunda query.
 
+#### Relaciones genéricas inversas (`GenericRelation`)
+
+Simétrico: `prefetch_related` sobre una `GenericRelation` inversa
+(`Article.objects.prefetch_related("tags")`) agrupa cada instancia
+target por PK, lanza **un** SELECT al modelo relacionado filtrando
+por `content_type` + `object_id__in`, y rellena el slot de caché
+del manager. Después `article.tags.all()` lee de memoria.
+
+```python
+# 3 artículos + 5 tags apuntando = 1 (artículos) + 1 (tags) = 2 queries
+for article in Article.objects.prefetch_related("tags"):
+    for tag in article.tags.all():     # servido desde caché
+        ...
+```
+
+`Prefetch("tags", queryset=Tag.objects.filter(label="urgent"))` se
+respeta — la queryset del usuario se AND-ea con el predicado
+`content_type`.
+
 ## Carga parcial
 
 ```python
 Author.objects.only("name", "email")     # SELECT name, email
 Author.objects.defer("bio")              # SELECT todo menos bio
+```
+
+### Componiendo con `select_related`
+
+`only()` / `defer()` aceptan rutas con puntos para restringir la
+proyección de una relación cargada con `select_related`:
+
+```python
+# JOIN a publishers, pero solo trae publisher.name (más la PK para identidad).
+Author.objects.select_related("publisher").only("name", "publisher__name")
+
+# Mismo JOIN, pero excluye publisher.bio del SELECT — mantiene el resto.
+Author.objects.select_related("publisher").defer("publisher__bio")
+```
+
+Nombres pelados restringen el modelo padre (comportamiento clásico);
+nombres con puntos restringen la relación nombrada. La PK del modelo
+relacionado se incluye siempre implícitamente para que la instancia
+hidratada conserve su identidad. Los dos métodos escriben en buckets
+distintos del estado, así que combinarlos funciona:
+
+```python
+Author.objects.select_related("publisher").only("name").defer("publisher__bio")
+# padre: id, name. publisher: cada columna menos bio.
 ```
 
 ## Bloqueo de filas: `select_for_update`

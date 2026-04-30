@@ -367,3 +367,105 @@ class TestGFKPrefetchCoexistence:
         assert len(tags) == 1
         assert isinstance(tags[0].target, GFKArticle)
         assert tags[0].content_type.pk == ct.pk
+
+
+# ── Reverse: prefetch_related on GenericRelation ─────────────────────
+
+
+class TestGenericRelationPrefetch:
+    """``Article.objects.prefetch_related("tags")`` on a reverse
+    ``GenericRelation`` should bulk-fetch every tag pointing at the
+    article set in one SELECT, then ``article.tags.all()`` reads from
+    memory. Without this each ``article.tags.all()`` is its own
+    SELECT — N+1 across a list of articles.
+    """
+
+    def test_resolves_tags_per_article_with_one_query(self, _create_gfk_tables):
+        a1 = GFKArticle.objects.create(title="A1")
+        a2 = GFKArticle.objects.create(title="A2")
+        # Third article exists but has no tags — exercises the empty
+        # bucket case in the prefetch (article.tags.all() == []).
+        GFKArticle.objects.create(title="A3")
+        ct = ContentType.objects.get_for_model(GFKArticle)
+        GFKTag.objects.create(label="ta1", content_type=ct, object_id=a1.pk)
+        GFKTag.objects.create(label="ta1b", content_type=ct, object_id=a1.pk)
+        GFKTag.objects.create(label="ta2", content_type=ct, object_id=a2.pk)
+
+        with _count_queries() as seen:
+            articles = list(
+                GFKArticle.objects.prefetch_related("tags").order_by("id")
+            )
+            tags_per_article = [sorted(t.label for t in a.tags.all()) for a in articles]
+
+        assert tags_per_article == [["ta1", "ta1b"], ["ta2"], []]
+        # 1 (articles) + 1 (tags bulk) + at most 1 (CT lookup if cold).
+        assert _select_count(seen) <= 3, seen
+
+    def test_descriptor_cache_serves_repeat_calls(self, _create_gfk_tables):
+        a = GFKArticle.objects.create(title="X")
+        ct = ContentType.objects.get_for_model(GFKArticle)
+        GFKTag.objects.create(label="t1", content_type=ct, object_id=a.pk)
+
+        # Warm CT cache so subsequent counts focus on prefetch behaviour.
+        _ = ContentType.objects.get_for_model(GFKArticle)
+
+        articles = list(GFKArticle.objects.prefetch_related("tags"))
+        with _count_queries() as seen:
+            for art in articles:
+                assert len(art.tags.all()) == 1
+                assert art.tags.all()[0].label == "t1"
+        assert _select_count(seen) == 0, seen
+
+    def test_prefetch_isolates_tags_per_article(self, _create_gfk_tables):
+        """Two articles, distinct tags — each cache slot must only see
+        its own rows, not bleed across instances."""
+        a1 = GFKArticle.objects.create(title="A1")
+        a2 = GFKArticle.objects.create(title="A2")
+        ct = ContentType.objects.get_for_model(GFKArticle)
+        GFKTag.objects.create(label="only-a1", content_type=ct, object_id=a1.pk)
+        GFKTag.objects.create(label="only-a2", content_type=ct, object_id=a2.pk)
+
+        articles = list(GFKArticle.objects.prefetch_related("tags").order_by("id"))
+        assert [t.label for t in articles[0].tags.all()] == ["only-a1"]
+        assert [t.label for t in articles[1].tags.all()] == ["only-a2"]
+
+    def test_prefetch_with_filtered_user_queryset(self, _create_gfk_tables):
+        """``Prefetch(queryset=…)`` filters survive — user-supplied
+        queryset's ``filter()`` is AND-ed onto the CT predicate."""
+        from dorm.queryset import Prefetch
+
+        a = GFKArticle.objects.create(title="A")
+        ct = ContentType.objects.get_for_model(GFKArticle)
+        GFKTag.objects.create(label="keep", content_type=ct, object_id=a.pk)
+        GFKTag.objects.create(label="drop", content_type=ct, object_id=a.pk)
+
+        articles = list(
+            GFKArticle.objects.prefetch_related(
+                Prefetch("tags", queryset=GFKTag.objects.filter(label="keep"))
+            )
+        )
+        assert [t.label for t in articles[0].tags.all()] == ["keep"]
+
+    def test_empty_queryset_short_circuits(self, _create_gfk_tables):
+        """Iterating an empty parent queryset must not issue extra SQL
+        for the prefetch."""
+        with _count_queries() as seen:
+            articles = list(GFKArticle.objects.prefetch_related("tags"))
+        assert articles == []
+        assert _select_count(seen) == 1  # just the parent SELECT
+
+
+class TestGenericRelationPrefetchAsync:
+    @pytest.mark.asyncio
+    async def test_async_prefetch_resolves_tags(self, _create_gfk_tables):
+        a = await GFKArticle.objects.acreate(title="A")
+        ct = await ContentType.objects.aget_for_model(GFKArticle)
+        await GFKTag.objects.acreate(label="t1", content_type=ct, object_id=a.pk)
+        await GFKTag.objects.acreate(label="t2", content_type=ct, object_id=a.pk)
+
+        articles = []
+        async for art in GFKArticle.objects.prefetch_related("tags"):
+            articles.append(art)
+        assert len(articles) == 1
+        labels = sorted(t.label for t in articles[0].tags.all())
+        assert labels == ["t1", "t2"]

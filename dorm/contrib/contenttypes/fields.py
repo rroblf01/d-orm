@@ -152,11 +152,19 @@ class _GenericRelatedManager:
         instance: Model,
         ct_field: str,
         fk_field: str,
+        field_name: str | None = None,
     ) -> None:
         self.related_model = related_model
         self.instance = instance
         self.ct_field = ct_field
         self.fk_field = fk_field
+        # ``field_name`` is the name of the ``GenericRelation`` field on
+        # the owning model. Set so that :meth:`all` can look up the
+        # prefetch cache slot — when ``prefetch_related(field_name)``
+        # ran on the parent queryset, the bulk-fetched list lives at
+        # ``instance.__dict__[f"_prefetch_{field_name}"]`` and we serve
+        # from memory instead of issuing a new SELECT.
+        self.field_name = field_name
 
     def _ct_filter(self) -> dict[str, Any]:
         from .models import ContentType
@@ -174,6 +182,16 @@ class _GenericRelatedManager:
         return self.related_model.objects.filter(**self._ct_filter())
 
     def all(self) -> Any:
+        # Prefetch hit: the parent ``QuerySet.prefetch_related(field_name)``
+        # populated the cache slot with a pre-grouped list. Serve from
+        # memory; ``filter`` / ``count`` / etc. still go to the DB
+        # because composing arbitrary lookups on a Python list isn't
+        # the prefetch contract. Mirrors Django's behaviour.
+        if self.field_name is not None:
+            cache_key = f"_prefetch_{self.field_name}"
+            cached = self.instance.__dict__.get(cache_key)
+            if cached is not None:
+                return list(cached)
         return self.get_queryset()
 
     def filter(self, *args: Any, **kwargs: Any) -> Any:
@@ -276,6 +294,7 @@ class GenericRelation(Field[Any]):
             instance,
             self.content_type_field,
             self.object_id_field,
+            field_name=self.name,
         )
 
 

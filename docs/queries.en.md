@@ -305,11 +305,54 @@ Two compatibility notes:
   cache slot is what dorm fills, so `instance.target` returns the
   resolved object without a second query.
 
+#### Reverse generic relations (`GenericRelation`)
+
+Symmetric: `prefetch_related` over a reverse `GenericRelation`
+(`Article.objects.prefetch_related("tags")`) groups every target
+instance by its PK, runs **one** SELECT against the related model
+filtered by `content_type` + `object_id__in`, and stamps each owner's
+manager cache slot. `article.tags.all()` then reads from memory.
+
+```python
+# 3 articles + 5 tags pointing at them = 1 (articles) + 1 (tags) = 2 queries
+for article in Article.objects.prefetch_related("tags"):
+    for tag in article.tags.all():     # served from cache
+        ...
+```
+
+`Prefetch("tags", queryset=Tag.objects.filter(label="urgent"))` is
+honoured — the user-supplied queryset is AND-ed with the
+`content_type` predicate.
+
 ## Partial loading
 
 ```python
 Author.objects.only("name", "email")     # SELECT name, email
 Author.objects.defer("bio")              # SELECT everything except bio
+```
+
+### Composing with `select_related`
+
+`only()` / `defer()` accept dotted paths to restrict the projection
+of a `select_related`-joined relation as well:
+
+```python
+# JOINs publishers, but only pulls publisher.name (plus PK for identity).
+Author.objects.select_related("publisher").only("name", "publisher__name")
+
+# Same JOIN, but drop publisher.bio from the SELECT — keep everything else.
+Author.objects.select_related("publisher").defer("publisher__bio")
+```
+
+Bare names restrict the parent model (legacy behaviour); dotted
+names restrict the named relation. The PK of the related model is
+always implicitly included so the hydrated instance keeps its
+identity. The two methods write to different state buckets so
+mixing them works:
+
+```python
+Author.objects.select_related("publisher").only("name").defer("publisher__bio")
+# parent: id, name. publisher: every column except bio.
 ```
 
 ## Row locking: `select_for_update`
