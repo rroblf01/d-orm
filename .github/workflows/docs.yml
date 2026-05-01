@@ -10,14 +10,17 @@ on:
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
+# Burst of pushes to main only needs the latest docs build to
+# ship — earlier in-flight builds are immediately stale. Cancel
+# them so we don't burn runner minutes deploying superseded HTML.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pages: write
   id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -44,6 +47,14 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # GitHub Pages requires deploys to a given environment to be
+    # serialised — never cancelled mid-flight or two deploys can
+    # race the live site. The workflow-level concurrency above
+    # already cancels superseded *builds*; this job-level group
+    # only kicks in once the build artefact is ready.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

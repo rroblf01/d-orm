@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: ["main", "master"]
 
+# Cancel any in-flight runs of this workflow for the same ref
+# (branch on a push, PR head on a pull_request). A second push or
+# a force-push that lands while the previous run is still going
+# tears down the older run instead of letting both burn minutes
+# on identical-but-stale code. ``github.workflow`` keeps the scope
+# tied to *this* workflow so the docs / publish workflows aren't
+# touched.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} / PG 16
@@ -77,7 +88,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres-version: ["13-alpine", "14-alpine", "15-alpine", "17-alpine"]
+        # Cover only the currently-supported Postgres releases — the
+        # main ``test`` job above pins PG 16 (the LTS-style middle
+        # of the road), and this matrix covers the two flanking
+        # majors that real users are likely to be on. Older majors
+        # (13 / 14 / 15) are out of upstream community support and
+        # the matrix grew expensive enough to trip the runner OOM
+        # killer on parallel pytest workers.
+        postgres-version: ["17-alpine", "18-alpine"]
 
     services:
       postgres:
