@@ -65,6 +65,8 @@ plugins:
             Soft delete: Soft delete
             FastAPI integration: Integración con FastAPI
             Vector search (pgvector): Búsqueda vectorial (pgvector)
+            libsql backend: Backend libsql
+            Result cache (Redis): Caché de resultados (Redis)
             CLI reference: Referencia del CLI
             Production deployment: Despliegue en producción
             Cookbook: Recetario
@@ -101,6 +103,8 @@ nav:
       - Soft delete: softdelete.md
       - FastAPI integration: fastapi.md
       - Vector search (pgvector): pgvector.md
+      - libsql backend: libsql.md
+      - Result cache (Redis): cache_redis.md
       - CLI reference: cli.md
       - Production deployment: production.md
       - Cookbook: cookbook.md

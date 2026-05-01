@@ -66,6 +66,13 @@ def _get_settings(alias: str = "default") -> dict:
 def _create_sync_connection(alias: str, db_settings: dict):
     engine = db_settings.get("ENGINE", "sqlite").lower()
 
+    # libsql must be checked before the bare ``sqlite`` substring
+    # match — otherwise ``ENGINE="libsql"`` would route through the
+    # plain SQLite wrapper and skip the remote / embedded-replica
+    # connection setup.
+    if "libsql" in engine:
+        from .backends.libsql import LibSQLDatabaseWrapper
+        return LibSQLDatabaseWrapper(db_settings)
     if "sqlite" in engine:
         from .backends.sqlite import SQLiteDatabaseWrapper
         return SQLiteDatabaseWrapper(db_settings)
@@ -75,13 +82,16 @@ def _create_sync_connection(alias: str, db_settings: dict):
 
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql'."
+        "Supported: 'sqlite', 'postgresql', 'libsql'."
     )
 
 
 def _create_async_connection(alias: str, db_settings: dict):
     engine = db_settings.get("ENGINE", "sqlite").lower()
 
+    if "libsql" in engine:
+        from .backends.libsql import LibSQLAsyncDatabaseWrapper
+        return LibSQLAsyncDatabaseWrapper(db_settings)
     if "sqlite" in engine:
         from .backends.sqlite import SQLiteAsyncDatabaseWrapper
         return SQLiteAsyncDatabaseWrapper(db_settings)
@@ -91,7 +101,7 @@ def _create_async_connection(alias: str, db_settings: dict):
 
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql'."
+        "Supported: 'sqlite', 'postgresql', 'libsql'."
     )
 
 

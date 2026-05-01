@@ -239,6 +239,14 @@ class QuerySet(Generic[_T]):
         self._db = using
         self._query = SQLQuery(model)
         self._result_cache: list[_T] | None = None
+        # Opt-in result-cache config — populated by :meth:`cache`.
+        # ``_cache_alias`` is the cache backend alias from
+        # ``settings.CACHES`` (default ``"default"``); ``_cache_timeout``
+        # is the TTL in seconds (``None`` falls back to the backend's
+        # configured TTL). Both ``None`` means "no caching" so the
+        # iterator path stays zero-cost.
+        self._cache_alias: str | None = None
+        self._cache_timeout: int | None = None
 
     # ── Cloning ───────────────────────────────────────────────────────────────
 
@@ -250,6 +258,54 @@ class QuerySet(Generic[_T]):
         # use case).
         qs: QuerySet[_T] = type(self)(self.model, self._db)
         qs._query = self._query.clone()
+        qs._cache_alias = self._cache_alias
+        qs._cache_timeout = self._cache_timeout
+        return qs
+
+    # ── Result caching ────────────────────────────────────────────────────────
+
+    def cache(
+        self, timeout: int | None = None, *, using: str = "default"
+    ) -> QuerySet[_T]:
+        """Cache this queryset's full result set in the configured
+        :mod:`dorm.cache` backend (typically Redis) for ``timeout``
+        seconds.
+
+        Cheap-mode: hot queries (configuration tables, feature
+        flags, listing pages) avoid the round-trip when the cache
+        is warm. The first invocation runs the query, serialises
+        every column of every row, and SETs the bytes blob under a
+        SHA-1 key derived from the model + final SQL + bound
+        parameters. Subsequent calls within ``timeout`` seconds
+        hydrate model instances from the cached bytes — no DB
+        round-trip.
+
+        Auto-invalidation: every ``Model.save()`` /
+        ``Model.delete()`` (and the matching async variants) fires
+        ``post_save`` / ``post_delete``. The signal handler in
+        :mod:`dorm.cache.invalidation` deletes every cached
+        queryset key for the affected model class, so writers
+        never observe a stale cached read.
+
+        ``timeout=None`` falls back to the backend's configured
+        ``TTL`` (default 300 s). ``timeout=0`` caches indefinitely.
+        ``using`` selects the cache alias in ``settings.CACHES``;
+        defaults to ``"default"``.
+
+        Returns a *clone* — chaining ``.cache()`` doesn't mutate
+        the source queryset, matching every other QuerySet API.
+        """
+        qs = self._clone()
+        qs._cache_alias = using
+        qs._cache_timeout = timeout
+        # Make sure the post_save / post_delete signal handler is
+        # connected the first time anyone opts a queryset into
+        # caching. Connecting it eagerly at import time would force
+        # users who never use the cache to pay the dispatch cost on
+        # every save.
+        from .cache.invalidation import ensure_signals_connected
+
+        ensure_signals_connected()
         return qs
 
     def _get_connection(self):
@@ -536,6 +592,11 @@ class QuerySet(Generic[_T]):
             if fields
             else [f.column for f in self.model._meta.fields if f.column]
         )
+        # Preserve cache opt-in across the values() switch — without
+        # this, ``qs.cache().values("name")`` silently dropped the
+        # caching configuration on the new queryset.
+        qs._cache_alias = self._cache_alias
+        qs._cache_timeout = self._cache_timeout
         return qs
 
     def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
@@ -548,6 +609,8 @@ class QuerySet(Generic[_T]):
         qs._query.selected_fields = list(fields) if fields else None
         qs._flat = flat
         qs._fields = list(fields)
+        qs._cache_alias = self._cache_alias
+        qs._cache_timeout = self._cache_timeout
         return qs
 
     def alias(self, **kwargs: Any) -> QuerySet[_T]:
@@ -882,9 +945,19 @@ class QuerySet(Generic[_T]):
         """Materialize the queryset asynchronously: ``rows = await qs``.
         Lets users compose chainable methods (``values()``, ``filter()``,
         ``order_by()``...) and consume the result with a single await,
-        instead of having to call a terminal ``avalues()``/``alist()``."""
+        instead of having to call a terminal ``avalues()``/``alist()``.
+
+        Honours ``.cache(timeout=…)`` — cached results are returned
+        without an async iteration; on a miss the rows are stored
+        for the next call.
+        """
         async def _materialize():
-            return [item async for item in self._aiterator()]
+            cached = await self._cache_lookup_async()
+            if cached is not None:
+                return cached
+            rows = [item async for item in self._aiterator()]
+            await self._cache_store_async(rows)
+            return rows
         return _materialize().__await__()
 
     def __len__(self) -> int:
@@ -944,8 +1017,171 @@ class QuerySet(Generic[_T]):
         raise TypeError(f"Invalid index type: {type(k)}")
 
     def _fetch_all(self) -> None:
-        if self._result_cache is None:
-            self._result_cache = list(self._iterator())  # type: ignore[assignment]
+        if self._result_cache is not None:
+            return
+        # Result-cache (Redis etc.) is consulted before the DB
+        # iterator runs. Cache misses fall through to the live
+        # query and store the materialised rows under the same key
+        # so the next call within ``timeout`` is a hit.
+        cached = self._cache_lookup_sync()
+        if cached is not None:
+            self._result_cache = cached  # type: ignore[assignment]
+            return
+        rows = list(self._iterator())  # type: ignore[assignment]
+        self._result_cache = rows
+        self._cache_store_sync(rows)
+
+    # ── Result-cache helpers ──────────────────────────────────────────────────
+
+    def _cache_key(self) -> str | None:
+        """Stable hash of (model, sql, params). Returns ``None`` when
+        the queryset isn't opted into caching."""
+        if self._cache_alias is None:
+            return None
+        try:
+            conn = self._get_connection()
+            sql, params = self._query.as_select(conn)
+        except Exception:
+            return None
+        import hashlib
+        import pickle
+
+        try:
+            params_bytes = pickle.dumps(params, protocol=4)
+        except Exception:
+            params_bytes = repr(params).encode("utf-8")
+        digest = hashlib.sha1(sql.encode("utf-8") + params_bytes).hexdigest()
+        from .cache import model_cache_namespace
+
+        return f"{model_cache_namespace(self.model)}:{digest}"
+
+    def _cache_lookup_sync(self) -> list[_T] | None:
+        if self._cache_alias is None:
+            return None
+        try:
+            from .cache import get_cache
+
+            backend = get_cache(self._cache_alias)
+        except Exception:
+            return None
+        key = self._cache_key()
+        if key is None:
+            return None
+        try:
+            payload = backend.get(key)
+        except Exception:
+            return None
+        if not payload:
+            return None
+        try:
+            import pickle
+
+            blob = pickle.loads(payload)
+        except Exception:
+            return None
+        # Stored shape: list[dict[attname, value]] for model rows;
+        # list[dict] / list[tuple] for ``values()`` / ``values_list()``.
+        # Hydrate model instances back from the dicts; pass other
+        # shapes through untouched.
+        rebuilt: list[_T] = []
+        for entry in blob:
+            if isinstance(entry, dict) and "_dorm_model_row" in entry:
+                obj = self.model.__new__(self.model)
+                obj.__dict__ = dict(entry["_dorm_model_row"])
+                rebuilt.append(obj)
+            else:
+                rebuilt.append(entry)
+        return rebuilt
+
+    def _cache_store_sync(self, rows: list[_T]) -> None:
+        if self._cache_alias is None:
+            return
+        try:
+            from .cache import get_cache
+
+            backend = get_cache(self._cache_alias)
+        except Exception:
+            return
+        key = self._cache_key()
+        if key is None:
+            return
+        # Serialise model instances by their ``__dict__`` (the same
+        # dict ``_from_db_row`` populates) so re-hydration stays
+        # cheap. Non-model rows (``values()`` / ``values_list()``)
+        # serialise as-is.
+        wire: list[Any] = []
+        for r in rows:
+            if hasattr(r, "_meta") and hasattr(r, "__dict__"):
+                wire.append({"_dorm_model_row": dict(r.__dict__)})
+            else:
+                wire.append(r)
+        try:
+            import pickle
+
+            payload = pickle.dumps(wire, protocol=4)
+            backend.set(key, payload, timeout=self._cache_timeout)
+        except Exception:
+            pass
+
+    async def _cache_lookup_async(self) -> list[_T] | None:
+        if self._cache_alias is None:
+            return None
+        try:
+            from .cache import get_cache
+
+            backend = get_cache(self._cache_alias)
+        except Exception:
+            return None
+        key = self._cache_key()
+        if key is None:
+            return None
+        try:
+            payload = await backend.aget(key)
+        except Exception:
+            return None
+        if not payload:
+            return None
+        try:
+            import pickle
+
+            blob = pickle.loads(payload)
+        except Exception:
+            return None
+        rebuilt: list[_T] = []
+        for entry in blob:
+            if isinstance(entry, dict) and "_dorm_model_row" in entry:
+                obj = self.model.__new__(self.model)
+                obj.__dict__ = dict(entry["_dorm_model_row"])
+                rebuilt.append(obj)
+            else:
+                rebuilt.append(entry)
+        return rebuilt
+
+    async def _cache_store_async(self, rows: list[_T]) -> None:
+        if self._cache_alias is None:
+            return
+        try:
+            from .cache import get_cache
+
+            backend = get_cache(self._cache_alias)
+        except Exception:
+            return
+        key = self._cache_key()
+        if key is None:
+            return
+        wire: list[Any] = []
+        for r in rows:
+            if hasattr(r, "_meta") and hasattr(r, "__dict__"):
+                wire.append({"_dorm_model_row": dict(r.__dict__)})
+            else:
+                wire.append(r)
+        try:
+            import pickle
+
+            payload = pickle.dumps(wire, protocol=4)
+            await backend.aset(key, payload, timeout=self._cache_timeout)
+        except Exception:
+            pass
 
     @staticmethod
     def _hydrate_select_related(

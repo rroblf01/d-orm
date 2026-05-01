@@ -159,6 +159,18 @@ class Settings:
     # spliced verbatim into ``to_tsvector(<config>, col)`` so it
     # must be a SQL identifier (validated at lookup-build time).
     SEARCH_CONFIG: str = "english"
+    # Optional result-cache backends (Redis, in-memory, …). Empty
+    # means "no caching" — :meth:`QuerySet.cache` becomes a no-op
+    # so existing code paths stay zero-cost. Example::
+    #
+    #     CACHES = {
+    #         "default": {
+    #             "BACKEND": "dorm.cache.redis.RedisCache",
+    #             "LOCATION": "redis://localhost:6379/0",
+    #             "TTL": 300,
+    #         },
+    #     }
+    CACHES: dict = {}
 
     _configured = False
 
@@ -272,9 +284,52 @@ def parse_database_url(url: str) -> dict:
             cfg["OPTIONS"] = options
         return cfg
 
+    if scheme in {"libsql", "libsql+wss", "libsql+ws", "libsql+http", "libsql+https"}:
+        # libsql URL flavours:
+        #   ``libsql://your-db.turso.io?authToken=…``  remote-only
+        #   ``libsql://your-db.turso.io?authToken=…&NAME=local.db``
+        #                                              embedded replica
+        #   ``libsql:///local-only.db``                local file
+        #
+        # The remote endpoint sits in ``netloc``; the local replica
+        # path (when present) is taken from the ``NAME`` query
+        # parameter. ``authToken`` may also arrive via the
+        # ``AUTH_TOKEN`` env var — we don't read it here so a
+        # malformed URL doesn't silently inherit credentials from
+        # the environment.
+        from typing import Any as _AnyL
+
+        cfg_libsql: dict[str, _AnyL] = {"ENGINE": "libsql"}
+        qs = parse_qs(parsed.query)
+
+        local_path = parsed.path or ""
+        if local_path.startswith("//"):
+            local_path = local_path[1:]
+        if local_path.startswith("/") and not parsed.netloc:
+            local_path = local_path[1:]
+
+        if parsed.netloc:
+            host_scheme = "libsql" if scheme == "libsql" else scheme.split("+", 1)[1]
+            cfg_libsql["SYNC_URL"] = f"{host_scheme}://{parsed.netloc}"
+            # Embedded replica path can come from a query string
+            # (``?NAME=local.db``) or from the URL path when the
+            # path is non-empty. ``:memory:`` is the default for
+            # remote-only mode.
+            qs_name = qs.pop("NAME", [None])[0]
+            cfg_libsql["NAME"] = qs_name or local_path or ":memory:"
+        else:
+            cfg_libsql["NAME"] = local_path or ":memory:"
+
+        token = qs.pop("authToken", [None])[0] or qs.pop("AUTH_TOKEN", [None])[0]
+        if token:
+            cfg_libsql["AUTH_TOKEN"] = unquote(token)
+        for k, vlist in qs.items():
+            cfg_libsql.setdefault("OPTIONS", {})[k] = vlist[0]
+        return cfg_libsql
+
     raise ImproperlyConfigured(
         f"Unrecognised database URL scheme {scheme!r}. Supported: "
-        "'postgres', 'postgresql', 'sqlite'."
+        "'postgres', 'postgresql', 'sqlite', 'libsql'."
     )
 
 
@@ -314,6 +369,14 @@ def configure(**kwargs):
     if "DATABASES" in kwargs:
         from .db.connection import reset_connections
         reset_connections()
+    # Reset cache backends when CACHES changes so a second
+    # ``configure(CACHES={...})`` swaps the Redis client cleanly.
+    if "CACHES" in kwargs:
+        try:
+            from .cache import reset_caches as _reset_caches
+            _reset_caches()
+        except Exception:
+            pass
 
 
 def _autodiscover_settings() -> bool:

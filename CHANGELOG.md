@@ -6,6 +6,144 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-05-02
+
+Minor release. Two opt-in features land alongside the v2.4.1
+bug-hunt corpus:
+
+- **libsql backend** — talk to local files, remote
+  Turso / sqld endpoints, or run as an embedded replica that
+  syncs from a remote master. The dialect is SQLite-compatible,
+  so the migration tooling and the SQLite branch of every
+  compiler keep working untouched. Native vector support
+  (``F32_BLOB(N)`` + ``vector_distance_l2`` /
+  ``vector_distance_cos``) is wired into ``VectorField`` so
+  embeddings round-trip without the sqlite-vec extension.
+- **Result-cache layer** — opt-in ``QuerySet.cache(timeout=…)``
+  chain method backed by Redis (``redis-py`` client) or any
+  pluggable ``dorm.cache.BaseCache`` subclass. Cache outages
+  fall through to the database silently; signal-driven
+  invalidation drops every cached queryset for a model on
+  save / delete.
+
+Both features are gated behind optional dependencies — install
+``djanorm[libsql]`` and / or ``djanorm[redis]`` only when you
+need them. ``djanorm`` itself imports without either client.
+
+### Added — libsql backend (`dorm.db.backends.libsql`)
+
+- ``ENGINE = "libsql"`` routes to ``LibSQLDatabaseWrapper``
+  (sync) and ``LibSQLAsyncDatabaseWrapper`` (async). Three
+  modes share a single configuration shape:
+  - **Local file** — drop-in SQLite replacement.
+  - **Remote-only** — Turso / sqld over HTTPS / WebSocket.
+    ``SYNC_URL`` + ``AUTH_TOKEN`` are the wire knobs.
+  - **Embedded replica** — local file + ``SYNC_URL`` keeps the
+    file in sync with the remote master. ``sync_replica()``
+    on the wrapper triggers an explicit pull.
+- URL parser (``parse_database_url``) recognises ``libsql://``,
+  ``libsql+wss://``, ``libsql+ws://``, ``libsql+http://`` and
+  ``libsql+https://``. Auth tokens come from the ``authToken``
+  query parameter; the optional ``NAME`` query parameter sets
+  the embedded-replica file path.
+- Async path marshals onto a worker thread (``asyncio.to_thread``)
+  because the libsql Python client is sync-only today.
+  Throughput is fine for typical apps; PostgreSQL stays the
+  recommended option for heavy fan-out async workloads.
+- Client lookup tries ``libsql_experimental`` first, falls back
+  to ``libsql``, and raises a clear ``ImproperlyConfigured``
+  pointing at ``pip install 'djanorm[libsql]'`` if neither is
+  installed.
+
+### Added — vector support on libsql
+
+- ``VectorField.db_type`` returns ``F32_BLOB(N)`` for
+  ``vendor == "libsql"``. The packed-float32 wire format
+  (already used by sqlite-vec) is reused — libsql's
+  ``vector32(?)`` SQL function reads it directly.
+- ``L2Distance`` / ``CosineDistance`` compile to
+  ``vector_distance_l2`` / ``vector_distance_cos`` against
+  ``vector32(?)``. ``MaxInnerProduct`` raises
+  ``NotImplementedError`` (libsql ships no negated-IP function;
+  use ``CosineDistance`` over normalised embeddings instead).
+- No ``VectorExtension()`` migration is needed on libsql —
+  vector functions are built into the server.
+
+### Added — Result cache (`dorm.cache`)
+
+- ``QuerySet.cache(timeout=…, using="default")`` opts a
+  queryset into result caching. Returns a clone (chaining is
+  immutable, matching every other QuerySet API). Honoured by
+  the sync iterator (``for x in qs``) and the async terminal
+  (``await qs``).
+- Cache key is a SHA-1 of ``(final SQL, bound params)``
+  namespaced by ``f"dormqs:{app_label}.{ModelName}"`` so
+  signal-driven invalidation can wipe every cached queryset for
+  a model with a single ``delete_pattern`` call.
+- ``BaseCache`` defines the contract every backend implements:
+  ``get`` / ``set`` / ``delete`` / ``delete_pattern`` (sync) and
+  the matching ``a*`` async variants. Both return raw bytes so
+  the queryset layer can pickle / unpickle on its own.
+- ``RedisCache`` (``dorm.cache.redis``) wraps redis-py for sync
+  and ``redis.asyncio`` for async. Both pools are spun up
+  lazily; ``LOCATION`` accepts every URL form redis-py knows.
+  Every operation is wrapped in ``try / except`` — cache
+  outages fall through to the DB silently, never propagate.
+- Auto-invalidation hooks (``dorm.cache.invalidation``)
+  connect ``post_save`` / ``post_delete`` (sync + async) on
+  first ``qs.cache()`` call, so projects that never opt into
+  caching pay zero dispatch cost.
+- ``configure(CACHES={...})`` invalidates the memoised cache
+  instances so a mid-process settings swap doesn't keep the
+  old client alive.
+
+### Added — settings
+
+- ``settings.CACHES`` (default ``{}``). Same shape as Django:
+  ``{alias: {"BACKEND": "dotted.path.Backend", "LOCATION": …,
+  "OPTIONS": {…}, "TTL": 300}}``.
+- ``settings.SEARCH_CONFIG`` (default ``"english"``) — already
+  added in v2.4.1's R24 fix; mentioned here for completeness.
+
+### Optional dependencies
+
+- ``djanorm[libsql]`` → ``libsql-experimental``. Local file,
+  embedded replica, or remote (Turso / sqld).
+- ``djanorm[redis]`` → ``redis`` (sync + asyncio in one package).
+- ``djanorm[pgvector]`` → ``pgvector`` only. The PostgreSQL
+  psycopg adapter for ``VectorField``. **No longer pulls
+  ``sqlite-vec``** — split into its own extra so a SQLite-only
+  install doesn't drag in the PG adapter and vice-versa.
+- ``djanorm[sqlite-vec]`` → ``sqlite-vec`` only. The SQLite
+  loadable extension binary used by ``VectorExtension`` and
+  ``VectorField`` on SQLite.
+- ``djanorm[vector]`` (new convenience meta-extra) → pulls both
+  ``[pgvector]`` and ``[sqlite-vec]`` for projects targeting
+  mixed PG/SQLite deployments.
+- ``djanorm[all]`` now pulls every extra alongside the existing
+  set.
+
+### Tests
+
+- ``tests/test_libsql_v2_5.py`` — URL parsing, engine routing,
+  local-file round-trip, vendor branch in ``VectorField`` /
+  distance expressions, fallback error path when the client
+  isn't installed.
+- ``tests/test_redis_cache_v2_5.py`` — ``qs.cache()`` clone
+  semantics, hit / miss / store, key namespacing, sync + async
+  round-trip, signal-driven invalidation, cache-outage
+  fallthrough, helpful error when redis-py is missing.
+
+### Documentation
+
+- ``docs/libsql.en.md`` / ``docs/libsql.es.md`` — full guide
+  covering local / remote / embedded-replica modes, async
+  usage, vector support, migrations and limitations.
+- ``docs/cache_redis.en.md`` / ``docs/cache_redis.es.md`` —
+  configuration, ``qs.cache(...)`` semantics, async path,
+  auto-invalidation contract, custom backend protocol, when
+  caching helps and when it hurts.
+
 ## [2.4.1] - 2026-05-01
 
 Bug-hunt patch release. Fifty-three latent correctness / dataloss /

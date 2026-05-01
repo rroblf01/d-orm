@@ -48,9 +48,20 @@ to enable it (step 3).
 pip install 'djanorm[postgresql,pgvector]'
 ```
 
-The `pgvector` package registers a psycopg adapter so `list[float]`
-and `numpy.ndarray` values are bound transparently — without it
-you can still use the field, you just lose the numpy convenience.
+The `[pgvector]` extra is **PostgreSQL only** — it pulls the
+`pgvector` Python package, which registers a psycopg adapter so
+`list[float]` and `numpy.ndarray` values bind transparently.
+Without it you can still use the field, you just lose the numpy
+convenience.
+
+If your project targets *both* PostgreSQL and SQLite (CI runs
+SQLite, prod runs PG), install the convenience meta-extra
+`[vector]` instead — it pulls `[pgvector]` *and* `[sqlite-vec]`
+in one go:
+
+```bash
+pip install 'djanorm[postgresql,sqlite,vector]'
+```
 
 ### 3. Generate the extension migration
 
@@ -224,12 +235,14 @@ installation required. The PyPI package bundles compiled binaries
 for Linux / macOS / Windows:
 
 ```bash
-pip install 'djanorm[sqlite,pgvector]'
+pip install 'djanorm[sqlite,sqlite-vec]'
 ```
 
-The `pgvector` extra installs **both** PG and SQLite vector
-support (the `pgvector` Python package and `sqlite-vec`); pick
-whichever your project actually runs against.
+The `[sqlite-vec]` extra is **SQLite only** — it pulls just the
+`sqlite-vec` package without pulling psycopg's `pgvector`
+adapter. Use `[pgvector]` for the PostgreSQL side, or
+`[vector]` for both at once if your project ships against
+both backends.
 
 ### 2. Verify your Python build supports `enable_load_extension`
 

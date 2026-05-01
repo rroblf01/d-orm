@@ -68,6 +68,10 @@ class _VectorDistance:
 
     pg_operator: str = ""
     sqlite_function: str | None = None
+    # libsql ships native ``vector_distance_*`` functions over its
+    # ``F32_BLOB(N)`` columns. Subclasses set the function name
+    # (or ``None`` to mark the distance as unsupported there).
+    libsql_function: str | None = None
 
     def __init__(self, column: str, vector: Iterable[float]) -> None:
         # Column names go through identifier validation so a
@@ -86,6 +90,23 @@ class _VectorDistance:
             if table_alias
             else f'"{self.column}"'
         )
+        if vendor == "libsql":
+            # libsql ships native ``vector_distance_l2`` /
+            # ``vector_distance_cos`` SQL functions over
+            # ``F32_BLOB(N)`` columns. The names are lowercase and
+            # the cosine variant uses ``cos`` (not ``cosine``).
+            # Inner-product is not yet exposed; fall back to
+            # cosine over normalised vectors as documented.
+            fn = self.libsql_function
+            if fn is None:
+                raise NotImplementedError(
+                    f"{type(self).__name__} is not supported on "
+                    "libsql. Use CosineDistance over L2-normalised "
+                    "embeddings instead."
+                )
+            return f"{fn}({col}, vector32(?))", [
+                _pack_sqlite_vec(self.vector)
+            ]
         if vendor == "sqlite":
             if self.sqlite_function is None:
                 raise NotImplementedError(
@@ -106,12 +127,14 @@ class L2Distance(_VectorDistance):
 
     * pgvector: ``col <-> %s``. Pair with ``vector_l2_ops``.
     * sqlite-vec: ``vec_distance_L2(col, %s)``.
+    * libsql: ``vector_distance_l2(col, vector32(?))``.
 
     Smaller = more similar.
     """
 
     pg_operator = "<->"
     sqlite_function = "vec_distance_L2"
+    libsql_function = "vector_distance_l2"
 
 
 class CosineDistance(_VectorDistance):
@@ -119,14 +142,16 @@ class CosineDistance(_VectorDistance):
 
     * pgvector: ``col <=> %s``. Pair with ``vector_cosine_ops``.
     * sqlite-vec: ``vec_distance_cosine(col, %s)``.
+    * libsql: ``vector_distance_cos(col, vector32(?))``.
 
     Smaller = more similar. On L2-normalised embeddings this is
-    equivalent to :class:`MaxInnerProduct` and works on both
-    backends.
+    equivalent to :class:`MaxInnerProduct` and works on every
+    backend.
     """
 
     pg_operator = "<=>"
     sqlite_function = "vec_distance_cosine"
+    libsql_function = "vector_distance_cos"
 
 
 class MaxInnerProduct(_VectorDistance):
@@ -134,9 +159,9 @@ class MaxInnerProduct(_VectorDistance):
 
     * pgvector: ``col <#> %s``. Pair with ``vector_ip_ops``.
     * sqlite-vec: **not supported** — sqlite-vec doesn't ship a
-      negated-inner-product function. Use :class:`CosineDistance`
-      over L2-normalised embeddings instead (equivalent up to a
-      constant).
+      negated-inner-product function.
+    * libsql: **not supported** today — fall back to
+      :class:`CosineDistance` over L2-normalised embeddings.
 
     pgvector returns ``-inner_product`` so that ``ORDER BY ASC``
     still puts the most-similar rows first.
@@ -144,3 +169,4 @@ class MaxInnerProduct(_VectorDistance):
 
     pg_operator = "<#>"
     sqlite_function = None
+    libsql_function = None

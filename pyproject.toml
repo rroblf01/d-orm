@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "2.4.1"
+version = "2.5.0"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -42,14 +42,14 @@ dev = [
     # opt-in (raises ImportError if the user calls ``instrument()``
     # without installing OTel themselves), but the test suite exercises
     # the wiring end-to-end to keep that opt-in path from breaking.
-    "opentelemetry-api>=1.30.0",
-    "opentelemetry-sdk>=1.30.0",
+    "opentelemetry-api>=1.41.1",
+    "opentelemetry-sdk>=1.41.1",
     # boto3 powers the integration tests for ``dorm.contrib.storage.s3``
     # against a MinIO container (see ``tests/test_s3_storage_minio.py``).
     # Same opt-in rationale as the OTel deps above — the runtime
     # feature is gated behind ``djanorm[s3]`` but the tests cover the
     # wiring end-to-end.
-    "boto3>=1.42.96",
+    "boto3>=1.43.1",
     # FastAPI integration is documented (docs/fastapi.md) but not a
     # runtime dep of dorm itself. The tests in
     # ``tests/test_fastapi_filefield.py`` spin up a real ASGI app via
@@ -68,7 +68,8 @@ dev = [
 # Standalone group for users who want to wire dorm.contrib.otel — kept
 # separate from ``dev`` so production installs don't pull SDK + exporters.
 otel = [
-    "opentelemetry-api>=1.30.0",
+    "opentelemetry-api>=1.41.1",
+    "opentelemetry-sdk>=1.41.1",
 ]
 # aiosqlite: pinned <0.23 because the daemon-thread fix in
 # dorm/db/backends/sqlite.py reads the private `_thread` attribute on
@@ -80,11 +81,11 @@ postgresql = ["psycopg[binary,pool]>=3.3.3"]
 # ``dorm.contrib.storage.s3``. boto3 picks up credentials from the
 # ambient environment (IAM role, ``~/.aws/credentials``, env vars) by
 # default; settings.STORAGES['default']['OPTIONS'] can override.
-s3 = ["boto3>=1.42.96"]
+s3 = ["boto3>=1.43.1"]
 # Pillow powers ``dorm.ImageField`` — used at assignment time to
 # verify uploads parse as recognisable images before they hit
 # storage. Skip this extra if you only use ``FileField``.
-image = ["Pillow>=10.0"]
+image = ["Pillow>=12.2.0"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
 # Email/URL/IP format validation is done by dorm's own field code on
@@ -93,17 +94,49 @@ image = ["Pillow>=10.0"]
 # email-validator is not required.
 pydantic = ["pydantic>=2.0"]
 # Vector-search support — enables ``VectorField``, distance
-# expressions and ANN-index helpers under ``dorm.contrib.pgvector``.
-# The extra installs both backends' Python packages:
-#   * ``pgvector`` registers a psycopg adapter for PostgreSQL.
-#   * ``sqlite-vec`` ships the loadable extension binary that
-#     :class:`VectorExtension` loads on every SQLite connection.
-# The actual server-side extension still has to be installed
-# (``apt install postgresql-XX-pgvector`` for PG; sqlite-vec is
-# entirely client-side, so the pip package is enough).
-pgvector = [
-    "pgvector>=0.3",
-    "sqlite-vec>=0.1",
+# expressions and ANN-index helpers under
+# ``dorm.contrib.pgvector``. Each backend's Python client is a
+# separate extra so a SQLite-only install doesn't pull psycopg's
+# pgvector adapter (and vice-versa).
+#
+# - ``[pgvector]`` — psycopg adapter for PostgreSQL. The actual
+#   server-side extension still has to be installed
+#   (``apt install postgresql-XX-pgvector``).
+# - ``[sqlite-vec]`` — loadable extension binary used by
+#   :class:`VectorExtension` on every SQLite connection. Ships
+#   client-side, so the pip install is enough — no apt package.
+# - ``[vector]`` — convenience that pulls both, for projects that
+#   target a mixed PG/SQLite deployment.
+#
+# libsql users need NEITHER — vector functions are built into
+# the server (``F32_BLOB`` / ``vector_distance_*``); see
+# ``[libsql]``.
+pgvector = ["pgvector>=0.4.2"]
+sqlite-vec = ["sqlite-vec>=0.1.9"]
+vector = ["djanorm[pgvector,sqlite-vec]"]
+# libsql backend — local file, embedded replica, self-hosted
+# ``sqld`` (the typical "VPS" setup), or Turso Cloud. Powered
+# by ``pyturso``, the official Turso Python client. Sync calls
+# go straight through ``turso.connect`` / ``turso.sync.connect``;
+# async local calls use ``turso.aio`` natively, while async
+# embedded-replica calls fall back to the sync client on a
+# dedicated single-thread worker (pyturso's async API is
+# local-only today, and its connections are not thread-safe).
+# Native vector support (``F32_BLOB(N)`` + ``vector_distance_*``)
+# is enabled via ``experimental_features="vector"`` on every
+# fresh connection — the ``vendor == "libsql"`` branch in
+# ``VectorField`` picks the right column type and SQL emitter.
+libsql = [
+    "pyturso>=0.5.1",
+]
+# Redis-backed result cache for ``QuerySet.cache(timeout=…)``.
+# Sync (``redis.Redis``) and async (``redis.asyncio.Redis``)
+# clients ship in the same package; both pools are spun up
+# lazily on first call. Cache outages never break a query —
+# ``RedisCache`` swallows ``ConnectionError`` so a missed cache
+# silently falls through to the database.
+redis = [
+    "redis>=7.4.0",
 ]
 # Build the API reference site at https://rroblf01.github.io/d-orm/
 # locally: ``uv run mkdocs serve``
@@ -113,7 +146,7 @@ docs = [
     "mkdocstrings[python]>=1.0.4",
     "mkdocs-static-i18n>=1.3.1",
 ]
-all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel,s3,image,pgvector]"]
+all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"
@@ -124,6 +157,11 @@ packages = ["dorm"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "fakeredis>=2.35.1",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

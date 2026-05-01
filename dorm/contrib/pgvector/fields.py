@@ -85,6 +85,13 @@ class VectorField(Field[list]):
         vendor = getattr(connection, "vendor", "sqlite")
         if vendor == "postgresql":
             return f"vector({self.dimensions})"
+        if vendor == "libsql":
+            # libsql ships native ``F32_BLOB(N)`` vector columns plus
+            # the ``vector_distance_*`` family of functions — no
+            # extension load required. The dimension count IS stored
+            # in the column type, so a future ``vector_concat`` /
+            # ``vector_extract`` operator can validate against it.
+            return f"F32_BLOB({self.dimensions})"
         if vendor == "sqlite":
             # sqlite-vec stores vectors in BLOB columns and exposes
             # ``vec_distance_L2`` / ``vec_distance_cosine`` over them.
@@ -156,7 +163,11 @@ class VectorField(Field[list]):
             # in unit tests that import the module before
             # ``configure``), fall back to the pgvector text form.
             vendor = "postgresql"
-        if vendor == "sqlite":
+        if vendor in ("sqlite", "libsql"):
+            # Both SQLite (sqlite-vec) and libsql (native F32_BLOB)
+            # accept the same little-endian packed-float32 wire
+            # format. libsql's ``vector32(?)`` / ``vector_distance_*``
+            # SQL functions read it directly.
             return _pack_float32(seq)
         return "[" + ",".join(repr(float(x)) for x in seq) + "]"
 
