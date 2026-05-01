@@ -12,6 +12,57 @@ Minor release. Two opt-in features land alongside the v2.4.1
 bug-hunt corpus, plus a follow-up audit pass that closed five
 issues (B1, B4, B5, B7, B9) found while writing coverage tests.
 
+### Fixed — bulk write ops now invalidate the cache
+
+- ``QuerySet.update`` / ``delete`` / ``bulk_create`` /
+  ``bulk_update`` (and the async counterparts) bypass
+  ``post_save`` / ``post_delete`` per row — the previous
+  cache layer left every cached queryset on the model
+  populated for the full TTL after a bulk write. Now each of
+  these methods schedules an invalidation through the same
+  on-commit hook the per-instance signal handlers use.
+- No-op bulk calls (empty list to ``bulk_create`` /
+  ``bulk_update``, zero-row update / delete) DO NOT churn the
+  cache or bump the version counter.
+- New helpers ``dorm.cache.invalidation.invalidate_model`` /
+  ``ainvalidate_model`` for callers that route writes outside
+  the standard QuerySet methods.
+
+### Hardened — opt-in strict signing key for multi-worker
+
+- Without ``CACHE_SIGNING_KEY`` / ``SECRET_KEY`` the cache
+  layer falls back to a per-process random key. In
+  multi-worker deployments this silently collapses the cache
+  to per-worker visibility (other workers can't verify the
+  signatures). New setting ``CACHE_REQUIRE_SIGNING_KEY`` (default
+  ``False``) refuses the fallback and raises
+  ``ImproperlyConfigured`` on first cache use — recommended
+  for any production-shaped deployment.
+
+### Fixed — cache key invariant under filter() kwarg ordering
+
+- ``filter(a=1, b=2)`` and ``filter(b=2, a=1)`` produced
+  different SQL → different cache keys → halved hit rate for
+  semantically identical queries. The cache-key digest now
+  hashes a CANONICAL representation of the queryset state
+  (sorted leaf-condition tuples, positional ``order_by``,
+  limit / offset / select_related / annotations / etc.) so
+  iteration order doesn't perturb the digest. SQL emission is
+  NOT sorted — a future query-plan tweak based on predicate
+  order would break otherwise.
+
+### Fixed — libsql async wrapper detects event-loop change
+
+- ``LibSQLAsyncDatabaseWrapper`` stamped the loop on first
+  open and reused the bound connection across every later
+  call. Pytest-asyncio per-test loops + multi-loop ASGI
+  workers triggered native crashes when a coroutine on a
+  fresh loop reached into the prior loop's connection. The
+  wrapper now checks the running loop on every ``_get_conn``
+  call and resets cached state (async conn, sync conn,
+  executor, lock) when the loop changed — next acquire opens
+  fresh.
+
 ### Security — cache payloads now HMAC-signed
 
 - ``pickle.loads`` over Redis bytes is RCE if the cache is

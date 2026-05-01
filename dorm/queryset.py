@@ -1034,8 +1034,9 @@ class QuerySet(Generic[_T]):
     # ── Result-cache helpers ──────────────────────────────────────────────────
 
     def _cache_key(self, version: int | None = None) -> str | None:
-        """Stable hash of (model, version, sql, params). Returns
-        ``None`` when the queryset isn't opted into caching.
+        """Stable hash of (model, db_alias, version, canonical query
+        state). Returns ``None`` when the queryset isn't opted into
+        caching.
 
         ``version`` is the per-model invalidation counter (see
         :func:`dorm.cache.model_cache_version`). Including it in
@@ -1043,26 +1044,87 @@ class QuerySet(Generic[_T]):
         in-flight key derived at T0 — the stale-read race
         window collapses to a single uncacheable miss instead of
         a TTL-long lifetime for a wrong row.
+
+        ``self._db`` is part of the namespace so two queries on
+        the same model routed to different ``DATABASES`` aliases
+        DON'T collide on the same cached blob.
+
+        The hash input is a CANONICAL representation of the query
+        — the AND-level filter conditions are sorted before
+        hashing so ``filter(a=1, b=2)`` and ``filter(b=2, a=1)``
+        produce the same key. Without this normalisation the
+        cache hit rate degrades silently as Python's kwarg
+        iteration order leaks into the digest. SQL emission is
+        NOT sorted (a future query-plan tweak based on predicate
+        order would break otherwise); only the cache-key shape.
         """
         if self._cache_alias is None:
             return None
+        # Build the canonical state tuple. Each leaf in
+        # ``where_nodes`` is either a ``Q`` object (kept as repr
+        # — Q already canonicalises connector + children) or a
+        # ``(field_parts, lookup, value)`` tuple from a kwarg.
+        # The tuples are sorted so kwargs iteration order
+        # doesn't perturb the digest.
+        canonical: list[Any] = []
         try:
-            conn = self._get_connection()
-            sql, params = self._query.as_select(conn)
+            and_leaves: list[tuple] = []
+            other_nodes: list[Any] = []
+            for node in self._query.where_nodes:
+                if (
+                    isinstance(node, tuple)
+                    and len(node) == 3
+                    and isinstance(node[0], list)
+                ):
+                    and_leaves.append(
+                        (tuple(node[0]), str(node[1]), repr(node[2]))
+                    )
+                else:
+                    other_nodes.append(repr(node))
+            and_leaves.sort()
+            canonical = [
+                ("where", and_leaves),
+                ("nodes", other_nodes),
+                ("order_by", list(self._query.order_by_fields)),
+                ("limit", self._query.limit_val),
+                ("offset", self._query.offset_val),
+                ("distinct", bool(self._query.distinct_flag)),
+                ("distinct_on", list(self._query.distinct_on_fields)),
+                (
+                    "select_related",
+                    list(self._query.select_related_fields),
+                ),
+                (
+                    "selected_fields",
+                    list(self._query.selected_fields)
+                    if self._query.selected_fields is not None
+                    else None,
+                ),
+                (
+                    "annotations",
+                    sorted(
+                        (k, repr(v)) for k, v in self._query.annotations.items()
+                    ),
+                ),
+            ]
         except Exception:
             return None
+
         import hashlib
         import pickle
 
         try:
-            params_bytes = pickle.dumps(params, protocol=4)
+            canon_bytes = pickle.dumps(canonical, protocol=4)
         except Exception:
-            params_bytes = repr(params).encode("utf-8")
-        digest = hashlib.sha1(sql.encode("utf-8") + params_bytes).hexdigest()
+            canon_bytes = repr(canonical).encode("utf-8")
+        digest = hashlib.sha1(
+            (self._db or "default").encode("utf-8") + b"|" + canon_bytes
+        ).hexdigest()
         from .cache import model_cache_namespace, model_cache_version
 
         v = version if version is not None else model_cache_version(self.model)
-        return f"{model_cache_namespace(self.model)}:v{v}:{digest}"
+        ns = model_cache_namespace(self.model)
+        return f"{ns}:db={self._db or 'default'}:v{v}:{digest}"
 
     def _cache_lookup_sync(self) -> list[_T] | None:
         if self._cache_alias is None:
@@ -1985,6 +2047,38 @@ class QuerySet(Generic[_T]):
                     obj.save(using=self._db)
                     return obj, False
 
+    def _invalidate_cache_after_bulk_write(self) -> None:
+        """Trigger cache invalidation for this model after a bulk
+        write operation (``update`` / ``delete`` / ``bulk_create`` /
+        ``bulk_update``). These code paths bypass ``post_save`` /
+        ``post_delete`` per row, so without this hook every
+        cached queryset would survive the bulk write — silent
+        stale data until TTL.
+
+        Routes through :func:`dorm.cache.invalidation.invalidate_model`,
+        which defers the actual bump + ``delete_pattern`` to
+        ``on_commit`` (or ``aon_commit`` in an async context).
+        Outside a transaction the underlying connection has
+        already auto-committed, so the wipe runs inline.
+        """
+        try:
+            from .cache.invalidation import invalidate_model
+
+            invalidate_model(self.model, using=self._db)
+        except Exception:
+            # Cache layer is best-effort; a misconfigured backend
+            # must not take down the bulk write.
+            pass
+
+    async def _ainvalidate_cache_after_bulk_write(self) -> None:
+        """Async counterpart — see ``_invalidate_cache_after_bulk_write``."""
+        try:
+            from .cache.invalidation import ainvalidate_model
+
+            await ainvalidate_model(self.model, using=self._db)
+        except Exception:
+            pass
+
     def update(self, **kwargs: Any) -> int:
         from .expressions import CombinedExpression, F, Value
 
@@ -2019,7 +2113,9 @@ class QuerySet(Generic[_T]):
             sql, params = scoped._query.as_update(col_kwargs, connection)
         else:
             sql, params = self._query.as_update(col_kwargs, connection)
-        return connection.execute_write(sql, params)
+        n = connection.execute_write(sql, params)
+        self._invalidate_cache_after_bulk_write()
+        return n
 
     def delete(self) -> tuple[int, dict[str, int]]:
         from .exceptions import ProtectedError
@@ -2078,6 +2174,7 @@ class QuerySet(Generic[_T]):
             sql, params = self._query.as_delete(connection)
         count = connection.execute_write(sql, params)
         total_counts[model_label] = total_counts.get(model_label, 0) + count
+        self._invalidate_cache_after_bulk_write()
         return sum(total_counts.values()), total_counts
 
     def bulk_create(
@@ -2187,6 +2284,8 @@ class QuerySet(Generic[_T]):
                     for obj, pk in zip(batch, pks):
                         if obj.__dict__.get(meta.pk.attname) is None:
                             obj.__dict__[meta.pk.attname] = pk
+        if objs:
+            self._invalidate_cache_after_bulk_write()
         return objs
 
     def _build_bulk_update_sql(
@@ -2271,6 +2370,8 @@ class QuerySet(Generic[_T]):
                     continue
                 sql, params = built
                 count += connection.execute_write(sql, params)
+        if count:
+            self._invalidate_cache_after_bulk_write()
         return count
 
     def in_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
@@ -2755,7 +2856,9 @@ class QuerySet(Generic[_T]):
             sql, params = scoped._query.as_update(col_kwargs, conn)
         else:
             sql, params = self._query.as_update(col_kwargs, conn)
-        return await conn.execute_write(sql, params)
+        n = await conn.execute_write(sql, params)
+        await self._ainvalidate_cache_after_bulk_write()
+        return n
 
     async def adelete(self) -> tuple[int, dict[str, int]]:
         from .exceptions import ProtectedError
@@ -2863,6 +2966,7 @@ class QuerySet(Generic[_T]):
             sql, params = self._query.as_delete(conn)
         count = await conn.execute_write(sql, params)
         total_counts[model_label] = total_counts.get(model_label, 0) + count
+        await self._ainvalidate_cache_after_bulk_write()
         return sum(total_counts.values()), total_counts
 
     async def avalues(self, *fields: str) -> list[dict[str, Any]]:
@@ -3011,6 +3115,8 @@ class QuerySet(Generic[_T]):
                     for obj, pk in zip(batch, pks):
                         if obj.__dict__.get(meta.pk.attname) is None:
                             obj.__dict__[meta.pk.attname] = pk
+        if objs:
+            await self._ainvalidate_cache_after_bulk_write()
         return objs
 
     async def abulk_update(
@@ -3039,6 +3145,8 @@ class QuerySet(Generic[_T]):
                     continue
                 sql, params = built
                 count += await conn.execute_write(sql, params)
+        if count:
+            await self._ainvalidate_cache_after_bulk_write()
         return count
 
     async def ain_bulk(

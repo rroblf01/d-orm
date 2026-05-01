@@ -435,11 +435,14 @@ def test_ensure_signals_connected_thread_safe() -> None:
         t.start()
     for t in threads:
         t.join()
-    # Exactly one sync handler + one async handler dispatch_uid
-    # entry for save (the lock + flag prevent duplicates).
+    # Exactly one handler per signal (lock + flag prevent
+    # duplicates). Old build registered both sync + async
+    # receivers; the new design uses one receiver that routes
+    # to the right ``on_commit`` variant internally — same
+    # invalidation outcome, half the dispatch cost.
     uids = {r[0] for r in post_save._receivers}
     save_uids = {u for u in uids if isinstance(u, str) and "cache.invalidation" in u}
-    assert save_uids == {"dorm.cache.invalidation.save", "dorm.cache.invalidation.asave"}
+    assert save_uids == {"dorm.cache.invalidation.save"}
 
 
 def test_drop_model_handles_missing_settings() -> None:
@@ -469,7 +472,11 @@ def test_drop_model_handles_cache_outage() -> None:
 
 @pytest.mark.asyncio
 async def test_adrop_model_handles_cache_outage() -> None:
-    from dorm.cache.invalidation import _adrop_model
+    """The unified async-aware receiver must swallow cache
+    backend resolution failures (broken BACKEND path,
+    ``ImproperlyConfigured`` etc.) — a save MUST never blow up
+    because the cache is misconfigured."""
+    from dorm.cache.invalidation import _drop_model
     from dorm.conf import settings
 
     prev = settings.CACHES
@@ -477,7 +484,9 @@ async def test_adrop_model_handles_cache_outage() -> None:
         "default": {"BACKEND": "nonexistent.module.Backend"},
     }
     try:
-        await _adrop_model(Author)  # must not raise
+        # Calling from an async test gives us a running loop,
+        # exercising the async branch of ``_drop_model``.
+        _drop_model(Author, using="default")  # must not raise
     finally:
         settings.CACHES = prev
 

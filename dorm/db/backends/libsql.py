@@ -306,6 +306,49 @@ class LibSQLAsyncDatabaseWrapper(SQLiteAsyncDatabaseWrapper):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._get_executor(), fn)
 
+    def _detect_loop_change(self) -> bool:
+        """Return True when the wrapper's cached connections were
+        opened on a *different* event loop than the one currently
+        running. Used to drop stale state before the next
+        connection acquire — without this, a wrapper reused
+        across loops (pytest-asyncio per-test loops, multi-loop
+        ASGI workers) would call into a turso.aio.Connection
+        bound to a closed loop and crash in native code."""
+        if self._loop is None:
+            return False
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        if current is self._loop:
+            return False
+        return True
+
+    def _reset_for_new_loop(self) -> None:
+        """Drop cached connections + executor when the event loop
+        changed. Called by ``_get_conn`` before re-acquiring."""
+        # Async conn is bound to the (now-stale) loop — best-effort
+        # close on the current thread; the underlying socket is
+        # still owned by the old loop, so the close may be a
+        # no-op. Setting ``_async_conn = None`` is what unblocks
+        # the next acquire.
+        self._async_conn = None
+        # Sync conn is loop-agnostic (runs on the executor) but
+        # the executor was allocated on the old loop's worker —
+        # shut it down so a fresh single-thread executor lives in
+        # the new loop's scope.
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=False)
+            except Exception:
+                pass
+            self._executor = None
+        self._sync_conn = None
+        self._loop = None
+        # New asyncio.Lock for the new loop — sharing the old
+        # lock would chain back to the dead loop.
+        self._lock = asyncio.Lock()
+
     async def _get_conn(self) -> Any:
         """Return the active connection.
 
@@ -314,6 +357,8 @@ class LibSQLAsyncDatabaseWrapper(SQLiteAsyncDatabaseWrapper):
         wrapped in ``self._async_conn=None`` and a separate
         ``self._sync_conn``; callers branch on ``self.sync_url``.
         """
+        if self._detect_loop_change():
+            self._reset_for_new_loop()
         if self.sync_url:
             return await self._get_sync_conn()
         return await self._get_async_conn()

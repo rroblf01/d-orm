@@ -182,6 +182,15 @@ class Settings:
     # only set this when migrating an unsigned legacy cache and
     # you can guarantee Redis is on a private network with auth.
     CACHE_INSECURE_PICKLE: bool = False
+    # Refuse to fall back to a per-process ephemeral signing key
+    # when neither ``CACHE_SIGNING_KEY`` nor ``SECRET_KEY`` is
+    # configured. Multi-worker deployments MUST share a key;
+    # without one each worker writes payloads only it can
+    # verify, collapsing the cache to per-worker visibility.
+    # Default ``False`` keeps single-process scripts working
+    # without ceremony; set ``True`` in production deployments
+    # to surface the misconfiguration loudly.
+    CACHE_REQUIRE_SIGNING_KEY: bool = False
 
     _configured = False
 

@@ -283,6 +283,18 @@ def _resolve_signing_key() -> bytes:
 
     Memoisation lets unit tests force a refresh by calling
     :func:`reset_signing_key` — production callers never need to.
+
+    Multi-worker deployments (gunicorn, uvicorn ``--workers >1``,
+    multi-process ASGI servers) MUST set ``CACHE_SIGNING_KEY`` or
+    ``SECRET_KEY``. Without one, each worker falls back to a
+    per-process random key — payloads written by one worker
+    can't be verified by another and the cache is effectively
+    per-worker (silent hit-rate collapse).
+
+    Set ``CACHE_REQUIRE_SIGNING_KEY = True`` to refuse this
+    fallback and raise :class:`ImproperlyConfigured` on first
+    cache use. Recommended for any production-shaped multi-
+    worker setup.
     """
     global _signing_key_cache
     if _signing_key_cache is not None:
@@ -300,6 +312,24 @@ def _resolve_signing_key() -> bytes:
                     value = value.encode("utf-8")
                 _signing_key_cache = bytes(value)
                 return _signing_key_cache
+        # Honour the strict-mode opt-in BEFORE falling back to
+        # an ephemeral random key — that fallback silently
+        # breaks multi-worker deployments.
+        try:
+            require = bool(getattr(settings, "CACHE_REQUIRE_SIGNING_KEY", False))
+        except Exception:
+            require = False
+        if require:
+            raise ImproperlyConfigured(
+                "settings.CACHE_REQUIRE_SIGNING_KEY is True but no "
+                "CACHE_SIGNING_KEY (or SECRET_KEY) is configured. "
+                "Set one before using qs.cache(...) — without a "
+                "shared key, multi-worker deployments end up with "
+                "per-worker caches because each worker generates "
+                "its own random key."
+            )
+    except ImproperlyConfigured:
+        raise
     except Exception:
         pass
     _signing_key_cache = _ephemeral_signing_key()

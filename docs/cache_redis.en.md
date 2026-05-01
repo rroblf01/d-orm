@@ -53,6 +53,27 @@ To disable signing (only for migrating an unsigned legacy cache
 on a private trusted network), set
 `CACHE_INSECURE_PICKLE = True`. Don't.
 
+### Multi-worker production
+
+In a multi-worker deployment (gunicorn, uvicorn `--workers >1`,
+multi-process ASGI servers) every worker that falls back to
+the per-process random key generates its OWN key. Payloads
+written by one worker can't be verified by another → cache
+hit-rate collapses to per-worker visibility, silently. To
+catch this misconfiguration loudly, set:
+
+```python
+dorm.configure(
+    ...,
+    CACHE_REQUIRE_SIGNING_KEY=True,
+)
+```
+
+The first cache use in a worker without an explicit
+`CACHE_SIGNING_KEY` (or `SECRET_KEY`) will then raise
+`ImproperlyConfigured` with a clear pointer at the misconfig.
+Recommended for any production-shaped deployment.
+
 ## Configuration
 
 ```python
@@ -162,6 +183,69 @@ goes through `delete_pattern`. Helpers exposed on
 - `bump_model_cache_version(model)` → atomic increment;
   returns the new value. Called by the signal handler before
   it issues `delete_pattern`.
+
+## Known gaps and edge cases
+
+A few scenarios are intentionally NOT handled — flag them at
+review time so you don't trip over them in production:
+
+### Multi-process version-counter drift
+
+The per-model version counter is **process-local**. Workers
+carry independent counters, so a save in worker A doesn't bump
+worker B's counter. Cross-process invalidation still works
+because both ends share the same Redis namespace and
+``delete_pattern`` wipes every version-prefixed key. The
+practical consequences:
+
+- After a save, the writer's `:vN+1:` key is the next
+  consumer in the same worker; other workers keep using
+  `:vN:` until their own next write or read.
+- Stale `:v0:`, `:v1:`, … entries can accumulate in Redis
+  between writes; the next ``delete_pattern`` from any worker
+  cleans them. Set a sensible TTL (default 300 s) so
+  long-cold keys don't pile up.
+
+If you need cross-process version coherence (rare — the
+``delete_pattern`` mechanism normally suffices), implement a
+custom backend whose ``model_cache_version`` reads / writes a
+shared atomic counter (Redis ``INCR``).
+
+### Multi-table inheritance
+
+Saving a child instance fires ``post_save`` for the child
+class; querysets cached on the **parent** model use the
+parent's namespace and are NOT invalidated. Avoid caching
+queries on a parent of a multi-table inheritance hierarchy if
+the children change frequently.
+
+### `count()` / `exists()` / `aggregate()` are not cached
+
+The cache hook lives in ``QuerySet._fetch_all`` (the path
+``__iter__`` / ``await qs`` use). ``count()``, ``exists()``,
+``aggregate()`` and the explain helpers issue their own SQL
+and bypass the cache entirely. To cache a row count, cache the
+materialised list (``len(qs)`` after ``.cache(...)``), or
+manage a separate counter via ``set`` / ``get`` on the cache
+backend directly.
+
+### M2M relation mutations
+
+``manager.add(...)`` / ``set(...)`` / ``clear(...)`` on a
+``ManyToManyField`` write through the junction table; they do
+NOT fire ``post_save`` on the parent. Cached querysets that
+filter on the M2M relation stay populated until the next save
+on the parent or until the TTL expires. Wrap M2M mutations in
+an explicit ``Model.save()`` call when consistency matters.
+
+### `_cache_key` fallback when params are unpicklable
+
+The key digest pickles bind parameters; if a parameter type
+can't be pickled (custom expression, lambda) the wrapper
+falls back to ``repr(params)``. Distinct unpicklable values
+sharing the same ``repr`` would collide on the cache key —
+edge case (you'd need a deliberately misleading ``__repr__``)
+but worth knowing about.
 
 ## Cache outages don't break queries
 

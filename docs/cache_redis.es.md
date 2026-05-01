@@ -50,6 +50,27 @@ Para desactivar firma (sólo migrando caché legacy sin firmar
 en red privada de confianza), usar `CACHE_INSECURE_PICKLE = True`.
 No lo hagas.
 
+### Producción multi-worker
+
+En deployment multi-worker (gunicorn, uvicorn `--workers >1`,
+ASGI multi-proceso) cada worker que cae al random key per-proceso
+genera SU PROPIA key. Payloads escritos por un worker no
+verifican en otro → cache hit-rate cae a visibilidad
+per-worker, silenciosamente. Para detectar esta misconfig
+ruidosamente:
+
+```python
+dorm.configure(
+    ...,
+    CACHE_REQUIRE_SIGNING_KEY=True,
+)
+```
+
+El primer uso de caché en un worker sin `CACHE_SIGNING_KEY`
+(o `SECRET_KEY`) explícito lanzará `ImproperlyConfigured` con
+puntero claro al fallo. Recomendado para cualquier deployment
+de producción.
+
 ## Configuración
 
 ```python
@@ -147,6 +168,66 @@ yendo por `delete_pattern`. Helpers en `dorm.cache`:
 - `bump_model_cache_version(model)` → increment atómico;
   devuelve nuevo valor. El signal handler lo llama antes de
   emitir `delete_pattern`.
+
+## Gaps conocidos y edge cases
+
+Algunos escenarios NO se manejan a propósito — flags para que
+no te tropieces en producción:
+
+### Drift del contador de versión multi-proceso
+
+El contador de versión per-modelo es **process-local**.
+Workers tienen contadores independientes, así un save en
+worker A no bumpea el contador de worker B. La invalidación
+cross-process sigue funcionando porque comparten Redis y
+``delete_pattern`` limpia todas las keys con prefijo de
+versión. Consecuencias prácticas:
+
+- Tras un save, la `:vN+1:` del writer es la nueva key en su
+  worker; otros workers siguen usando `:vN:` hasta su próximo
+  write o read.
+- Entradas `:v0:`, `:v1:`, … pueden acumularse en Redis entre
+  writes; el siguiente ``delete_pattern`` de cualquier worker
+  las limpia. Pon TTL razonable (default 300s) para que keys
+  fríos no se amontonen.
+
+Si necesitas coherencia cross-process (raro — ``delete_pattern``
+suele bastar), implementa backend custom cuyo
+``model_cache_version`` lea/escriba contador atómico
+compartido (Redis ``INCR``).
+
+### Multi-table inheritance
+
+Guardar instancia child dispara ``post_save`` del child;
+querysets cacheados sobre el **parent** usan namespace del
+parent y NO se invalidan. Evita cachear queries sobre parent
+de jerarquía MTI si los children cambian frecuente.
+
+### `count()` / `exists()` / `aggregate()` NO se cachean
+
+El hook de caché vive en ``QuerySet._fetch_all`` (path que
+usan ``__iter__`` / ``await qs``). ``count()``, ``exists()``,
+``aggregate()`` y los helpers explain lanzan su propio SQL y
+saltan la caché. Para cachear un count, materializa la lista
+(``len(qs)`` tras ``.cache(...)``) o gestiona contador aparte
+con ``set`` / ``get`` directo sobre el backend.
+
+### Mutaciones M2M
+
+``manager.add(...)`` / ``set(...)`` / ``clear(...)`` en
+``ManyToManyField`` escriben sobre la tabla de junction; NO
+disparan ``post_save`` del parent. Querysets cacheados que
+filtran por M2M siguen poblados hasta próximo save del parent
+o expiración de TTL. Envuelve mutaciones M2M en ``save()``
+del parent si la consistencia importa.
+
+### Fallback de `_cache_key` con params no-picklables
+
+El digest pickle-a los bind parameters; si algún param no
+sobrevive pickle (expression custom, lambda) el wrapper cae a
+``repr(params)``. Valores distintos no-picklables con mismo
+``repr`` colisionarían en la cache key — edge case (necesitas
+``__repr__`` malicioso) pero conviene saber.
 
 ## Caídas de caché no rompen queries
 
