@@ -100,8 +100,8 @@ class CheckConstraint(BaseConstraint):
             self.check, table_alias=None, connection=connection
         )
 
-    def constraint_sql(self, table: str, connection: Any) -> str:
-        sql, params = self._compile_check(table, connection=connection)
+    def _check_body(self, connection: Any) -> str:
+        sql, params = self._compile_check("", connection=connection)
         if params:
             # Splicing user-controlled values into a CHECK predicate is
             # safe (the values come from the developer's source code,
@@ -111,7 +111,22 @@ class CheckConstraint(BaseConstraint):
             from .fields import _inline_literal  # noqa: PLC0415
 
             sql = _inline_literal(sql, params)
-        return f'ALTER TABLE "{table}" ADD CONSTRAINT "{self.name}" CHECK ({sql})'
+        return sql
+
+    def create_sql_inline(self, connection: Any) -> str:
+        """In-table CHECK clause: ``CONSTRAINT "name" CHECK (...)``.
+
+        Required on SQLite — its ``ALTER TABLE`` does not support
+        ``ADD CONSTRAINT`` (only ADD COLUMN / DROP COLUMN / RENAME),
+        so check constraints must live inside ``CREATE TABLE``.
+        """
+        return f'CONSTRAINT "{self.name}" CHECK ({self._check_body(connection)})'
+
+    def constraint_sql(self, table: str, connection: Any) -> str:
+        return (
+            f'ALTER TABLE "{table}" ADD CONSTRAINT "{self.name}" '
+            f"CHECK ({self._check_body(connection)})"
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CheckConstraint):

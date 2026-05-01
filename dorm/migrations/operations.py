@@ -76,6 +76,19 @@ class CreateModel(Operation):
             ]
             constraint_cols = ", ".join(f'"{c}"' for c in composite_pk_cols)
             col_defs.append(f"PRIMARY KEY ({constraint_cols})")
+
+        # SQLite has no ``ALTER TABLE ADD CONSTRAINT`` — CHECK clauses
+        # must live inside CREATE TABLE. Split constraints into inline
+        # (embedded below) and deferred (post-CREATE ALTER TABLE).
+        vendor = getattr(connection, "vendor", "sqlite")
+        deferred_constraints = []
+        for c in self.options.get("constraints", []) or []:
+            inline = getattr(c, "create_sql_inline", None)
+            if vendor == "sqlite" and inline is not None:
+                col_defs.append(inline(connection))
+            else:
+                deferred_constraints.append(c)
+
         sql = f'CREATE TABLE IF NOT EXISTS "{table}" (\n  {",  ".join(col_defs)}\n)'
         connection.execute_script(sql)
 
@@ -85,11 +98,10 @@ class CreateModel(Operation):
                 app_label, connection, from_state, to_state
             )
 
-        # Declared constraints (CheckConstraint / UniqueConstraint): emit
-        # the appropriate DDL. The base column DDL already reflects
-        # ``unique=True`` / single-field UNIQUE; this loop covers
-        # composite and conditional constraints.
-        for c in self.options.get("constraints", []) or []:
+        # Declared constraints not embedded above (UniqueConstraint on
+        # PostgreSQL → ALTER TABLE ADD CONSTRAINT; partial unique →
+        # CREATE UNIQUE INDEX, which works on SQLite too).
+        for c in deferred_constraints:
             connection.execute_script(c.constraint_sql(table, connection))
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
@@ -275,6 +287,15 @@ class AlterField(Operation):
             sql = _field_to_column_sql(fname, f, connection)
             if sql:
                 cols_sql.append(sql)
+        # Embed CHECK clauses inline — SQLite ALTER TABLE ADD CONSTRAINT
+        # is unsupported, so we cannot re-attach them afterwards.
+        deferred_rebuild = []
+        for c in model_state.get("options", {}).get("constraints", []) or []:
+            inline = getattr(c, "create_sql_inline", None)
+            if inline is not None:
+                cols_sql.append(inline(connection))
+            else:
+                deferred_rebuild.append(c)
         connection.execute_script(
             f'CREATE TABLE "{tmp}" (\n  ' + ",\n  ".join(cols_sql) + "\n)"
         )
@@ -309,10 +330,10 @@ class AlterField(Operation):
             connection.execute_script(forward)
 
         # Re-create constraints declared on the model
-        # (Meta.constraints). CheckConstraint / UniqueConstraint
-        # both hang off the table definition in SQLite, so
-        # dropping it loses them too.
-        for c in model_state.get("options", {}).get("constraints", []) or []:
+        # (Meta.constraints). CHECK clauses were embedded inline in
+        # the tmp CREATE TABLE above — only deferred ones (e.g.
+        # UniqueConstraint → CREATE UNIQUE INDEX) need re-emitting.
+        for c in deferred_rebuild:
             try:
                 forward = c.constraint_sql(table, connection)
             except Exception:
