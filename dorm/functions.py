@@ -69,25 +69,61 @@ def _compile_expr(expr: Any, table_alias: str | None = None) -> tuple[str, list]
     return "%s", [expr]
 
 
-def _compile_condition(condition: Any, table_alias: str | None = None) -> tuple[str, list]:
-    """Compile a Q object to WHERE-style (sql, params)."""
+def _compile_condition(
+    condition: Any,
+    table_alias: str | None = None,
+    *,
+    connection: Any = None,
+    vendor: str | None = None,
+) -> tuple[str, list]:
+    """Compile a Q object to WHERE-style (sql, params).
+
+    ``connection`` (when known) lets the lookup layer pick the right
+    vendor branch — ``EXTRACT`` vs ``STRFTIME`` for ``__year`` /
+    ``__date``, ``= ANY(%s)`` vs ``IN (?, …)`` for ``__in``, and so
+    on. Without it the function falls back to ``vendor="sqlite"``
+    which used to silently produce broken SQL on PostgreSQL inside
+    ``Case/When``, ``CheckConstraint`` and partial-index predicates.
+
+    For dotted lookup keys (``Q(author__name="x")``) we walk every
+    segment except the last as a relation hop and qualify the last
+    column with the relation's table alias instead of dropping the
+    prefix. Without this the emitted SQL referenced a column on the
+    *current* table that doesn't exist there.
+    """
     from .lookups import build_lookup_sql, parse_lookup_key
 
     if not isinstance(condition, Q):
         return "", []
 
+    if vendor is None:
+        vendor = getattr(connection, "vendor", "sqlite")
+
     parts: list[str] = []
     params: list[Any] = []
     for child in condition.children:
         if isinstance(child, Q):
-            sql, p = _compile_condition(child, table_alias)
+            sql, p = _compile_condition(
+                child, table_alias, connection=connection, vendor=vendor
+            )
         elif isinstance(child, tuple) and len(child) == 2:
             key, value = child
             field_parts, lookup = parse_lookup_key(key)
-            fname = field_parts[-1]
-            ta = f'"{table_alias}".' if table_alias else ""
-            col = f'{ta}"{fname}"'
-            sql, p = build_lookup_sql(col, lookup, value)
+            # Multi-segment paths (``author__name``) — qualify with
+            # the deepest path's alias so the column reference is
+            # correct, not just the leaf field name on the local
+            # table.
+            if len(field_parts) > 1:
+                join_alias = (table_alias or "_t") + "_" + "_".join(
+                    field_parts[:-1]
+                )
+                fname = field_parts[-1]
+                col = f'"{join_alias}"."{fname}"'
+            else:
+                fname = field_parts[-1]
+                ta = f'"{table_alias}".' if table_alias else ""
+                col = f'{ta}"{fname}"'
+            sql, p = build_lookup_sql(col, lookup, value, vendor=vendor)
         else:
             continue
         if sql:
@@ -183,7 +219,19 @@ class Now(Func):
 
 
 class Concat(Func):
-    """Concatenate strings using the || operator (works on SQLite and PostgreSQL)."""
+    """Concatenate string expressions, treating NULL operands as empty.
+
+    Django's ``Concat`` skips NULL operands so the result is always a
+    string. The naive ``a || b`` we used previously returns NULL on
+    SQLite and PostgreSQL whenever *any* operand is NULL — which
+    silently dropped rows from ``filter(full__contains=…)`` queries
+    when one of the source columns was nullable.
+
+    Each operand is now wrapped in ``COALESCE(expr, '')`` so a NULL
+    contributes the empty string instead of poisoning the whole
+    expression. This matches Django's documented behaviour on both
+    backends.
+    """
 
     function = "CONCAT"
 
@@ -192,7 +240,7 @@ class Concat(Func):
         params: list[Any] = []
         for expr in self.expressions:
             sql, p = _compile_expr(expr, table_alias)
-            parts.append(sql)
+            parts.append(f"COALESCE({sql}, '')")
             params.extend(p)
         return " || ".join(parts), params
 
@@ -224,7 +272,9 @@ class When:
         self.then = then
 
     def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
-        cond_sql, cond_params = _compile_condition(self.condition, table_alias)
+        cond_sql, cond_params = _compile_condition(
+            self.condition, table_alias, connection=kwargs.get("connection")
+        )
         then_sql, then_params = _compile_expr(self.then, table_alias)
         return f"WHEN {cond_sql} THEN {then_sql}", cond_params + then_params
 
@@ -256,7 +306,7 @@ class Case:
         parts: list[str] = []
         params: list[Any] = []
         for when in self.whens:
-            sql, p = when.as_sql(table_alias)
+            sql, p = when.as_sql(table_alias, connection=kwargs.get("connection"))
             parts.append(sql)
             params.extend(p)
         default_sql = ""

@@ -71,7 +71,22 @@ class Signal:
         skipped, so registering one does not silently turn synchronous
         ``Model.save()`` calls into a no-op for that receiver.
         """
-        uid: Any = dispatch_uid if dispatch_uid is not None else id(receiver)
+        # Stable id for bound methods: ``id(obj.method)`` returns the
+        # id of a *temporary* bound-method object that gets GC'd as
+        # soon as ``connect`` returns. CPython recycles those ids
+        # freely, so a subsequent ``connect(other_obj.method)`` could
+        # produce the same id and silently disconnect the first
+        # receiver. Build a stable composite uid out of the bound
+        # instance + underlying function instead.
+        if dispatch_uid is not None:
+            uid: Any = dispatch_uid
+        else:
+            self_obj = getattr(receiver, "__self__", None)
+            func = getattr(receiver, "__func__", None)
+            if self_obj is not None and func is not None:
+                uid = (id(self_obj), id(func))
+            else:
+                uid = id(receiver)
         self._receivers = [r for r in self._receivers if r[0] != uid]
         if weak:
             try:
@@ -88,7 +103,20 @@ class Signal:
         sender: type | None = None,
         dispatch_uid: str | None = None,
     ) -> bool:
-        uid: Any = dispatch_uid if dispatch_uid is not None else (id(receiver) if receiver is not None else None)
+        # Mirror the same composite-uid scheme used by ``connect``
+        # so disconnection of a bound method targets the same row
+        # in ``_receivers``.
+        if dispatch_uid is not None:
+            uid: Any = dispatch_uid
+        elif receiver is not None:
+            self_obj = getattr(receiver, "__self__", None)
+            func = getattr(receiver, "__func__", None)
+            if self_obj is not None and func is not None:
+                uid = (id(self_obj), id(func))
+            else:
+                uid = id(receiver)
+        else:
+            uid = None
         before = len(self._receivers)
         if uid is not None:
             self._receivers = [r for r in self._receivers if r[0] != uid]

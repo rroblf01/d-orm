@@ -56,11 +56,28 @@ class ContentTypeManager(Manager):
     def get_for_id(self, ct_id: int) -> "ContentType":
         """Convenience for descriptor code paths that already have an
         integer ``content_type_id`` and don't want to repeat the
-        ``get(pk=…)`` boilerplate."""
-        return self.get(pk=ct_id)
+        ``get(pk=…)`` boilerplate. On ``DoesNotExist`` we drop any
+        cached entry that pointed at the missing pk before re-raising
+        — the cache is now stale (table likely truncated +
+        re-migrated mid-process) and the next ``get_for_model`` call
+        must re-fetch instead of returning the dangling row."""
+        try:
+            return self.get(pk=ct_id)
+        except ContentType.DoesNotExist:
+            self._evict_pk(ct_id)
+            raise
 
     async def aget_for_id(self, ct_id: int) -> "ContentType":
-        return await self.aget(pk=ct_id)
+        try:
+            return await self.aget(pk=ct_id)
+        except ContentType.DoesNotExist:
+            self._evict_pk(ct_id)
+            raise
+
+    def _evict_pk(self, ct_id: int) -> None:
+        for k, v in list(self._cache.items()):
+            if v.pk == ct_id:
+                del self._cache[k]
 
     def clear_cache(self) -> None:
         """Drop the in-memory ``(app_label, model)`` cache. Useful in

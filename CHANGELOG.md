@@ -8,10 +8,373 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.4.1] - 2026-05-01
 
-Bug-hunt patch release. Fifteen latent correctness / dataloss /
-async-parity / migration-safety issues surfaced by a multi-agent
-audit, all closed with regression tests in
-``tests/test_bug_hunt_v2_5.py``. No public API changes.
+Bug-hunt patch release. Fifty-three latent correctness / dataloss /
+async-parity / migration-safety / security issues surfaced across
+three multi-agent audit rounds, all closed with regression tests
+in ``tests/test_bug_hunt_v2_5.py`` (round 1, 48 cases),
+``tests/test_bug_hunt_v2_6.py`` (round 2, 46 cases) and
+``tests/test_bug_hunt_v2_7.py`` (round 3, 74 cases). No public API
+changes.
+
+### Round 3 — Fixed (24 issues)
+
+#### `filter(field=None)` returned 0 rows instead of NULL rows
+
+- ``filter(deleted_at=None)`` emitted ``deleted_at = NULL`` (always
+  FALSE in standard SQL) — silently dropping every row the user
+  asked for. The query compiler now rewrites ``= None`` to
+  ``IS NULL`` (and ``exclude(...=None)`` to ``IS NOT NULL``),
+  matching Django's documented behaviour.
+
+#### Sliced `update()` / `aupdate()` ignored LIMIT (silent dataloss)
+
+- Sister bug to the round-1 sliced-``delete()`` fix. ``qs[:5].update
+  (active=False)`` deactivated the entire filtered population, not
+  the requested 5 rows. Both sync and async ``update`` now collect
+  the bounded pks first and re-scope the UPDATE through
+  ``WHERE pk IN (collected_pks)`` whenever a slice is active.
+
+#### `_compile_expr` ignored `Subquery` / `Exists` / function expressions in update kwargs
+
+- ``Book.objects.update(title=Subquery(...))`` bound the
+  ``Subquery`` *object itself* as a parameter — the driver crashed
+  with ``cannot adapt type 'Subquery'``. ``_compile_expr`` now
+  routes any expression with an ``as_sql`` method through its own
+  emitter and threads the outer table alias / model so embedded
+  ``OuterRef`` references resolve.
+
+#### `_is_unsaved` treated `Model(pk=0)` as already-saved
+
+- ``Model(pk=0).save()`` (and any other DB-controlled-but-falsy
+  pk) routed through UPDATE, affected zero rows, and returned
+  silently — no insert, no error. Adopted Django's ``_state.adding``
+  flag: True on fresh instances, False after a successful INSERT
+  or DB hydration. The legacy ``pk is None`` heuristic remains as
+  a fallback for instances that predate ``_state``.
+
+#### `_adapt_placeholders` corrupted `%s` inside SQL string literals
+
+- The PG ``%s`` → ``$N`` rewrite ran a naive ``re.sub`` over the
+  full SQL — including literals. ``WHERE name = 'foo%s_bar'``
+  became ``'foo$1_bar'``, breaking ``RawQuerySet`` and any LIKE
+  pattern containing the placeholder sequence as part of the
+  string. The rewrite now tokenises quoted runs (with ``''``
+  escaping) and only renumbers bare ``%s`` between them.
+
+#### `only().defer()` chain undid the projection restriction; `db_column` ignored
+
+- ``only("a", "b").defer("a")`` widened the SELECT back to
+  "all columns minus a", silently undoing the ``only()`` step.
+  ``own_defer`` also held *attnames* but compared them against
+  *column names*, so ``defer("name")`` with
+  ``db_column="display_name"`` was a no-op. Both fixed.
+
+#### `bulk_create(unique_fields=…)` ignored `db_column` overrides
+
+- ``unique_fields=["external_id"]`` interpolated the attname
+  verbatim into ``ON CONFLICT (...)`` — even when the field
+  declared ``db_column="ext_uid"``. PG raised *no unique
+  constraint matching the columns*. ``unique_fields`` now
+  resolves through ``meta.get_field(...).column`` like
+  ``update_fields`` already did.
+
+#### `values()` / `values_list()` did not emit JOINs for FK traversal
+
+- ``qs.values("publisher__name")`` stored ``"publisher__name"``
+  literally in ``selected_fields``; ``get_columns`` then emitted
+  it as a plain column reference with no JOIN — crashing or
+  pulling the wrong column. The compiler now resolves dotted
+  paths through ``_resolve_column`` (registering the JOIN) and
+  aliases the projection back to the user-visible dotted name so
+  ``row["publisher__name"]`` Just Works.
+
+#### `OneToOneField` had no reverse descriptor
+
+- ``OneToOneField`` inherited from ``RelatedField`` directly, not
+  ``ForeignKey``, so the reverse-side wiring in
+  ``ForeignKey.contribute_to_class`` never ran.
+  ``target_instance.<related_name>`` raised ``AttributeError``.
+  Added a dedicated ``ReverseOneToOneDescriptor`` that returns
+  the single related instance (or raises ``DoesNotExist``),
+  caches the result on the source instance, and supports
+  reverse-side assignment.
+
+#### `BinaryField` returned `memoryview` from PostgreSQL
+
+- psycopg adapts ``BYTEA`` to ``memoryview``; without a
+  ``from_db_value`` override the field's ``Field[bytes]``
+  annotation lied and ``obj.data.startswith(b"\x89")`` raised
+  ``AttributeError``. Now coerces every db-returned value to
+  ``bytes``.
+
+#### `VectorField.from_db_value` accepted wrong-dimension vectors
+
+- The write path enforced ``len(seq) == dimensions``; the read
+  path didn't. A corrupted column or a cross-dimension
+  migration silently round-tripped the wrong shape. Now raises
+  ``ValidationError`` at hydration.
+
+#### `annotate()` collided with field names without warning
+
+- ``annotate(name=Count("books"))`` on a model with a ``name``
+  column emitted SELECT with two ``"name"`` outputs and hydrated
+  whichever the driver kept. Django raises ``ValueError`` here;
+  djanorm now does too. ``alias()`` retains the legacy
+  field-shadow behaviour because alias-only names never reach
+  the SELECT list.
+
+#### `NPlusOneDetector` template normalisation missed several literal shapes
+
+- Negative numbers (``-5``), hex literals (``0xABCD``), scientific
+  notation (``1.5e10``) and PG byte strings (``X'…'``) were not
+  collapsed. Mixed-sign loops and any of those literal shapes
+  produced multiple templates per N+1 pattern, slipping past the
+  detector. Patterns extended to cover them.
+
+#### `Q.__invert__` shared mutable nested children
+
+- ``q = Q(a=1) & Q(b=2); ~q`` returned a Q whose nested children
+  were the *same instances* as the original's; mutating one
+  bled to the other. Now deep-copies every nested Q wrapper.
+  Tuple children stay shared (tuples are immutable).
+
+#### Self-correlated subqueries (``Exists(SameModel.filter(pk=OuterRef("pk")))``) had alias collisions
+
+- Both outer and inner used ``alias = table``, so the
+  ``OuterRef`` reference was ambiguous on PG and silently bound
+  to the inner row on SQLite. Self-correlated subqueries now
+  alias the inner side as ``"<table>_sub"``; ``_resolve_column``
+  honours the per-query ``_self_alias`` so inner column refs
+  qualify correctly.
+
+#### `Manager.from_queryset` shadowed user QuerySet overrides
+
+- The proxy generator skipped any QS method whose name appeared
+  on ``BaseManager``, including the user's own override of
+  ``count`` / ``filter`` / ``update`` etc. A custom
+  ``def update(self, *, dry_run=False, **kw)`` on the QuerySet
+  was unreachable through the manager. Reflection now always
+  proxies methods declared directly on the user's QuerySet
+  class, even when the name collides with a BaseManager proxy.
+
+#### `configure(DATABASES=...)` did not invalidate cached connections
+
+- A second ``configure(DATABASES={"default": cfg_b})`` kept the
+  ``cfg_a`` wrapper alive in ``_sync_connections`` /
+  ``_async_connections``. Subsequent queries silently hit the
+  previous backend. ``configure`` now calls
+  ``reset_connections`` whenever ``DATABASES`` changes (skipped
+  when only ``STORAGES`` etc. is updated).
+
+#### `Meta.default_manager_name` was silently ignored
+
+- The metaclass always picked the first declared manager.
+  ``Meta.default_manager_name`` is now honoured: the named
+  manager becomes ``_default_manager``; an unknown name raises
+  ``ImproperlyConfigured`` so the typo surfaces immediately.
+
+#### Signal connect / disconnect collided on bound-method ids
+
+- ``id(obj.method)`` returns the id of a *temporary* bound-method
+  that gets GC'd as soon as ``connect`` returns. CPython
+  recycles those ids freely, so a subsequent
+  ``connect(other_obj.method)`` could produce the same id and
+  silently disconnect the first receiver. Both ``connect`` and
+  ``disconnect`` now key bound methods on a stable composite
+  ``(id(obj), id(func))`` uid.
+
+#### Inherited ``Manager`` subclasses with ``__init__`` args crashed at child-model definition
+
+- Re-instantiation via ``mgr.__class__()`` required a zero-arg
+  constructor — custom ``class TenantManager(Manager): __init__
+  (self, tenant)`` raised ``TypeError`` the moment a child model
+  was defined. Now uses ``copy.copy`` to clone the parent's
+  manager instance, preserving constructor args (and any
+  post-init attributes) without re-running ``__init__``.
+
+#### `DurationField._parse_iso8601` rejected `str(timedelta)` for negatives
+
+- Python's ``str(timedelta(hours=-1, minutes=-30))`` is
+  ``"-1 day, 22:30:00"``. The previous parser accepted only
+  ``HH:MM:SS[.ffffff]``; any negative interval read back via
+  ``str(td)`` raised ``ValidationError``. Now strips the
+  ``"-N day(s),"`` prefix and applies the offset.
+
+#### ContentType cache survived test teardown / re-migration windows
+
+- The ``(app_label, model)`` → instance cache lived in a
+  ``ClassVar`` dict. Tests that truncate the table and re-migrate
+  inside the same process kept getting the old cached row, whose
+  pk no longer existed. ``get_for_id`` now evicts the cache
+  entry on ``DoesNotExist`` so the next ``get_for_model`` call
+  rebuilds from the live table; ``reset_connections`` also
+  clears the cache as a belt-and-braces measure.
+
+#### `GenericForeignKey.for_concrete_model` flag was a documented no-op
+
+- The constructor stored the flag, ``__set__`` ignored it. With
+  proxy / multi-table inheritance the GFK stored the
+  *subclass* CT instead of the concrete parent (Django's
+  default), breaking polymorphic queries that filter by
+  concrete CT. Now resolves through
+  ``type(value)._meta.concrete_model`` when the flag is set.
+
+#### `__search` lookup hardcoded the ``'english'`` text-search dictionary
+
+- Spanish / multi-lingual apps couldn't configure the dictionary
+  via ``filter(title__search="…")`` — they had to drop to
+  ``SearchQuery`` directly. Now reads from
+  ``settings.SEARCH_CONFIG`` (default ``"english"``) and
+  validates the value as a SQL identifier before splicing.
+
+### Earlier rounds — see entries below for rounds 1 and 2.
+
+
+
+### Fixed — `Aggregate(filter=Q(...))` was accepted but silently ignored
+
+- ``Sum("amount", filter=Q(status="paid"))`` stored ``filter`` on
+  the instance but ``as_sql`` never referenced it, so the aggregate
+  summed every row regardless of the predicate. Reporting code
+  silently produced wrong totals — worst-class bug. The compiler
+  now emits ``FILTER (WHERE …)`` on PostgreSQL and wraps the
+  expression in a ``CASE WHEN … THEN expr END`` on SQLite (so the
+  aggregate skips non-matching rows there too).
+
+### Fixed — `_compile_subquery` (`__in qs`) dropped JOINs, ignored `.values()`
+
+- Three failures on the same site:
+  - FK-traversal in the inner queryset
+    (``Book.objects.filter(genre__name="x")``) registered a JOIN
+    that the bare ``SELECT pk FROM table WHERE …`` form discarded,
+    crashing with *missing FROM-clause entry* on PG / *no such
+    column* on SQLite.
+  - ``parent.filter(child__in=Book.objects.values("author_id"))``
+    always projected the model PK regardless of ``.values()`` —
+    the comparison was silently against the wrong column.
+  - Annotations / vendor-aware date-part lookups inside the inner
+    queryset were dropped along with their JOINs.
+  All three preserved now: WHERE compiles first so joins are
+  registered, ``selected_fields`` chooses the projected column,
+  and the JOIN clauses follow the SELECT.
+
+### Fixed — `_compile_condition` dropped FK-traversal segments + assumed SQLite vendor
+
+- ``Q(author__name="x")`` inside ``When(...)`` / ``CheckConstraint``
+  / partial-index predicates emitted ``"name" = %s`` against the
+  *current* table — the ``author`` segment silently disappeared
+  and the SQL referenced a non-existent column. ``__year``, ``__date``,
+  ``__in`` and friends always took the SQLite branch because
+  ``build_lookup_sql`` was called without ``vendor=``, so PG
+  ``CHECK`` constraints with date-part predicates raised
+  ``function strftime(unknown, timestamp) does not exist``.
+  ``_compile_condition`` now walks every relation hop and threads
+  the resolved vendor (or an explicit ``vendor=`` kwarg) through to
+  the lookup layer.
+
+### Fixed — `Concat(F('a'), F('b'))` returned NULL when any operand was NULL
+
+- The ``a || b`` expansion poisoned the result when *any* operand
+  was NULL on both PG and SQLite, where Django's ``Concat`` skips
+  NULLs and returns the concatenation of the non-NULL parts. Each
+  operand is now wrapped in ``COALESCE(expr, '')`` so a NULL
+  contributes the empty string. ``filter(full__contains="Smith")``
+  used to silently drop every row where any source column was
+  NULL; now matches the documented behaviour.
+
+### Fixed — `__in` with a generator (or any non-sized iterable) raised `TypeError`
+
+- ``filter(id__in=(x.pk for x in some_iter))`` crashed with ``object
+  of type 'generator' has no len()`` because ``len(value)`` ran on
+  the un-materialised iterable. The lookup builder now materialises
+  ``value`` once into a list — generators, sets, dict_values, and
+  the rest of the iterable hierarchy all work.
+
+### Fixed — `__regex` / `__iregex` raised on PostgreSQL
+
+- Templates emitted SQLite's ``REGEXP`` keyword on every backend.
+  PG raised ``syntax error at or near "REGEXP"``. The lookup is
+  now vendor-aware: PG uses ``~`` (case-sensitive) and ``~*``
+  (case-insensitive), SQLite keeps ``REGEXP``.
+
+### Fixed — `migrate(dry_run=True)` wrote to the migration recorder
+
+- ``_sync_squashed`` ran *before* ``_apply_forward`` swapped in the
+  dry-run capture proxy, so it called ``self.recorder.record_applied``
+  through the real connection. The docstring promised "the migration
+  recorder is **not** updated"; now true: the squashed-sync step is
+  skipped entirely on dry-run.
+
+### Fixed — `FileSystemStorage` allowed symlink-based sandbox escape
+
+- ``_resolve_path`` collapsed ``..`` segments lexically (``abspath``)
+  but did NOT follow symlinks. A symlink stored inside the storage
+  root (``media/escape -> /etc``) passed the prefix check while the
+  subsequent ``open()`` followed the link out of the sandbox. Both
+  sides of the comparison now use ``os.path.realpath``, which
+  resolves symlinks too.
+
+### Fixed — `dorm migrate <app> <missing_target>` exited 0
+
+- The ``except ValueError`` branch in ``cmd_migrate`` printed an
+  error and continued; the loop completed and the process exited
+  with status 0. CI gating on ``dorm migrate`` couldn't catch a
+  missing / invalid target. Now ``sys.exit(1)`` after the error
+  message — same exit-code contract as ``dorm dbcheck``.
+
+### Fixed — `serialize.load` couldn't load fixtures with forward FK references
+
+- The single insertion loop walked records in fixture order. Self-
+  referential FKs and cyclic graphs (the canonical cases ``dumpdata``
+  itself can produce) hit ``IntegrityError: FK violates`` because
+  the parent row appeared after its child. ``load`` now defers FK
+  validation for the duration of the txn:
+  ``SET CONSTRAINTS ALL DEFERRED`` on PostgreSQL (when user FKs are
+  ``DEFERRABLE``) and ``PRAGMA defer_foreign_keys=ON`` on SQLite.
+
+### Fixed — `dorm inspectdb` produced unimportable Python for legacy schemas
+
+- A column named ``from`` / ``class`` / ``order`` (legitimate in
+  legacy databases, reserved words in Python) emitted
+  ``from = dorm.TextField()`` — ``SyntaxError`` at import. The
+  inspector now sanitises every attribute name through
+  ``keyword.iskeyword`` / ``str.isidentifier`` and pins the original
+  column with ``db_column=`` so the runtime mapping is preserved.
+
+### Fixed — `get_available_name` produced names violating `max_length`
+
+- When the random-suffix retry path triggered with a tight
+  ``max_length``, ``stem[:-cut]`` could collapse to ``""`` (when
+  ``cut > len(stem)``) and the resulting ``"_<token>.ext"`` could
+  itself exceed ``max_length``. The shrink path now floors the
+  stem at length 0, drops the leading underscore when the stem
+  doesn't survive, and clips the token as a last resort so the
+  return value always honours ``max_length``. The matching ``_save``
+  path also opens with ``O_CREAT | O_EXCL`` to surface a clear
+  ``FileExistsError`` instead of silently overwriting an existing
+  file when two writers raced past the prior ``exists()`` probe.
+
+### Fixed — `set_autocommit` only affected the calling thread's connection
+
+- The SQLite wrapper toggled ``isolation_level`` on the calling
+  thread's thread-local connection but left every other thread's
+  cached connection on the previous setting. A wrapper put into
+  autocommit mode by Thread A would still wrap Thread B's writes
+  in implicit BEGIN — split-brain. The setter now walks every live
+  connection in ``self._conns`` under the lock and applies the new
+  isolation level.
+
+### Fixed — async PG pool from a dead event loop leaked libpq sockets
+
+- ``_get_pool`` cleaned up after a loop-change by scheduling
+  ``pool.close()`` on the old loop, but only when the old loop was
+  still running. When the old loop was already closed (the common
+  case under ``pytest -n 4`` event-loop cycling), the pool's
+  ``__del__`` ran later on a dead loop and could SIGSEGV the
+  worker. The dead-loop branch now mirrors ``force_close_sync``:
+  walk the pool's idle deque and call ``pgconn.finish()`` on every
+  libpq connection so the pool is inert by the time the GC reaches
+  it.
 
 ### Fixed — `count()` / `exists()` / `update()` / `delete()` ignored FK-traversal JOINs
 
@@ -171,9 +534,14 @@ audit, all closed with regression tests in
 ### Tests
 
 - ``tests/test_bug_hunt_v2_5.py`` — 50 cases (48 active, 2
-  PostgreSQL-only skipped without Docker) covering every fix
-  above. Split sync / async where applicable; runs on both
-  SQLite and PostgreSQL.
+  PostgreSQL-only skipped without Docker) covering every round-1
+  fix. Split sync / async where applicable; runs on both SQLite
+  and PostgreSQL.
+- ``tests/test_bug_hunt_v2_6.py`` — 46 cases (44 active, 2
+  PostgreSQL-only skipped without a live PG server) covering every
+  round-2 fix. Source-level checks are used where a live
+  integration scenario would require simulating a closed event
+  loop or a fully-mocked CLI plumbing chain.
 
 ## [2.4.0] - 2026-04-30
 

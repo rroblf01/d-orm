@@ -106,7 +106,19 @@ class GenericForeignKey(Field[Any]):
             return
         from .models import ContentType
 
-        ct = ContentType.objects.get_for_model(type(value))
+        # Honour ``for_concrete_model``: when set, resolve the
+        # ContentType against the *concrete* parent class rather
+        # than the proxy / multi-table subclass. Without this
+        # branch the constructor flag was a documented no-op —
+        # subclass instances stored their proxy CT instead of the
+        # concrete one, so polymorphic queries that filter by
+        # concrete CT missed every row.
+        target_cls = type(value)
+        if getattr(self, "for_concrete_model", True):
+            concrete = getattr(target_cls._meta, "concrete_model", None)
+            if concrete is not None:
+                target_cls = concrete
+        ct = ContentType.objects.get_for_model(target_cls)
         instance.__dict__[f"{self.ct_field}_id"] = ct.pk
         instance.__dict__.pop(f"_cache_{self.ct_field}", None)
         instance.__dict__[self.fk_field] = value.pk

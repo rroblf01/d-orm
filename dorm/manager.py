@@ -352,17 +352,33 @@ class BaseManager(Generic[_T]):
 
         attrs: dict[str, Any] = {"get_queryset": get_queryset}
 
-        # Reflect each public queryset method onto the manager. Skip
-        # names already defined on BaseManager so we don't shadow the
-        # rich proxy surface (filter / order_by / values / etc.) with
-        # a duplicate. Also skip dunders, private (``_``-prefixed)
-        # methods, and inherited-from-object names.
-        existing = set(dir(cls))
+        # Reflect each public queryset method onto the manager. We
+        # only skip names that come from ``object`` itself, dunders,
+        # and private names — when the user's QuerySet subclass
+        # overrides a method that BaseManager also exposes (e.g.
+        # ``count``, ``filter``, ``update``), the override MUST
+        # reach the manager. Previously ``existing = set(dir(cls))``
+        # included every BaseManager proxy and silently shadowed
+        # the user's QS overrides.
+        object_names = set(dir(object))
+        # Methods declared directly on the user's queryset_class
+        # (not inherited from QuerySet base) are always reflected
+        # — even when their name collides with a BaseManager proxy.
+        own = {
+            n for n in vars(queryset_class)
+            if not n.startswith("_")
+        }
         for name in dir(queryset_class):
-            if name.startswith("_") or name in existing:
+            if name.startswith("_") or name in object_names:
                 continue
             attr = getattr(queryset_class, name, None)
             if not callable(attr):
+                continue
+            # Skip an inherited-from-QuerySet method only when
+            # BaseManager *and* a parent class already proxy it.
+            # Custom overrides (declared on ``queryset_class`` itself)
+            # always win.
+            if name not in own and hasattr(cls, name):
                 continue
             # Closure capture by default kwarg so each generated proxy
             # binds *its own* queryset method name.

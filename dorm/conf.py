@@ -154,6 +154,11 @@ class Settings:
     # at the application layer.
     TIME_ZONE: str = "UTC"
     USE_TZ: bool = False
+    # Default text-search dictionary used by the ``__search`` lookup
+    # on PostgreSQL. Match the user's primary language; this gets
+    # spliced verbatim into ``to_tsvector(<config>, col)`` so it
+    # must be a SQL identifier (validated at lookup-build time).
+    SEARCH_CONFIG: str = "english"
 
     _configured = False
 
@@ -300,6 +305,15 @@ def configure(**kwargs):
     if "STORAGES" in kwargs:
         from .storage import reset_storages
         reset_storages()
+    # Reset connection caches when DATABASES changes — a second
+    # ``configure(DATABASES=...)`` used to keep the *old* wrapper
+    # alive in ``_sync_connections`` / ``_async_connections``, so
+    # subsequent queries silently hit the previous backend. Skip
+    # when DATABASES wasn't part of this call so unrelated
+    # ``configure(STORAGES=...)`` reloads don't churn live pools.
+    if "DATABASES" in kwargs:
+        from .db.connection import reset_connections
+        reset_connections()
 
 
 def _autodiscover_settings() -> bool:

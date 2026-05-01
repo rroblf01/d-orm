@@ -73,7 +73,19 @@ _STRIP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # rely on to tell two unrelated queries apart, plus break the
     # tests that pattern-match column names in the output.
     (re.compile(r"'(?:[^']|'')*'"), "?"),
-    (re.compile(r"\b\d+(?:\.\d+)?\b"), "?"),
+    # Hex literals (``0xDEADBEEF``) and PG byte strings
+    # (``X'…'`` / ``B'…'`` / ``E'…'``) — both backends accept
+    # these. Order matters: must come before the bare-numeric
+    # pattern so ``0xABCD`` isn't truncated to ``0x?CD``.
+    (re.compile(r"0[xX][0-9a-fA-F]+"), "?"),
+    (re.compile(r"[XBExbe]'(?:[^']|'')*'"), "?"),
+    # Numbers — leading sign, decimal, scientific notation. The
+    # previous ``\b\d+(?:\.\d+)?\b`` missed negatives (kept the
+    # leading ``-`` outside the placeholder so ``= -5`` and
+    # ``= 5`` produced different templates) and ate the mantissa
+    # of scientific literals (``1.5e10`` → ``?.5e10``). The
+    # tightened pattern handles all three.
+    (re.compile(r"(?<![A-Za-z_0-9])-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"), "?"),
     (re.compile(r"\bNULL\b", re.IGNORECASE), "?"),
 ]
 

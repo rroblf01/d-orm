@@ -18,6 +18,7 @@ class Aggregate:
         table_alias: str | None = None,
         *,
         model: Any = None,
+        connection: Any = None,
         **kwargs: Any,
     ) -> tuple[str, list]:
         """Compile this aggregate to SQL.
@@ -28,6 +29,12 @@ class Aggregate:
         through verbatim and the database would reject the query with
         ``no such column: <table>.pk`` — the bug this parameter
         prevents.
+
+        ``filter=Q(...)`` (when set) emits a conditional aggregate.
+        On PostgreSQL we use the ANSI ``FILTER (WHERE …)`` clause;
+        on SQLite (no ``FILTER`` support before 3.30 / inconsistent
+        ergonomics) we wrap the expression in a ``CASE WHEN …
+        THEN expr END`` so the aggregate skips non-matching rows.
         """
         distinct = "DISTINCT " if self.distinct else ""
         expr = self.expression
@@ -39,12 +46,45 @@ class Aggregate:
             col = f'"{table_alias}"."{expr}"'
         else:
             col = f'"{expr}"'
+
+        params: list = []
+        filter_sql = ""
+        filter_params: list = []
+        if self.filter is not None:
+            from .functions import _compile_condition
+
+            filter_sql, filter_params = _compile_condition(
+                self.filter, table_alias=table_alias, connection=connection
+            )
+
+        vendor = getattr(connection, "vendor", None)
+        if filter_sql and vendor != "postgresql":
+            # SQLite (and the no-connection fallback) — wrap the
+            # column in CASE WHEN so non-matching rows contribute
+            # NULL, which every aggregate ignores. ``COUNT(*)``
+            # becomes ``COUNT(CASE WHEN … THEN 1 END)`` so the
+            # filter still applies.
+            wrapped = (
+                "1" if col == "*" else col
+            )
+            col = f"CASE WHEN {filter_sql} THEN {wrapped} END"
+            params.extend(filter_params)
+            sql = self.template % {
+                "function": self.function,
+                "distinct": distinct,
+                "expressions": col,
+            }
+            return sql, params
+
         sql = self.template % {
             "function": self.function,
             "distinct": distinct,
             "expressions": col,
         }
-        return sql, []
+        if filter_sql and vendor == "postgresql":
+            sql = f"{sql} FILTER (WHERE {filter_sql})"
+            params.extend(filter_params)
+        return sql, params
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.expression!r})"

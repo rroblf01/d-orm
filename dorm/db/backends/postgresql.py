@@ -490,24 +490,46 @@ class PostgreSQLAsyncDatabaseWrapper:
 
         if self._loop is not current_loop and self._pool is not None:
             # The old pool's tasks/connections belong to a dead loop —
-            # awaiting close() on the new loop is unreliable. We can't
-            # reliably shut down the old pool, but we can at least try
-            # close() on its own loop if it's still alive (avoids leaking
-            # the connections until process exit).
+            # awaiting close() on the new loop is unreliable. Try the
+            # graceful close() on the old loop first (covers the case
+            # where the old loop is still alive in another thread);
+            # if the old loop is closed, fall back to ``pgconn.finish()``
+            # on every idle connection in the pool. Without that
+            # fallback, libpq sockets leaked until process exit and
+            # the GC's eventual ``__del__`` could SIGSEGV under
+            # ``pytest -n 4`` (same path :meth:`force_close_sync`
+            # already handles for the in-process teardown case).
             old_pool = self._pool
             old_loop = self._loop
             self._pool = None
             self._loop = None
             self._pool_lock = asyncio.Lock()
+            graceful_scheduled = False
             if old_loop is not None and not old_loop.is_closed():
                 try:
                     asyncio.run_coroutine_threadsafe(
                         old_pool.close(), old_loop
                     )
+                    graceful_scheduled = True
                 except RuntimeError:
-                    # Old loop is shut down or not running — sockets
-                    # will be reclaimed at process exit. Better than the
-                    # alternative of awaiting on the wrong loop.
+                    pass
+            if not graceful_scheduled:
+                # Loop is dead — close the libpq sockets ourselves so
+                # the pool's ``__del__`` doesn't trip on them later.
+                for conn in list(getattr(old_pool, "_pool", None) or ()):
+                    try:
+                        pgconn = getattr(conn, "pgconn", None)
+                        if pgconn is not None:
+                            pgconn.finish()
+                    except Exception:
+                        pass
+                try:
+                    old_pool._pool.clear()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    old_pool._closed = True  # type: ignore[attr-defined]
+                except Exception:
                     pass
 
         if self._pool is not None:

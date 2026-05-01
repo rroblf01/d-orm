@@ -21,8 +21,27 @@ The output is plain Python source so the user can pipe it into a file::
 """
 from __future__ import annotations
 
+import keyword
 import re
 from typing import Any
+
+
+def _safe_attr_name(name: str) -> tuple[str, str | None]:
+    """Return ``(python_attr_name, db_column_override)``.
+
+    Tables with columns whose names are Python keywords (``from``,
+    ``class``, ``return`` …) or invalid identifiers (``2nd``,
+    ``my-col``) used to emit syntactically broken model source —
+    ``from = dorm.TextField()`` is a SyntaxError. We rename the
+    attribute to a safe form and pin the original column with
+    ``db_column=`` so the runtime mapping is preserved.
+    """
+    if keyword.iskeyword(name) or keyword.issoftkeyword(name):
+        return f"{name}_", name
+    if not name.isidentifier():
+        sanitised = re.sub(r"\W|^(?=\d)", "_", name)
+        return sanitised, name
+    return name, None
 
 
 # Map data_type → (FieldClass, extra kwargs)
@@ -249,12 +268,15 @@ def render_models(tables: list[dict]) -> str:
             # FK?
             if cname in t["fks"] and cname.endswith("_id"):
                 ref = t["fks"][cname]
-                attr = cname[:-3]
+                fk_attr_raw = cname[:-3]
+                fk_attr, fk_db_col = _safe_attr_name(fk_attr_raw)
+                fk_kwargs = ["'" + _to_class_name(ref) + "'", "on_delete=dorm.CASCADE"]
+                if nullable:
+                    fk_kwargs.append("null=True")
+                if fk_db_col is not None:
+                    fk_kwargs.append(f"db_column={fk_attr_raw!r}")
                 body_lines.append(
-                    f"    {attr} = dorm.ForeignKey("
-                    f"'{_to_class_name(ref)}', on_delete=dorm.CASCADE"
-                    + (", null=True" if nullable else "")
-                    + ")"
+                    f"    {fk_attr} = dorm.ForeignKey({', '.join(fk_kwargs)})"
                 )
                 continue
 
@@ -269,8 +291,11 @@ def render_models(tables: list[dict]) -> str:
                 had_pk = True
             if nullable and not is_pk:
                 kwarg_parts.append("null=True")
+            attr_name, db_col_override = _safe_attr_name(cname)
+            if db_col_override is not None:
+                kwarg_parts.append(f"db_column={cname!r}")
             joined = ", ".join(kwarg_parts)
-            body_lines.append(f"    {cname} = dorm.{cls}({joined})")
+            body_lines.append(f"    {attr_name} = dorm.{cls}({joined})")
             if "_inspect_unknown" in kwargs:
                 body_lines.append(
                     f"    # NOTE: column {cname!r} had unrecognised "

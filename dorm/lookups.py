@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
 LOOKUP_SEP = "__"
+
+# Identifier-shape validator for the FTS dictionary name spliced
+# into ``to_tsvector('<cfg>', col)``. Bound parameters can't be
+# used for the regconfig argument, so we whitelist instead.
+_SAFE_CONFIG = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _escape_like(value: str) -> str:
@@ -55,10 +61,14 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "json_has_any": ("{col} ?| %s", lambda v: v),      # JSONB, list of keys
     "json_has_all": ("{col} ?& %s", lambda v: v),      # JSONB, list of keys
     # ── Full-text search (PostgreSQL only) ────────────────────────────────
-    # ``to_tsvector('english', col) @@ plainto_tsquery('english', %s)`` —
+    # ``to_tsvector(<config>, col) @@ plainto_tsquery(<config>, %s)`` —
     # the canonical "match this column against the search string"
     # idiom. SQLite is not supported here (use FTS5 virtual tables).
     # The lookup name ``search`` matches Django's contrib.postgres.
+    # The ``<config>`` placeholder is filled at compile time from
+    # ``settings.SEARCH_CONFIG`` (default ``'english'``); see
+    # ``build_lookup_sql`` below. Hardcoding ``'english'`` here used
+    # to silently break Spanish / multi-lingual apps.
     "search": (
         "to_tsvector('english', {col}) @@ plainto_tsquery('english', %s)",
         lambda v: v,
@@ -127,20 +137,62 @@ def build_lookup_sql(
         return template.format(col=col), []
 
     if lookup == "in":
-        if not value:
+        # ``value`` may be a generator / set / dict_values / queryset
+        # subquery handled elsewhere — anything iterable. Materialise
+        # once so we can both check emptiness AND know the length for
+        # the SQLite placeholder list. Generators previously crashed
+        # with ``object of type 'generator' has no len()`` because
+        # ``len(value)`` was called on the un-materialised iterable.
+        materialised = list(value)
+        if not materialised:
             return "1=0", []  # empty IN → always false
         if vendor == "postgresql":
             # ANY(array) bound as a single parameter — same SQL shape for
             # any list size, so PG's prepared-statement cache hits across
             # calls with different lengths. psycopg adapts a Python list
             # to a Postgres array automatically.
-            return f"{col} = ANY(%s)", [list(value)]
-        placeholders = ", ".join(["%s"] * len(value))
-        return f"{col} IN ({placeholders})", list(value)
+            return f"{col} = ANY(%s)", [materialised]
+        placeholders = ", ".join(["%s"] * len(materialised))
+        return f"{col} IN ({placeholders})", materialised
 
     if lookup == "range":
         lo, hi = value
         return template.format(col=col), [lo, hi]
+
+    # Vendor-aware regex lookups. SQLite uses ``REGEXP`` (requires
+    # the ``re`` extension to be loaded; sqlite3 ships it on Linux
+    # builds via ``conn.create_function``) — see the connection
+    # wrapper. PostgreSQL has native POSIX regex operators ``~``
+    # (case-sensitive) and ``~*`` (case-insensitive); using the
+    # SQLite ``REGEXP`` keyword on PG raises ``syntax error at or
+    # near "REGEXP"``.
+    if vendor == "postgresql" and lookup == "regex":
+        return f"{col} ~ %s", [value]
+    if vendor == "postgresql" and lookup == "iregex":
+        return f"{col} ~* %s", [value]
+
+    # Vendor-aware full-text search config. ``settings.SEARCH_CONFIG``
+    # picks the dictionary used by ``to_tsvector`` /
+    # ``plainto_tsquery``; defaults to ``'english'``. Validated as a
+    # plain identifier so we can splice it into SQL without bound
+    # parameters (PG accepts ``::regconfig`` casts but not a bound
+    # parameter as the dictionary argument).
+    if lookup == "search":
+        try:
+            from .conf import settings as _settings
+
+            cfg = getattr(_settings, "SEARCH_CONFIG", "english") or "english"
+        except Exception:
+            cfg = "english"
+        if not _SAFE_CONFIG.match(cfg):
+            raise ValueError(
+                f"Invalid SEARCH_CONFIG {cfg!r}: only letters, digits, "
+                f"and underscores are allowed."
+            )
+        return (
+            f"to_tsvector('{cfg}', {col}) @@ plainto_tsquery('{cfg}', %s)",
+            [value],
+        )
 
     # Vendor-aware date-part lookups.
     if vendor == "postgresql" and lookup in _PG_DATE_UNITS:

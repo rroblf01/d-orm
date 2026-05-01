@@ -236,7 +236,30 @@ def load(
     conn = get_connection(using)
     inserted = 0
 
+    vendor = getattr(conn, "vendor", "sqlite")
+
     with atomic(using=using):
+        # Defer FK validation for the duration of the load so
+        # records can reference rows that appear later in the
+        # fixture (self-referential FKs and cyclic graphs are the
+        # canonical cases — Django's ``loaddata`` does the same).
+        # Without deferral a ``Category[parent_id=2]`` row inserted
+        # before its parent ``Category[pk=2]`` failed with
+        # ``IntegrityError: FK violates``.
+        if vendor == "postgresql":
+            try:
+                conn.execute_script("SET CONSTRAINTS ALL DEFERRED")
+            except Exception:
+                # Constraint may not be DEFERRABLE — fall back to
+                # in-order insert; user gets the same FK error
+                # they would have without this fix.
+                pass
+        elif vendor == "sqlite":
+            try:
+                conn.execute_script("PRAGMA defer_foreign_keys=ON")
+            except Exception:
+                pass
+
         # Phase 1 — base rows.
         deferred_m2m: list[tuple[Any, Any, dict[str, list[Any]]]] = []
         for record in records:

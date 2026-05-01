@@ -274,6 +274,11 @@ def cmd_migrate(args):
                 executor.migrate_to(app, mig_dir, target)
             except ValueError as exc:
                 print(f"  Error: {exc}")
+                # Surface the failure through the CLI exit code so
+                # CI gating on ``dorm migrate`` actually catches a
+                # missing / invalid target. Previously the loop
+                # continued and the process exited 0.
+                sys.exit(1)
         else:
             captured = executor.migrate(app, mig_dir, dry_run=dry_run)
             if dry_run and captured:

@@ -951,6 +951,18 @@ class BinaryField(Field[bytes]):
             return bytes(value)
         return value
 
+    def from_db_value(self, value):
+        # psycopg returns ``memoryview`` for BYTEA columns; sqlite3
+        # already returns ``bytes``. Without coercion the field's
+        # ``Field[bytes]`` annotation lied — ``obj.data.startswith
+        # (b"\\x89")`` raised ``AttributeError`` because ``memoryview``
+        # has no ``.startswith``.
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        return value
+
     def db_type(self, connection) -> str:
         backend = getattr(connection, "vendor", "sqlite")
         if backend == "postgresql":
@@ -1312,10 +1324,17 @@ class DurationField(Field[datetime.timedelta]):
 
     @classmethod
     def _parse_iso8601(cls, value: str) -> datetime.timedelta:
-        # Accept the two shapes ``isoformat`` round-trips between us and
-        # the database produce: ``HH:MM:SS[.ffffff]`` (PG INTERVAL coerced
-        # to text in custom queries) and ``"<int> microseconds"`` /
-        # ``"<int>"`` (SQLite raw integer or older Django dumps).
+        # Accept the shapes ``isoformat`` / ``str(timedelta)`` /
+        # SQLite microsecond ints round-trip back from the database:
+        #
+        #   * ``HH:MM:SS[.ffffff]`` — PG INTERVAL coerced to text.
+        #   * ``"<int> microseconds"`` / ``"<int>"`` — SQLite raw
+        #     integer storage or older Django dumps.
+        #   * ``"-N day(s), HH:MM:SS"`` — Python's ``str(timedelta)``
+        #     for negative durations. Django's parser accepts this
+        #     shape; without it any negative interval written via
+        #     ``str(td)`` (or read back from a custom PG cast that
+        #     emits the Python repr) raised ``ValidationError``.
         s = value.strip()
         if not s:
             raise ValidationError(
@@ -1323,9 +1342,21 @@ class DurationField(Field[datetime.timedelta]):
             )
         if s.lstrip("-").isdigit():
             return datetime.timedelta(microseconds=int(s))
+
+        # Native ``str(timedelta)`` form: ``"-1 day, 22:30:00"`` or
+        # ``"5 days, 0:00:00"``. Pull the day component off and
+        # apply it to the parsed HH:MM:SS portion.
+        days_offset = datetime.timedelta(0)
+        import re as _re
+
+        day_match = _re.match(r"^(-?\d+)\s+days?,\s*(.*)$", s)
+        if day_match:
+            days_offset = datetime.timedelta(days=int(day_match.group(1)))
+            s = day_match.group(2)
+
         # ``HH:MM:SS[.ffffff]`` with optional leading sign.
         sign = 1
-        if s[0] in "+-":
+        if s and s[0] in "+-":
             if s[0] == "-":
                 sign = -1
             s = s[1:]
@@ -1344,7 +1375,8 @@ class DurationField(Field[datetime.timedelta]):
                 f"DurationField: cannot parse {value!r}: {exc}"
             ) from exc
         td = datetime.timedelta(hours=hours, minutes=minutes, seconds=secs)
-        return -td if sign < 0 else td
+        td = -td if sign < 0 else td
+        return days_offset + td
 
     def get_db_prep_value(self, value):
         if value is None:
@@ -1911,6 +1943,26 @@ class OneToOneField(RelatedField):
         # (cascade rules, select_related single-row hydration, etc.).
         self.one_to_one = True
         self.many_to_one = False
+
+    def contribute_to_class(self, cls, name: str):
+        # ``RelatedField.contribute_to_class`` registers the FK
+        # column descriptor on the source model. We then mirror
+        # ``ForeignKey.contribute_to_class`` to install the reverse
+        # accessor on the *target* model — without it,
+        # ``target_instance.<related_name>`` raised
+        # ``AttributeError`` because no descriptor was wired.
+        super().contribute_to_class(cls, name)
+        rel_name = self.related_name or cls.__name__.lower()
+        if not isinstance(self.remote_field_to, str):
+            from .related_managers import ReverseOneToOneDescriptor
+
+            setattr(
+                self.remote_field_to,
+                rel_name,
+                ReverseOneToOneDescriptor(cls, self),
+            )
+        else:
+            _pending_reverse_relations.append((cls, self, rel_name))
 
 
 class ManyToManyField(Field[Any]):

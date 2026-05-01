@@ -161,7 +161,18 @@ class VectorField(Field[list]):
         return "[" + ",".join(repr(float(x)) for x in seq) + "]"
 
     def from_db_value(self, value: Any) -> Any:
-        return self.to_python(value)
+        result = self.to_python(value)
+        # Mirror the write-side dimension check on read so a
+        # corrupted column / cross-dim migration doesn't silently
+        # round-trip the wrong shape — it surfaces as a
+        # :class:`ValidationError` at hydration time.
+        if result is not None and len(result) != self.dimensions:
+            raise ValidationError(
+                f"Field {self.name!r}: stored vector has {len(result)} "
+                f"components, expected {self.dimensions}. Likely a "
+                f"cross-dimension migration or corrupted column."
+            )
+        return result
 
     @staticmethod
     def _coerce_sequence(value: Any) -> Sequence[Any]:

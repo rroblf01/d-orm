@@ -19,16 +19,47 @@ def _validate_identifier(name: str, kind: str = "field") -> None:
         )
 
 
-def _compile_expr(val) -> tuple[str, list]:
-    """Convert a Python value or expression (F, CombinedExpression, Value) to (sql, params)."""
+def _compile_expr(
+    val, table_alias: str | None = None, model: Any = None
+) -> tuple[str, list]:
+    """Convert a Python value or expression (F, CombinedExpression,
+    Value, Subquery, Exists, anything with ``as_sql``) to ``(sql, params)``.
+
+    The ``hasattr(val, "as_sql")`` branch is the catch-all that
+    routes :class:`Subquery` / :class:`Exists` / function expressions
+    through their own SQL emitter. Without it the value would be
+    bound as a parameter and the driver would crash with ``cannot
+    adapt type 'Subquery'``.
+
+    ``table_alias`` / ``model`` propagate the enclosing query's
+    context so a wrapped :class:`Subquery` carrying an
+    :class:`OuterRef` resolves the outer reference correctly.
+    """
     if isinstance(val, F):
         return f'"{val.name}"', []
     if isinstance(val, Value):
         return "%s", [val.value]
     if isinstance(val, CombinedExpression):
-        lhs_sql, lhs_p = _compile_expr(val.lhs)
-        rhs_sql, rhs_p = _compile_expr(val.rhs)
+        lhs_sql, lhs_p = _compile_expr(val.lhs, table_alias, model)
+        rhs_sql, rhs_p = _compile_expr(val.rhs, table_alias, model)
         return f"({lhs_sql} {val.operator} {rhs_sql})", lhs_p + rhs_p
+    if isinstance(val, (Subquery, Exists)):
+        # Pass the outer alias down so ``OuterRef`` inside the
+        # subquery resolves; ``Subquery.as_sql`` already wraps the
+        # body in parentheses, ``Exists.as_sql`` already prepends
+        # the ``EXISTS`` / ``NOT EXISTS`` prefix.
+        sql, params = val.as_sql(table_alias=table_alias, model=model)
+        return sql, list(params)
+    if hasattr(val, "as_sql") and callable(val.as_sql):
+        try:
+            sql, params = val.as_sql(table_alias=table_alias, model=model)
+            return sql, list(params or [])
+        except TypeError:
+            try:
+                sql, params = val.as_sql()
+                return sql, list(params or [])
+            except TypeError:
+                pass
     return "%s", [val]
 
 
@@ -91,6 +122,14 @@ class SQLQuery:
         # at compile time. ``None`` outside subqueries.
         self._outer_alias: str | None = None
         self._outer_model: Any = None
+        # Stamped by :meth:`as_subquery_sql` when this query is
+        # compiled as a self-correlated subquery (outer and inner
+        # share the same ``db_table``). ``_resolve_column`` reads
+        # this so inner column references qualify with the
+        # uniquified alias instead of colliding with the outer
+        # query's use of the same table name. ``None`` means the
+        # plain ``db_table`` is used as the FROM alias.
+        self._self_alias: str | None = None
 
     def clone(self) -> "SQLQuery":
         q = SQLQuery(self.model)
@@ -167,9 +206,22 @@ class SQLQuery:
     def get_columns(self, table_alias: str | None = None) -> str:
         ta = f'"{table_alias}".' if table_alias else ""
         if self.selected_fields is not None:
+            parts: list[str] = []
             for f in self.selected_fields:
-                _validate_identifier(f)
-            return ", ".join(f'{ta}"{f}"' for f in self.selected_fields)
+                if "__" in f:
+                    # FK-traversal in ``.values("publisher__name")``
+                    # — register the relation hop join via
+                    # ``_resolve_column`` and emit the qualified
+                    # column reference. Alias the projection back
+                    # to the user-visible dotted name so
+                    # ``row["publisher__name"]`` Just Works in
+                    # ``values()`` / ``values_list()`` consumers.
+                    resolved = self._resolve_column(f.split("__"))
+                    parts.append(f'{resolved} AS "{f}"')
+                else:
+                    _validate_identifier(f)
+                    parts.append(f'{ta}"{f}"')
+            return ", ".join(parts)
         concrete = [f for f in self.model._meta.fields if f.column]
         return ", ".join(f'{ta}"{f.column}"' for f in concrete)
 
@@ -523,9 +575,27 @@ class SQLQuery:
                     "bulk_create(update_conflicts=True) requires "
                     "unique_fields= to identify the conflict target."
                 )
+            # Resolve the user-supplied attnames to actual columns
+            # (so ``unique_fields=["external_id"]`` lands on its
+            # ``db_column="ext_uid"`` declaration). Previously we
+            # interpolated the attname verbatim, producing
+            # ``ON CONFLICT ("external_id")`` against a column
+            # that doesn't exist — PG raises *no unique constraint
+            # matching the columns*.
+            unique_cols: list[str] = []
+            unique_meta = self.model._meta
             for name in unique_fields:
                 _validate_identifier(name)
-            target_cols = ", ".join(f'"{c}"' for c in unique_fields)
+                try:
+                    f = unique_meta.get_field(name)
+                    unique_cols.append(f.column or name)
+                except Exception:
+                    unique_cols.append(name)
+            target_cols = ", ".join(f'"{c}"' for c in unique_cols)
+            # ``update_cols`` (below) excludes columns that are part
+            # of the conflict target — keep that comparison aligned
+            # with the resolved column names rather than attnames.
+            unique_fields = unique_cols
 
             # Default update_fields = all non-PK, non-unique columns.
             if update_fields is None:
@@ -568,7 +638,7 @@ class SQLQuery:
         set_parts = []
         set_params: list = []
         for col, val in update_kwargs.items():
-            expr_sql, expr_params = _compile_expr(val)
+            expr_sql, expr_params = _compile_expr(val, table, self.model)
             set_parts.append(f'"{col}" = {expr_sql}')
             set_params.extend(expr_params)
 
@@ -785,6 +855,15 @@ class SQLQuery:
             except Exception:
                 pass
 
+        # ``filter(field=None)`` is sugar for ``filter(field__isnull=True)``
+        # in Django. Without this rewrite the lookup builder would emit
+        # ``col = NULL`` which is always FALSE in standard SQL — so the
+        # query silently returned 0 rows when the user expected the
+        # NULL-valued rows. Equally for ``exclude(field=None)`` (the
+        # caller's negation flips the predicate to ``IS NOT NULL``).
+        if value is None and lookup == "exact":
+            return f"{col} IS NULL", []
+
         vendor = getattr(connection, "vendor", "sqlite")
         sql, params = build_lookup_sql(col, lookup, value, vendor=vendor)
         # Return raw %s — outer as_* method adapts placeholders once for the full SQL
@@ -826,13 +905,53 @@ class SQLQuery:
         return f'"{self._outer_alias}"."{name}"'
 
     def _compile_subquery(self, qs, connection) -> tuple[str, list]:
-        """Compile a QuerySet as a SELECT subquery returning the PK column."""
+        """Compile a QuerySet as a SELECT subquery for ``__in`` lookups.
+
+        Three things have to be honoured for the subquery to mean
+        what the caller wrote:
+
+        - ``selected_fields`` (set by ``.values("col")``) — the
+          subquery must project that column, not the model's PK.
+        - ``self.joins`` — FK-traversal lookups
+          (``Book.objects.filter(genre__name="x")``) register joins
+          that the bare ``SELECT pk FROM table WHERE …`` form
+          dropped, leading to *missing FROM-clause entry* on PG and
+          *no such column* on SQLite.
+        - ``order_by`` is intentionally NOT carried over: ordering
+          inside an ``IN`` subquery is meaningless and PG raises if
+          ``ORDER BY`` references a column not in the SELECT list.
+
+        Annotations stay on the inner query so any FK joins they
+        triggered get registered when WHERE compiles.
+        """
         inner = qs._query.clone()
-        pk_col = qs.model._meta.pk.column
         table = qs.model._meta.db_table
 
-        where_sql, where_params = inner._compile_nodes(inner.where_nodes, connection)
-        sql = f'SELECT "{pk_col}" FROM "{table}"'
+        # Pick the projected column. ``.values("col")`` populated
+        # ``selected_fields``; otherwise default to the PK.
+        if inner.selected_fields:
+            projected = inner.selected_fields[0]
+            try:
+                leaf = inner._resolve_field([projected])
+                col_name = (
+                    leaf.column if leaf is not None and leaf.column else projected
+                )
+            except Exception:
+                col_name = projected
+            project_sql = f'"{table}"."{col_name}"'
+        else:
+            pk_col = qs.model._meta.pk.column
+            project_sql = f'"{table}"."{pk_col}"'
+
+        # Compile WHERE first so ``_resolve_column`` populates
+        # ``inner.joins`` for FK-traversal predicates.
+        where_sql, where_params = inner._compile_nodes(
+            inner.where_nodes, connection
+        )
+
+        sql = f'SELECT {project_sql} FROM "{table}"'
+        for join_type, join_table, join_alias, on_cond in inner.joins:
+            sql += f' {join_type} JOIN "{join_table}" AS "{join_alias}" ON {on_cond}'
         if where_sql:
             sql += f" WHERE {where_sql}"
         if inner.limit_val is not None:
@@ -873,7 +992,20 @@ class SQLQuery:
         conn = _DummyConn()
 
         table = inner.get_table()
-        alias = table
+        # Self-correlated subqueries (outer and inner reference the
+        # same table) need a distinct inner alias so the inner WHERE
+        # / SELECT references unambiguously identify the inner row,
+        # not the outer one. Without this rename, an
+        # ``OuterRef("pk")`` against a self-join produced ambiguous
+        # column references on PG and silently wrong results on
+        # SQLite (the inner side won the lookup).
+        if outer_alias is not None and outer_alias == table:
+            alias = f"{table}_sub"
+            from_clause = f'"{table}" AS "{alias}"'
+        else:
+            alias = table
+            from_clause = f'"{table}"'
+        inner._self_alias = alias
 
         annotation_params: list = []
         extra_select = ""
@@ -901,7 +1033,7 @@ class SQLQuery:
         params.extend(annotation_params)
         params.extend(where_params)
 
-        sql = f'SELECT {select_list} FROM "{table}"'
+        sql = f"SELECT {select_list} FROM {from_clause}"
         for join_type, jt, jalias, on_cond in inner.joins:
             sql += f' {join_type} JOIN "{jt}" AS "{jalias}" ON {on_cond}'
         if where_sql:
@@ -970,7 +1102,12 @@ class SQLQuery:
         from .exceptions import FieldDoesNotExist
 
         model = self.model
-        current_alias = model._meta.db_table
+        # Self-correlated subqueries set ``_self_alias`` to a
+        # unique-per-subquery name so the inner column references
+        # don't collide with the outer query's use of the same
+        # table name. Fall back to the bare ``db_table`` when no
+        # such alias was stamped.
+        current_alias = getattr(self, "_self_alias", None) or model._meta.db_table
         parts = list(field_parts)
         # Resolve "pk" alias to the actual primary key column
         if parts[0] == "pk" and model._meta.pk:
@@ -1040,14 +1177,29 @@ class SQLQuery:
 
     def _adapt_placeholders(self, sql: str, connection) -> str:
         vendor = getattr(connection, "vendor", "sqlite")
-        if vendor == "postgresql":
-            # Replace %s with $1, $2, ...
-            idx = [0]
+        if vendor != "postgresql":
+            return sql
+        # Replace ``%s`` with ``$1``, ``$2``, … but skip occurrences
+        # inside SQL string literals (single-quoted with ``''``
+        # escaping). The previous naive regex rewrote every ``%s``
+        # including ones inside ``'foo%s_bar'`` — corrupting raw
+        # SQL and any LIKE pattern containing the placeholder
+        # sequence as part of the literal text.
+        import re
 
-            def repl(m):
+        # Tokenise: alternation matches a quoted-string run OR a
+        # bare ``%s``. Bare matches are renumbered, quoted runs
+        # pass through verbatim. Doubled quotes (``''``) inside a
+        # literal are part of the literal — captured by the
+        # ``(?:[^']|'')*`` body.
+        token_re = re.compile(r"'(?:[^']|'')*'|%s")
+        idx = [0]
+
+        def repl(m: re.Match[str]) -> str:
+            tok = m.group(0)
+            if tok == "%s":
                 idx[0] += 1
                 return f"${idx[0]}"
+            return tok
 
-            import re
-            return re.sub(r"%s", repl, sql)
-        return sql
+        return token_re.sub(repl, sql)

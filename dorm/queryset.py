@@ -492,8 +492,31 @@ class QuerySet(Generic[_T]):
 
         pk_col = self.model._meta.pk.column if self.model._meta.pk else "id"
         if own_defer:
-            all_cols = [f.column for f in self.model._meta.fields if f.column]
-            selected = [c for c in all_cols if c not in own_defer or c == pk_col]
+            # Resolve user-supplied attnames to actual ``db_column``
+            # values. Without this a model field with
+            # ``db_column="display_name"`` referenced as
+            # ``defer("name")`` was never excluded — the diff
+            # compared attribute names against column names.
+            defer_cols: set[str] = set()
+            for spec in own_defer:
+                try:
+                    f = self.model._meta.get_field(spec)
+                    defer_cols.add(f.column or spec)
+                except Exception:
+                    defer_cols.add(spec)
+
+            # If a previous ``only(...)`` already restricted the
+            # projection (``selected_fields`` non-empty AND deferred
+            # loading active), preserve that restriction and just
+            # remove the newly-deferred columns from it. Without
+            # this, ``only("a", "b").defer("a")`` silently widened
+            # the SELECT back to "all columns minus a", undoing the
+            # ``only()`` step entirely.
+            if qs._query.selected_fields and qs._query.deferred_loading:
+                base = list(qs._query.selected_fields)
+            else:
+                base = [f.column for f in self.model._meta.fields if f.column]
+            selected = [c for c in base if c not in defer_cols or c == pk_col]
             qs._query.selected_fields = selected
             qs._query.deferred_loading = True
         for relation, deferred_cols in related_defer.items():
@@ -553,6 +576,29 @@ class QuerySet(Generic[_T]):
         return qs
 
     def annotate(self, **kwargs: Any) -> QuerySet[_T]:
+        # Reject collisions with a real model field. Django raises
+        # ``ValueError: The annotation 'name' conflicts with a field
+        # on the model.`` — without this guard djanorm emitted SELECT
+        # clauses with two ``"name"`` outputs (the column and the
+        # aggregate), and hydration silently picked one. The
+        # ``alias_only_names`` carve-out lets ``alias()`` continue
+        # to use field-shadow names since alias-only never reaches
+        # the SELECT list.
+        from .exceptions import FieldDoesNotExist
+
+        for name in kwargs:
+            if name in self._query.alias_only_names:
+                continue
+            try:
+                self.model._meta.get_field(name)
+            except FieldDoesNotExist:
+                continue
+            raise ValueError(
+                f"The annotation {name!r} conflicts with a field on "
+                f"{self.model.__name__}. Pick a different name or use "
+                f"alias() if the value isn't meant to land in the SELECT."
+            )
+
         qs = self._clone()
         # If a name was previously declared as alias-only and is now
         # being annotated, promote it to a real SELECT projection
@@ -1689,7 +1735,26 @@ class QuerySet(Generic[_T]):
                     col_kwargs[field.column] = field.get_db_prep_value(v)
             except Exception:
                 col_kwargs[k] = v
-        sql, params = self._query.as_update(col_kwargs, connection)
+        # Sliced ``qs[:N].update(...)`` previously emitted ``UPDATE
+        # … WHERE <filter>`` with no LIMIT — silent dataloss-shape:
+        # the entire filtered population was updated, not the
+        # requested N rows. Mirror :meth:`delete`: when LIMIT/OFFSET
+        # is active, collect the matching pks first and re-scope
+        # the UPDATE through ``WHERE pk IN (collected)``.
+        if (
+            self._query.limit_val is not None
+            or self._query.offset_val is not None
+        ):
+            pk_attname = self.model._meta.pk.attname
+            pks = list(self.values_list(pk_attname, flat=True))
+            if not pks:
+                return 0
+            scoped = QuerySet(self.model, self._db).filter(
+                **{f"{pk_attname}__in": pks}
+            )
+            sql, params = scoped._query.as_update(col_kwargs, connection)
+        else:
+            sql, params = self._query.as_update(col_kwargs, connection)
         return connection.execute_write(sql, params)
 
     def delete(self) -> tuple[int, dict[str, int]]:
@@ -2410,7 +2475,22 @@ class QuerySet(Generic[_T]):
                     col_kwargs[field.column] = field.get_db_prep_value(v)
             except Exception:
                 col_kwargs[k] = v
-        sql, params = self._query.as_update(col_kwargs, conn)
+        # See :meth:`update` — sliced async update must honour
+        # LIMIT/OFFSET via ``pk__in=collected``.
+        if (
+            self._query.limit_val is not None
+            or self._query.offset_val is not None
+        ):
+            pk_attname = self.model._meta.pk.attname
+            pks = await self.avalues_list(pk_attname, flat=True)
+            if not pks:
+                return 0
+            scoped = QuerySet(self.model, self._db).filter(
+                **{f"{pk_attname}__in": pks}
+            )
+            sql, params = scoped._query.as_update(col_kwargs, conn)
+        else:
+            sql, params = self._query.as_update(col_kwargs, conn)
         return await conn.execute_write(sql, params)
 
     async def adelete(self) -> tuple[int, dict[str, int]]:

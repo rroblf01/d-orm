@@ -3,7 +3,12 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from .exceptions import DoesNotExist, MultipleObjectsReturned, ValidationError
+from .exceptions import (
+    DoesNotExist,
+    ImproperlyConfigured,
+    MultipleObjectsReturned,
+    ValidationError,
+)
 
 if TYPE_CHECKING:
     from typing import Self
@@ -202,7 +207,22 @@ class ModelBase(type):
                 for mgr in parent._meta.managers:
                     if mgr.name in already:
                         continue
-                    new_mgr = mgr.__class__()
+                    # ``mgr.__class__()`` requires a zero-arg
+                    # constructor — custom Manager subclasses with
+                    # ``__init__(self, tenant_id, …)`` raised
+                    # ``TypeError`` the moment a child model was
+                    # defined. Use ``copy.copy`` to clone the parent
+                    # instance instead: it preserves constructor
+                    # args (and any post-init attributes) without
+                    # re-running ``__init__``.
+                    try:
+                        new_mgr = copy.copy(mgr)
+                    except Exception:
+                        # Fall back to the legacy zero-arg path so
+                        # managers that don't survive a shallow copy
+                        # (rare — usually managers carrying open
+                        # resources) keep their previous behaviour.
+                        new_mgr = mgr.__class__()
                     new_mgr.contribute_to_class(new_class, mgr.name)
                     already.add(mgr.name)
 
@@ -211,6 +231,29 @@ class ModelBase(type):
         if not opts.abstract and "objects" not in already:
             manager = Manager()
             manager.contribute_to_class(new_class, "objects")
+
+        # Honour ``Meta.default_manager_name``: the named manager
+        # becomes ``_default_manager`` (introspected by reverse-FK
+        # descriptors and a handful of other internals). If the
+        # name doesn't resolve, fall back to the first declared
+        # manager — same precedence rule Django uses.
+        default_name = getattr(opts, "default_manager_name", None)
+        chosen = None
+        if default_name:
+            for mgr in opts.managers:
+                if mgr.name == default_name:
+                    chosen = mgr
+                    break
+            if chosen is None:
+                raise ImproperlyConfigured(
+                    f"{new_class.__name__}.Meta.default_manager_name = "
+                    f"{default_name!r} but no manager with that name is "
+                    f"declared on the model."
+                )
+        elif opts.managers:
+            chosen = opts.managers[0]
+        if chosen is not None:
+            setattr(new_class, "_default_manager", chosen)
 
         # Set up model-level DoesNotExist / MultipleObjectsReturned
         new_class.DoesNotExist = type(  # type: ignore
@@ -224,19 +267,52 @@ class ModelBase(type):
         _model_registry[name] = new_class
         _model_registry[f"{app_label}.{name}"] = new_class
 
-        # Resolve any pending reverse FK relations that target this model
-        from .fields import _pending_reverse_relations
-        from .related_managers import ReverseFKDescriptor
+        # Resolve any pending reverse FK / O2O relations that
+        # target this model. ``OneToOneField`` registers the
+        # reverse side as a single-instance accessor; plain
+        # ``ForeignKey`` registers the manager-style ``_set``
+        # accessor. The descriptor class is chosen here so the
+        # field's own ``contribute_to_class`` doesn't have to
+        # repeat the import + isinstance branch.
+        from .fields import OneToOneField, _pending_reverse_relations
+        from .related_managers import ReverseFKDescriptor, ReverseOneToOneDescriptor
         still_pending = []
         for src_model, fk_field, rel_name in _pending_reverse_relations:
             try:
                 target = fk_field._resolve_related_model()
-                setattr(target, rel_name, ReverseFKDescriptor(src_model, fk_field))
+                if isinstance(fk_field, OneToOneField):
+                    setattr(
+                        target,
+                        rel_name,
+                        ReverseOneToOneDescriptor(src_model, fk_field),
+                    )
+                else:
+                    setattr(
+                        target,
+                        rel_name,
+                        ReverseFKDescriptor(src_model, fk_field),
+                    )
             except Exception:
                 still_pending.append((src_model, fk_field, rel_name))
         _pending_reverse_relations[:] = still_pending
 
         return new_class
+
+
+class _ModelState:
+    """Per-instance state tracker — mirrors Django's ``Model._state``.
+
+    ``adding`` is True for instances that have never been persisted.
+    Used by :meth:`Model._is_unsaved` so an explicit ``Model(pk=0)``
+    (or any other DB-controlled-but-falsy value) doesn't trick the
+    save router into emitting ``UPDATE`` against a row that doesn't
+    exist yet.
+    """
+
+    __slots__ = ("adding",)
+
+    def __init__(self, *, adding: bool = True) -> None:
+        self.adding = adding
 
 
 class Model(metaclass=ModelBase):
@@ -253,6 +329,13 @@ class Model(metaclass=ModelBase):
 
     def __init__(self, **kwargs):
         meta = self._meta
+        # ``_state.adding`` mirrors Django's flag: True when this
+        # instance has never been written to the database. Set
+        # before any field assignment so ``__set__`` hooks
+        # (FileField, FK descriptors) can read it. ``_from_db_row``
+        # flips it to False on hydrated rows; ``save()`` flips it
+        # to False after a successful INSERT.
+        self.__dict__["_state"] = _ModelState(adding=True)
         # Set defaults first (skip M2M fields — they have no column and use descriptors)
         for field in meta.fields:
             if field.many_to_many:
@@ -368,6 +451,11 @@ class Model(metaclass=ModelBase):
         )
         if adding:
             self._do_insert(conn, meta)
+            # Flip the state flag so a subsequent ``save()`` routes
+            # through UPDATE rather than re-inserting.
+            state = self.__dict__.get("_state")
+            if state is not None:
+                state.adding = False
         else:
             self._do_update(conn, meta, update_fields)
         post_save.send(
@@ -444,18 +532,26 @@ class Model(metaclass=ModelBase):
         conn.execute_write(sql, params)
 
     def _is_unsaved(self) -> bool:
-        """True when the instance has no PK assigned yet — i.e.
+        """True when the instance has not been persisted yet — i.e.
         ``save()`` should INSERT, not UPDATE.
 
-        Single-column PK: ``pk is None``.
-        Composite PK: ``pk`` is a tuple, so ``is None`` is always
-        False; check that *every* component is None instead. A
-        partially-filled tuple counts as unsaved (the user is mid-
-        construction); ``Manager.create`` populates everything before
-        calling ``save``.
+        Authoritative source is ``self._state.adding``: it stays
+        True for fresh instances built with explicit pk values
+        (including ``pk=0`` and negative pks) and flips to False
+        after a successful INSERT or DB hydration. Falling back to
+        a pure ``pk is None`` check used to silently route
+        ``Model(pk=0).save()`` through the UPDATE branch — affecting
+        zero rows and producing no error or insert.
+
+        Composite PK: same flag-driven path; the legacy "all
+        components None" heuristic is kept as a fallback for older
+        instances that predate ``_state``.
         """
         from .fields import CompositePrimaryKey
 
+        state = self.__dict__.get("_state")
+        if state is not None:
+            return bool(getattr(state, "adding", True))
         if isinstance(self._meta.pk, CompositePrimaryKey):
             return all(v is None for v in self.pk or ())
         return self.pk is None
@@ -617,6 +713,9 @@ class Model(metaclass=ModelBase):
         )
         if adding:
             await self._ado_insert(conn, meta)
+            state = self.__dict__.get("_state")
+            if state is not None:
+                state.adding = False
         else:
             await self._ado_update(conn, meta, update_fields)
         await post_save.asend(
@@ -714,7 +813,7 @@ class Model(metaclass=ModelBase):
     def _from_db_row(cls, row, connection=None) -> "Self":
         """Construct a model instance from a database row."""
         instance = cls.__new__(cls)
-        instance.__dict__ = {}
+        instance.__dict__ = {"_state": _ModelState(adding=False)}
         concrete = [f for f in cls._meta.fields if f.column]
         if hasattr(row, "keys"):
             data = dict(row)

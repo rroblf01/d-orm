@@ -471,3 +471,52 @@ class ReverseFKDescriptor:
 
     def __set__(self, instance: Any, value: Any) -> None:
         raise AttributeError("Direct assignment to reverse relation is not allowed.")
+
+
+class ReverseOneToOneDescriptor:
+    """Descriptor installed on the target model for reverse one-to-one
+    access — ``OneToOneField`` is the source side, this is the
+    accessor on the *target* side that returns a single related
+    instance (or raises ``RelatedObjectDoesNotExist``).
+
+    Mirrors Django's contract: ``user.profile`` returns the single
+    ``Profile`` row whose ``user_id`` equals ``user.pk``, with the
+    result cached on the instance to skip a re-query.
+    """
+
+    def __init__(self, source_model: Any, fk_field: Any) -> None:
+        self.source_model = source_model
+        self.fk_field = fk_field
+
+    def _cache_name(self) -> str:
+        return f"_o2o_cache_{self.fk_field.name}"
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        cache = self._cache_name()
+        if cache in instance.__dict__:
+            return instance.__dict__[cache]
+        from .queryset import QuerySet
+
+        qs = QuerySet(self.source_model, "default").filter(
+            **{self.fk_field.name: instance.pk}
+        )
+        try:
+            obj = qs.get()
+        except self.source_model.DoesNotExist:
+            raise self.source_model.DoesNotExist(
+                f"{type(instance).__name__} has no {self.fk_field.name}."
+            )
+        instance.__dict__[cache] = obj
+        return obj
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        # Reverse-side assignment: stamp the source instance's FK
+        # to point at *this* instance and persist it. Matches
+        # Django's ``user.profile = some_profile`` behaviour.
+        if value is None:
+            instance.__dict__.pop(self._cache_name(), None)
+            return
+        setattr(value, self.fk_field.name, instance)
+        instance.__dict__[self._cache_name()] = value

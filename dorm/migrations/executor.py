@@ -147,8 +147,15 @@ class MigrationExecutor:
             self.loader.load_applied(self.recorder)
 
             all_migs = self._sorted(app_label)
-            # Auto-mark squashed migrations as applied when all their replaces are done
-            self._sync_squashed(app_label, all_migs)
+            # Auto-mark squashed migrations as applied when all their
+            # replaces are done. Skip on dry-run — the docstring
+            # promises the recorder is not touched, but
+            # ``_sync_squashed`` historically wrote through the real
+            # connection (the dry-run capture proxy is only swapped
+            # in inside ``_apply_forward``), so it leaked recorder
+            # writes when squashed migrations were in scope.
+            if not dry_run:
+                self._sync_squashed(app_label, all_migs)
             applied = self._applied_names(app_label)
             return self._apply_forward(
                 app_label, all_migs, applied, dry_run=dry_run

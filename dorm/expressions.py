@@ -31,8 +31,27 @@ class Q:
         return self._combine(other, Q.OR)
 
     def __invert__(self) -> "Q":
-        q = Q(*[c for c in self.children if isinstance(c, Q)])
-        q.children = list(self.children)
+        # Recursively copy nested Q nodes so a mutation on the
+        # inverted Q (or on the original) doesn't bleed across.
+        # The previous shallow copy shared every nested Q
+        # instance, so ``q = Q(a=1) & Q(b=2); ~q`` returned a Q
+        # whose ``children[0]`` was the *same object* as
+        # ``q.children[0]`` — appending to one mutated both.
+        # Tuple children (``(key, value)``) are immutable so we
+        # can keep the references; only the Q wrappers need a
+        # fresh copy.
+        new_children: list = []
+        for c in self.children:
+            if isinstance(c, Q):
+                copy = Q()
+                copy.connector = c.connector
+                copy.negated = c.negated
+                copy.children = list(c.children)
+                new_children.append(copy)
+            else:
+                new_children.append(c)
+        q = Q()
+        q.children = new_children
         q.connector = self.connector
         q.negated = not self.negated
         return q

@@ -253,9 +253,31 @@ class Storage:
             token = secrets.token_urlsafe(6)[:7]
             new_basename = f"{stem}_{token}{ext}"
             if max_length is not None and len(new_basename) > max_length:
-                # Trim the stem (not the extension) to fit.
+                # Trim the stem (not the extension) to fit. ``cut``
+                # could exceed ``len(stem)`` for very short
+                # ``max_length`` values; ``stem[:-cut]`` would then
+                # silently produce ``""`` and the resulting
+                # ``"_<token>.ext"`` may *still* exceed
+                # ``max_length`` (token+ext alone) — a violation of
+                # the contract. Floor the stem at length 0 and, if
+                # the suffix alone is too long for the budget, drop
+                # the leading underscore + stem entirely so we
+                # return a name that fits.
                 cut = len(new_basename) - max_length
-                new_basename = f"{stem[:-cut]}_{token}{ext}"
+                truncated_stem = stem[: max(0, len(stem) - cut)]
+                if truncated_stem:
+                    new_basename = f"{truncated_stem}_{token}{ext}"
+                else:
+                    new_basename = f"{token}{ext}"
+                if len(new_basename) > max_length:
+                    # Token+ext alone overflow — clip the token. Last
+                    # resort but better than returning a name that
+                    # violates max_length.
+                    keep = max_length - len(ext)
+                    if keep > 0:
+                        new_basename = f"{token[:keep]}{ext}"
+                    else:
+                        new_basename = token[:max_length]
             candidate = os.path.join(directory, new_basename) if directory else new_basename
             attempts += 1
             if attempts > 100:
@@ -399,12 +421,16 @@ class FileSystemStorage(Storage):
         Rejects any *name* that, after resolution, would escape *location* —
         the canonical defence against path-traversal uploads.
         """
-        # ``os.path.normpath`` collapses ``..`` segments. We then require
-        # the absolute path to start with ``location + os.sep`` so any
-        # escape attempt (``../foo`` or absolute paths spliced through
-        # ``os.path.join``) lands outside and is rejected.
-        target = os.path.abspath(os.path.join(self.location, name))
-        if target != self.location and not target.startswith(self.location + os.sep):
+        # ``os.path.realpath`` collapses both ``..`` segments AND
+        # symlinks. ``abspath`` alone collapses ``..`` lexically but
+        # follows symlinks at I/O time — so a symlink stored inside
+        # ``location`` (e.g. ``media/escape -> /etc``) used to pass
+        # the traversal check while the open() actually wrote
+        # outside the root. Resolving real paths on both sides
+        # closes that escape.
+        target = os.path.realpath(os.path.join(self.location, name))
+        root = os.path.realpath(self.location)
+        if target != root and not target.startswith(root + os.sep):
             raise ImproperlyConfigured(
                 f"Refusing to access {name!r}: resolves outside the storage "
                 f"root {self.location!r}."
@@ -432,7 +458,23 @@ class FileSystemStorage(Storage):
         # Stream the content in chunks so a multi-GiB upload doesn't
         # have to be materialised into RAM. ``content.chunks()`` will
         # call ``seek(0)`` first if possible.
-        with open(full_path, "wb") as fh:
+        #
+        # Open with ``O_CREAT | O_EXCL | O_WRONLY`` so a concurrent
+        # uploader can't race past ``get_available_name``'s exists-
+        # check and clobber an in-flight save. If two callers picked
+        # the same name (because both saw it as available before
+        # either wrote), the second open fails with FileExistsError;
+        # we surface a clear error rather than silently overwriting.
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(full_path, flags, 0o644)
+        except FileExistsError:
+            raise FileExistsError(
+                f"Refusing to overwrite existing file at {full_path!r}; "
+                f"another writer raced past get_available_name. Retry the "
+                f"save — get_available_name will pick a fresh suffix."
+            )
+        with os.fdopen(fd, "wb") as fh:
             if hasattr(content, "chunks"):
                 for chunk in content.chunks():
                     fh.write(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))

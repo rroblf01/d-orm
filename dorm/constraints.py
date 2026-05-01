@@ -91,13 +91,17 @@ class CheckConstraint(BaseConstraint):
         super().__init__(name=name)
         self.check = check
 
-    def _compile_check(self, table: str) -> tuple[str, list]:
+    def _compile_check(
+        self, table: str, connection: Any = None
+    ) -> tuple[str, list]:
         from .functions import _compile_condition
 
-        return _compile_condition(self.check, table_alias=None)
+        return _compile_condition(
+            self.check, table_alias=None, connection=connection
+        )
 
     def constraint_sql(self, table: str, connection: Any) -> str:
-        sql, params = self._compile_check(table)
+        sql, params = self._compile_check(table, connection=connection)
         if params:
             # Splicing user-controlled values into a CHECK predicate is
             # safe (the values come from the developer's source code,
@@ -168,7 +172,9 @@ class UniqueConstraint(BaseConstraint):
             from .functions import _compile_condition
             from .fields import _inline_literal
 
-            pred_sql, pred_params = _compile_condition(self.condition, table_alias=None)
+            pred_sql, pred_params = _compile_condition(
+                self.condition, table_alias=None, connection=connection
+            )
             if pred_params:
                 pred_sql = _inline_literal(pred_sql, pred_params)
             return (

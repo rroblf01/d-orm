@@ -358,9 +358,30 @@ class SQLiteDatabaseWrapper:
 
     def set_autocommit(self, enabled: bool) -> None:
         self._autocommit = enabled
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.isolation_level = None if enabled else ""
+        # Apply the new isolation level to EVERY live connection,
+        # not just the calling thread's. Previously sibling-thread
+        # connections cached in ``self._conns`` kept the old
+        # ``isolation_level``, leaving the wrapper in a split-brain
+        # state — caller in autocommit, other threads still wrap
+        # writes in implicit BEGIN.
+        with self._conns_lock:
+            for c in self._conns.values():
+                try:
+                    # ``None`` puts sqlite3 in autocommit mode;
+                    # ``""`` (empty string) is the legacy default
+                    # for deferred-transaction mode. The two
+                    # distinct types are both valid even though
+                    # the typestub describes only the ``None``
+                    # branch — fall back to ``setattr`` so the
+                    # static checker accepts the assignment.
+                    if enabled:
+                        c.isolation_level = None
+                    else:
+                        setattr(c, "isolation_level", "")
+                except Exception:
+                    # Closed / broken connections will be replaced on
+                    # next ``get_connection`` call; nothing to do here.
+                    pass
 
     def commit(self) -> None:
         conn = getattr(self._local, "conn", None)

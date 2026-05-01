@@ -277,6 +277,20 @@ async def ahealth_check(
 
 def reset_connections():
     """Force re-creation of connections (useful for testing)."""
+    # Drop any process-level caches that key off the previous
+    # connection's data — the most-bitten offender being the
+    # ContentType ``(app_label, model)`` → instance cache, which
+    # otherwise survives a test's ``DROP TABLE`` and hands later
+    # callers a row whose pk no longer exists. Wrapped in a broad
+    # try because the import path is optional (some installs may
+    # not pull contrib.contenttypes).
+    try:
+        from ..contrib.contenttypes.models import ContentType as _CT
+
+        _CT.objects.clear_cache()
+    except Exception:
+        pass
+
     for conn in _sync_connections.values():
         if hasattr(conn, "close"):
             try:
