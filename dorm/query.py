@@ -434,10 +434,18 @@ class SQLQuery:
 
     def as_count(self, connection) -> tuple[str, list]:
         table = self.get_table()
-        sql = f'SELECT COUNT(*) AS "count" FROM "{table}"'
         params: list = []
 
+        # Compile WHERE first — it populates ``self.joins`` via
+        # ``_resolve_column`` for FK-traversal lookups
+        # (``filter(author__name="x")``). If we emit the SELECT
+        # before compiling we miss those JOINs and the WHERE
+        # references a non-existent alias.
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
+
+        sql = f'SELECT COUNT(*) AS "count" FROM "{table}"'
+        for join_type, join_table, join_alias, on_cond in self.joins:
+            sql += f' {join_type} JOIN "{join_table}" AS "{join_alias}" ON {on_cond}'
         if where_sql:
             sql += f" WHERE {where_sql}"
             params.extend(where_params)
@@ -446,9 +454,11 @@ class SQLQuery:
 
     def as_exists(self, connection) -> tuple[str, list]:
         table = self.get_table()
-        sql = f'SELECT 1 FROM "{table}"'
         params: list = []
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
+        sql = f'SELECT 1 FROM "{table}"'
+        for join_type, join_table, join_alias, on_cond in self.joins:
+            sql += f' {join_type} JOIN "{join_table}" AS "{join_alias}" ON {on_cond}'
         if where_sql:
             sql += f" WHERE {where_sql}"
             params.extend(where_params)
@@ -556,30 +566,63 @@ class SQLQuery:
     def as_update(self, update_kwargs: dict, connection) -> tuple[str, list]:
         table = self.get_table()
         set_parts = []
-        params: list = []
+        set_params: list = []
         for col, val in update_kwargs.items():
             expr_sql, expr_params = _compile_expr(val)
             set_parts.append(f'"{col}" = {expr_sql}')
-            params.extend(expr_params)
+            set_params.extend(expr_params)
 
-        sql = f'UPDATE "{table}" SET {", ".join(set_parts)}'
-
+        # Compile WHERE first so ``_resolve_column`` populates
+        # ``self.joins``. If joins were registered (FK-traversal
+        # lookups like ``filter(author__name=…)``) we cannot emit
+        # them in the UPDATE itself portably across SQLite/PG;
+        # fall back to ``WHERE pk IN (SELECT pk FROM table JOIN
+        # … WHERE …)`` which both backends accept.
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
-        if where_sql:
-            sql += f" WHERE {where_sql}"
-            params.extend(where_params)
+
+        if self.joins:
+            pk_col = self.model._meta.pk.column
+            sub = f'SELECT "{table}"."{pk_col}" FROM "{table}"'
+            for jt, jtbl, jalias, jon in self.joins:
+                sub += f' {jt} JOIN "{jtbl}" AS "{jalias}" ON {jon}'
+            if where_sql:
+                sub += f" WHERE {where_sql}"
+            sql = (
+                f'UPDATE "{table}" SET {", ".join(set_parts)} '
+                f'WHERE "{pk_col}" IN ({sub})'
+            )
+            params = set_params + where_params
+        else:
+            sql = f'UPDATE "{table}" SET {", ".join(set_parts)}'
+            if where_sql:
+                sql += f" WHERE {where_sql}"
+            params = set_params + where_params
 
         return self._adapt_placeholders(sql, connection), params
 
     def as_delete(self, connection) -> tuple[str, list]:
         table = self.get_table()
-        sql = f'DELETE FROM "{table}"'
         params: list = []
 
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
-        if where_sql:
-            sql += f" WHERE {where_sql}"
+
+        if self.joins:
+            # Same rationale as ``as_update``: portable JOIN-aware
+            # DELETE is ``DELETE FROM t WHERE pk IN (SELECT pk
+            # FROM t JOIN … WHERE …)``.
+            pk_col = self.model._meta.pk.column
+            sub = f'SELECT "{table}"."{pk_col}" FROM "{table}"'
+            for jt, jtbl, jalias, jon in self.joins:
+                sub += f' {jt} JOIN "{jtbl}" AS "{jalias}" ON {jon}'
+            if where_sql:
+                sub += f" WHERE {where_sql}"
+            sql = f'DELETE FROM "{table}" WHERE "{pk_col}" IN ({sub})'
             params.extend(where_params)
+        else:
+            sql = f'DELETE FROM "{table}"'
+            if where_sql:
+                sql += f" WHERE {where_sql}"
+                params.extend(where_params)
 
         return self._adapt_placeholders(sql, connection), params
 
@@ -950,8 +993,24 @@ class SQLQuery:
                     f'"{join_alias}"."{rel_model._meta.pk.column}" = '
                     f'"{current_alias}"."{field.column}"'
                 )
-                if not any(j[2] == join_alias for j in self.joins):
-                    self.joins.append(("INNER", table, join_alias, on_cond))
+                # Nullable FKs MUST use LEFT OUTER JOIN, otherwise
+                # ``filter(fk__isnull=True)`` silently excludes the
+                # rows that have a NULL FK (the very rows the user
+                # asked for), and any LEFT-side semantics are lost.
+                # Non-nullable FKs use INNER which is equivalent and
+                # cheaper for the query planner.
+                join_type = "LEFT OUTER" if getattr(field, "null", False) else "INNER"
+                existing = next(
+                    (j for j in self.joins if j[2] == join_alias), None
+                )
+                if existing is None:
+                    self.joins.append((join_type, table, join_alias, on_cond))
+                elif existing[0] == "INNER" and join_type == "LEFT OUTER":
+                    # Promote the existing INNER (rare — same alias
+                    # registered twice through different code paths)
+                    # to LEFT OUTER so isnull semantics survive.
+                    idx = self.joins.index(existing)
+                    self.joins[idx] = (join_type, table, join_alias, on_cond)
                 model = rel_model
                 current_alias = join_alias
             else:

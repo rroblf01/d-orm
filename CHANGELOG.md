@@ -6,6 +6,175 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-05-01
+
+Bug-hunt patch release. Fifteen latent correctness / dataloss /
+async-parity / migration-safety issues surfaced by a multi-agent
+audit, all closed with regression tests in
+``tests/test_bug_hunt_v2_5.py``. No public API changes.
+
+### Fixed — `count()` / `exists()` / `update()` / `delete()` ignored FK-traversal JOINs
+
+- ``Book.objects.filter(author__name="x").count()`` (and the
+  matching ``exists`` / ``update`` / ``delete`` calls) used to
+  emit ``SELECT … FROM "books" WHERE "books_author"."name" = ?``
+  with no JOIN clause, crashing with *no such column*. The four
+  emitters now compile WHERE *first* (so ``_resolve_column``
+  populates ``self.joins``), then attach the JOINs. ``UPDATE`` /
+  ``DELETE`` use a portable ``WHERE pk IN (SELECT pk FROM t
+  JOIN … WHERE …)`` rewrite — both PG and SQLite accept it.
+
+### Fixed — sliced `delete()` / `adelete()` wiped the full filtered set
+
+- ``qs[:5].delete()`` collected 5 PKs through ``values_list``
+  but the final ``DELETE`` ran against the original ``where_nodes``
+  with no LIMIT, silently deleting the entire matching population
+  (dataloss). When ``limit_val`` or ``offset_val`` is set, both
+  the sync and async ``delete`` now re-scope through ``pk__in=…``
+  using the already-collected list.
+
+### Fixed — nullable FK joins were always INNER (broke `__isnull` semantics)
+
+- Any FK traversal in ``filter()`` / ``order_by()`` registered an
+  ``INNER JOIN``. For nullable FKs that meant
+  ``filter(publisher__name__isnull=True)`` excluded the very
+  rows the user asked for. ``_resolve_column`` now emits ``LEFT
+  OUTER JOIN`` when the FK is nullable, ``INNER`` otherwise —
+  matching Django's default and preserving null-side rows.
+
+### Fixed — `AlterField` SQLite rebuild lost `Meta.constraints` and FK references
+
+- The rebuild recipe re-emitted ``Meta.indexes`` but never
+  ``Meta.constraints`` — ``CheckConstraint`` /
+  ``UniqueConstraint`` silently disappeared on every alter.
+  ``PRAGMA defer_foreign_keys=ON`` is now issued before the
+  drop+rename so child FK references stay valid through the txn
+  (``PRAGMA foreign_keys=OFF`` is a no-op inside an open
+  transaction; deferred FK-check is the right primitive here).
+  A post-rebuild ``PRAGMA foreign_key_check`` raises if the
+  rebuild left dangling references, so a corrupted schema rolls
+  back instead of being committed.
+
+### Fixed — Migration writer DDL `DEFAULT` did not escape single quotes
+
+- ``CharField(default="O'Brien")`` emitted ``DEFAULT 'O'Brien'``
+  — broken DDL and an injection vector if the default ever
+  derived from anything user-influenced. The string-default
+  branch now escapes via the SQL-standard ``'`` → ``''``
+  doubling.
+
+### Fixed — Async iterator never hydrated annotation values onto instances
+
+- The sync ``_iterator`` writes
+  ``instance.__dict__[alias] = row[alias]`` for every queryset
+  annotation; the async ``_aiterator`` skipped that block, so
+  ``[a async for a in Author.objects.annotate(n=Count("book"))]``
+  produced instances without ``.n``. Async path now mirrors
+  sync.
+
+### Fixed — Async `Prefetch(queryset=…)` was unusable
+
+- ``_ado_prefetch_related`` passed the raw ``Prefetch`` object
+  to ``_meta.get_field`` and crashed with ``TypeError`` /
+  ``FieldDoesNotExist``. Async prefetch now normalises the spec
+  to ``(lookup, queryset, to_attr)`` and propagates both kwargs
+  to every async helper (``_aprefetch_m2m`` /
+  ``_aprefetch_generic_relation`` /
+  ``_aprefetch_reverse_fk``). ``_aprefetch_gfk`` keeps the same
+  ``user_qs`` / ``to_attr`` rejections the sync helper has.
+
+### Fixed — `aget_queryset` ignored prefetch cache (silent N+1 in async)
+
+- After ``async for a in Article.objects.prefetch_related("tags")``,
+  calling ``await a.tags.aget_queryset()`` re-queried the DB
+  even though the prefetch had already populated
+  ``_prefetch_tags``. The async manager now mirrors the sync
+  cache lookup, returning a ``QuerySet`` with
+  ``_result_cache`` pre-populated.
+
+### Fixed — `adelete` ran reverse-FK cascades through the synchronous code path
+
+- ``adelete`` called ``_handle_on_delete`` which iterated
+  reverse-FK descriptors with ``obj.delete()`` /
+  ``related_qs.update(...)`` — blocking SQL inside the event
+  loop. A new ``_ahandle_on_delete`` runs every CASCADE /
+  ``SET_NULL`` / ``SET_DEFAULT`` step through the async
+  queryset (``adelete`` / ``aupdate``).
+
+### Fixed — `_handle_on_delete` only walked `type(self).__dict__`
+
+- Models inheriting from another concrete model installed their
+  reverse-FK descriptors on the parent class. Cascade handling
+  on a child instance silently skipped those parent descriptors.
+  Both the sync and async cascade handlers now walk the MRO via
+  a shared ``_iter_reverse_fk_descriptors`` helper.
+
+### Fixed — M2M `add` / `remove` / `set` / `clear` left stale prefetch cache
+
+- After ``prefetch_related("tags")`` a subsequent
+  ``art.tags.add(tag2)`` did not clear ``_prefetch_tags``, so
+  ``art.tags.all()`` returned the *pre-mutation* list. ``set()``
+  was worst: it diffed against the stale cache and computed the
+  wrong INSERT/DELETE. Every mutation method (sync + async) now
+  drops the cache slot via a shared
+  ``_invalidate_prefetch_cache`` helper, and ``set()`` /
+  ``aset()`` invalidate before reading current state.
+
+### Fixed — Autodetector `&` and `-` precedence quietly absorbed renamed fields
+
+- ``set(from_fields) & set(to_fields) - renamed_old_fields``
+  parses as ``a & (b - c)`` in Python — the subtraction ran
+  first against ``to_fields`` (where renamed-from names aren't
+  present) and never excluded them from the AlterField loop.
+  Now explicitly parenthesised:
+  ``(set(from_fields) & set(to_fields)) - renamed_old_fields``.
+
+### Fixed — Field-rename heuristic compared only `db_type`
+
+- The heuristic that auto-detects ``RenameField`` matched on
+  ``db_type`` alone — same flaw the AlterField branch was
+  patched for. ``VectorField(384)`` and ``VectorField(1536)``
+  both render ``BLOB`` on SQLite, so a simultaneous rename +
+  dimension change registered as a *pure* rename and dropped
+  the type change. Now compares ``db_type`` AND the writer's
+  serialised output.
+
+### Fixed — `_serialize_field` exception silently masked AlterField changes
+
+- A single ``try/except`` set ``old_s = new_s = None`` when
+  *either* serialise call raised, and the equality check then
+  evaluated ``None != None`` → False, so a real change was
+  treated as a no-op. The two sides are now serialised
+  independently; an asymmetric failure (one side raises, the
+  other succeeds) is treated as *changed* — a spurious
+  ``AlterField`` is strictly better than a silently-missed
+  one.
+
+### Fixed — M2M `add` / `aadd` had a SELECT-then-INSERT race window
+
+- The two-query batching (``SELECT existing pks`` then
+  ``INSERT to_add``) ran outside any transaction. Two concurrent
+  ``add()`` calls could both observe ``existing=∅`` and both
+  INSERT the same target rows, producing duplicates (or
+  ``IntegrityError`` on UNIQUE through tables). Both sync and
+  async paths now wrap the SELECT+INSERT pair in
+  ``atomic`` / ``aatomic``.
+
+### Fixed — `CombinedQuerySet` (UNION/INTERSECT/EXCEPT) ORDER BY skipped identifier validation
+
+- Every other ORDER BY emitter validates field names via
+  ``_validate_identifier``; the combinator path was the lone
+  gap. A user-controlled ``order_by`` value forwarded from an
+  API query string could inject SQL through this path. Now
+  validates before quoting.
+
+### Tests
+
+- ``tests/test_bug_hunt_v2_5.py`` — 50 cases (48 active, 2
+  PostgreSQL-only skipped without Docker) covering every fix
+  above. Split sync / async where applicable; runs on both
+  SQLite and PostgreSQL.
+
 ## [2.4.0] - 2026-04-30
 
 Big release. Four DX features (N+1 detector, GenericRelation

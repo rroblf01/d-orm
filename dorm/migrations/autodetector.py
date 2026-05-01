@@ -172,13 +172,29 @@ class MigrationAutodetector:
                 if len(removed_names) == 1 and len(added_names) == 1:
                     old_fname = next(iter(removed_names))
                     new_fname = next(iter(added_names))
+                    # Compare BOTH ``db_type`` AND the writer's
+                    # serialised output. Comparing only ``db_type``
+                    # collapses VectorField(384) and
+                    # VectorField(1536) to the same SQLite ``BLOB``,
+                    # so a rename + dimension change would be
+                    # registered as a pure rename, silently
+                    # dropping the type change.
+                    from .writer import _serialize_field as _sf
+
                     try:
                         old_t = from_fields[old_fname].db_type(dc) or ""
                         new_t = to_fields[new_fname].db_type(dc) or ""
-                        if old_t == new_t:
-                            field_renames[old_fname] = new_fname
                     except Exception:
-                        pass
+                        old_t = new_t = ""
+                    try:
+                        old_s = _sf(from_fields[old_fname])
+                        new_s = _sf(to_fields[new_fname])
+                    except Exception:
+                        old_s = new_s = None
+                    if old_t == new_t and (
+                        old_s is None or new_s is None or old_s == new_s
+                    ):
+                        field_renames[old_fname] = new_fname
 
             renamed_old_fields = set(field_renames)
             renamed_new_fields = set(field_renames.values())
@@ -213,7 +229,13 @@ class MigrationAutodetector:
             # warranted.
             from .writer import _serialize_field
 
-            for fname in set(from_fields) & set(to_fields) - renamed_old_fields:
+            # Parenthesise the ``& - `` expression — Python parses
+            # ``a & b - c`` as ``a & (b - c)``, so without the
+            # explicit grouping ``renamed_old_fields`` is
+            # subtracted from ``to_fields`` (a no-op since
+            # renamed-from names aren't present in the new state)
+            # and never excluded from the iteration target.
+            for fname in (set(from_fields) & set(to_fields)) - renamed_old_fields:
                 old_f = from_fields[fname]
                 new_f = to_fields[fname]
                 try:
@@ -221,13 +243,34 @@ class MigrationAutodetector:
                     new_t = new_f.db_type(dc)
                 except Exception:
                     old_t = new_t = None
+                # Track each serialise call separately so a
+                # writer failure on one field doesn't poison the
+                # comparison for both. Previously a single
+                # ``except`` set ``old_s = new_s = None`` and the
+                # equality check then evaluated to ``None != None``
+                # (False) — silencing every change for fields the
+                # writer can't currently emit (e.g. nested
+                # ``EnumField``).
                 try:
                     old_s = _serialize_field(old_f)
+                except Exception:
+                    old_s = None
+                try:
                     new_s = _serialize_field(new_f)
                 except Exception:
-                    old_s = new_s = None
-                changed = (old_t is not None and old_t != new_t) or (
-                    old_s is not None and old_s != new_s
+                    new_s = None
+                # Real change if EITHER the SQL type changed OR
+                # the writer would emit different Python. If
+                # serialisation failed for one side but not the
+                # other we treat it as changed (better a spurious
+                # AlterField than a silently-missed one).
+                serialise_says_changed = (
+                    old_s is not None and new_s is not None and old_s != new_s
+                ) or (
+                    (old_s is None) ^ (new_s is None)
+                )
+                changed = (
+                    (old_t is not None and old_t != new_t) or serialise_says_changed
                 )
                 if changed:
                     ops.append(AlterField(model_name=to_m["name"], name=fname, field=new_f))

@@ -1734,7 +1734,19 @@ class QuerySet(Generic[_T]):
                 related_qs.update(**{fk_field.name: fk_field.get_default()})
 
         connection = self._get_connection()
-        sql, params = self._query.as_delete(connection)
+        # If the queryset was sliced (LIMIT/OFFSET), the WHERE
+        # clause alone matches MORE rows than we agreed to delete:
+        # ``qs[:5].delete()`` previously emitted
+        # ``DELETE FROM t WHERE <filter>`` — no LIMIT — and wiped
+        # the whole filtered population (silent dataloss). Switch
+        # to ``WHERE pk IN (collected_pks)`` to honour the slice.
+        if self._query.limit_val is not None or self._query.offset_val is not None:
+            scoped = QuerySet(self.model, self._db).filter(
+                **{f"{pk_attname}__in": pks}
+            )
+            sql, params = scoped._query.as_delete(connection)
+        else:
+            sql, params = self._query.as_delete(connection)
         count = connection.execute_write(sql, params)
         total_counts[model_label] = total_counts.get(model_label, 0) + count
         return sum(total_counts.values()), total_counts
@@ -1950,7 +1962,13 @@ class QuerySet(Generic[_T]):
         return self._aiterator()
 
     async def _aprefetch_gfk(
-        self, instances: list[_T], fname: str, gfk_field: Any
+        self,
+        instances: list[_T],
+        fname: str,
+        gfk_field: Any,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
     ) -> None:
         """Async counterpart of :meth:`_prefetch_gfk`.
 
@@ -1959,6 +1977,21 @@ class QuerySet(Generic[_T]):
         bulk fetches dispatched concurrently via ``asyncio.gather`` so
         K content types cost one round-trip's worth of latency, not K.
         """
+        # Mirror the sync ``_prefetch_gfk`` rejections — a GFK
+        # spans multiple model classes so a single
+        # ``Prefetch(queryset=…)`` cannot filter all of them, and
+        # ``to_attr`` would conflict with the descriptor's own
+        # cache slot.
+        if user_qs is not None:
+            raise NotImplementedError(
+                f"prefetch_related({fname!r}) on a GenericForeignKey does "
+                f"not accept a custom Prefetch(queryset=…)."
+            )
+        if to_attr is not None:
+            raise NotImplementedError(
+                f"prefetch_related({fname!r}) on a GenericForeignKey does "
+                f"not support to_attr=…."
+            )
         ct_attname = f"{gfk_field.ct_field}_id"
         fk_attname = gfk_field.fk_field
         cache_key = gfk_field.get_cache_name()
@@ -2026,7 +2059,13 @@ class QuerySet(Generic[_T]):
                 ) from result
 
     async def _aprefetch_generic_relation(
-        self, instances: list[_T], fname: str, gr_field: Any
+        self,
+        instances: list[_T],
+        fname: str,
+        gr_field: Any,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
     ) -> None:
         """Async counterpart of :meth:`_prefetch_generic_relation`."""
         from .contrib.contenttypes.models import ContentType
@@ -2034,7 +2073,7 @@ class QuerySet(Generic[_T]):
         ct_attname = f"{gr_field.content_type_field}_id"
         fk_attname = gr_field.object_id_field
         related_model = gr_field._resolve_related()
-        cache_key = f"_prefetch_{fname}"
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
 
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
@@ -2043,8 +2082,13 @@ class QuerySet(Generic[_T]):
             return
 
         ct = await ContentType.objects.aget_for_model(type(instances[0]))
+        base_qs = (
+            user_qs
+            if user_qs is not None
+            else QuerySet(related_model, self._db)  # type: ignore[arg-type]
+        )
         grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
-        async for obj in QuerySet(related_model, self._db).filter(  # type: ignore[arg-type]
+        async for obj in base_qs.filter(
             **{ct_attname: ct.pk, f"{fk_attname}__in": src_pks}
         ):
             owner_id = obj.__dict__.get(fk_attname)
@@ -2053,12 +2097,19 @@ class QuerySet(Generic[_T]):
         for inst in instances:
             inst.__dict__[cache_key] = grouped.get(inst.pk, [])
 
-    async def _aprefetch_reverse_fk(self, instances: list[_T], fname: str) -> None:
+    async def _aprefetch_reverse_fk(
+        self,
+        instances: list[_T],
+        fname: str,
+        *,
+        user_qs: "QuerySet[Any] | None" = None,
+        to_attr: str | None = None,
+    ) -> None:
         """Async counterpart of :meth:`_prefetch_reverse_fk`."""
         from .related_managers import ReverseFKDescriptor
         from .fields import ForeignKey, OneToOneField
 
-        cache_key = f"_prefetch_{fname}"
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
         descriptor = self.model.__dict__.get(fname)
         if isinstance(descriptor, ReverseFKDescriptor):
             target_model = descriptor.source_model
@@ -2107,8 +2158,13 @@ class QuerySet(Generic[_T]):
                 inst.__dict__[cache_key] = []
             return
 
+        base_qs = (
+            user_qs
+            if user_qs is not None
+            else QuerySet(target_model, self._db)  # type: ignore[arg-type]
+        )
         related_objs: list[Any] = []
-        async for obj in QuerySet(target_model, self._db).filter(  # type: ignore[arg-type]
+        async for obj in base_qs.filter(
             **{f"{target_field.name}__in": src_pks}
         ):
             related_objs.append(obj)
@@ -2134,7 +2190,12 @@ class QuerySet(Generic[_T]):
         if not self._query.prefetch_related_fields:
             return
 
-        async def _one_forward_fk(fname: str, field: Any) -> None:
+        async def _one_forward_fk(
+            fname: str,
+            field: Any,
+            user_qs: "QuerySet[Any] | None",
+            to_attr: str | None,
+        ) -> None:
             rel_model = field._resolve_related_model()
             pk_vals = list(
                 {
@@ -2143,13 +2204,18 @@ class QuerySet(Generic[_T]):
                     if obj.__dict__.get(field.attname) is not None
                 }
             )
-            cache_key = f"_cache_{fname}"
+            cache_key = to_attr if to_attr else f"_cache_{fname}"
             if not pk_vals:
                 for inst in instances:
                     inst.__dict__.setdefault(cache_key, None)
                 return
+            base_qs = (
+                user_qs
+                if user_qs is not None
+                else QuerySet(rel_model, self._db)  # type: ignore[arg-type]
+            )
             related_objs: dict = {}
-            async for obj in QuerySet(rel_model, self._db).filter(pk__in=pk_vals):  # type: ignore[arg-type]
+            async for obj in base_qs.filter(pk__in=pk_vals):
                 related_objs[obj.pk] = obj
             for inst in instances:
                 fk_val = inst.__dict__.get(field.attname)
@@ -2159,7 +2225,21 @@ class QuerySet(Generic[_T]):
 
         coros: list = []
         names: list[str] = []
-        for fname in self._query.prefetch_related_fields:
+        for spec in self._query.prefetch_related_fields:
+            # Normalise Prefetch(...) and bare strings to a uniform
+            # (lookup, queryset, to_attr) tuple — same contract as
+            # the sync ``_do_prefetch_related``. Previously the
+            # async path passed the raw ``Prefetch`` object to
+            # ``_meta.get_field`` and crashed.
+            if isinstance(spec, Prefetch):
+                fname = spec.lookup
+                user_qs = spec.queryset
+                to_attr = spec.to_attr
+            else:
+                fname = spec
+                user_qs = None
+                to_attr = None
+
             field = None
             try:
                 field = self.model._meta.get_field(fname)
@@ -2170,15 +2250,31 @@ class QuerySet(Generic[_T]):
                 pass
 
             if field is not None and getattr(field, "many_to_many", False):
-                coros.append(self._aprefetch_m2m(instances, fname, field))
+                coros.append(
+                    self._aprefetch_m2m(
+                        instances, fname, field, user_qs=user_qs, to_attr=to_attr
+                    )
+                )
             elif field is not None and _is_generic_foreign_key(field):
-                coros.append(self._aprefetch_gfk(instances, fname, field))
+                coros.append(
+                    self._aprefetch_gfk(
+                        instances, fname, field, user_qs=user_qs, to_attr=to_attr
+                    )
+                )
             elif field is not None and _is_generic_relation(field):
-                coros.append(self._aprefetch_generic_relation(instances, fname, field))
+                coros.append(
+                    self._aprefetch_generic_relation(
+                        instances, fname, field, user_qs=user_qs, to_attr=to_attr
+                    )
+                )
             elif field is not None and hasattr(field, "_resolve_related_model"):
-                coros.append(_one_forward_fk(fname, field))
+                coros.append(_one_forward_fk(fname, field, user_qs, to_attr))
             else:
-                coros.append(self._aprefetch_reverse_fk(instances, fname))
+                coros.append(
+                    self._aprefetch_reverse_fk(
+                        instances, fname, user_qs=user_qs, to_attr=to_attr
+                    )
+                )
             names.append(fname)
 
         if coros:
@@ -2210,6 +2306,16 @@ class QuerySet(Generic[_T]):
                 continue
 
             instance = self.model._from_db_row(row, conn)  # type: ignore[misc]
+
+            # Hydrate annotation values onto the instance — sync
+            # ``_iterator`` does this; async path used to skip it,
+            # so ``Author.objects.annotate(n=Count("books"))``
+            # async-iterated produced instances without ``.n``.
+            if self._query.annotations:
+                row_dict = dict(row) if hasattr(row, "keys") else {}
+                for alias in self._query.annotations:
+                    if alias in row_dict:
+                        instance.__dict__[alias] = row_dict[alias]
 
             if sr_fields:
                 self._hydrate_select_related(
@@ -2401,7 +2507,16 @@ class QuerySet(Generic[_T]):
                     total_counts[label] = total_counts.get(label, 0) + cnt
 
         conn = self._get_async_connection()
-        sql, params = self._query.as_delete(conn)
+        # See note in :meth:`delete` — sliced ``adelete`` must
+        # honour LIMIT/OFFSET by deleting only the pks already
+        # collected, not the full WHERE-matching set.
+        if self._query.limit_val is not None or self._query.offset_val is not None:
+            scoped = QuerySet(self.model, self._db).filter(
+                **{f"{pk_attname}__in": pks}
+            )
+            sql, params = scoped._query.as_delete(conn)
+        else:
+            sql, params = self._query.as_delete(conn)
         count = await conn.execute_write(sql, params)
         total_counts[model_label] = total_counts.get(model_label, 0) + count
         return sum(total_counts.values()), total_counts
@@ -2701,9 +2816,18 @@ class CombinedQuerySet(QuerySet[_T]):
         combined = f" {op} ".join(parts)
 
         if self._query.order_by_fields:
+            from .query import _validate_identifier
+
             order_parts = []
             for f in self._query.order_by_fields:
                 fname = f[1:] if f.startswith("-") else f
+                # Without identifier validation a caller-controlled
+                # ``order_by`` value (e.g. forwarded from an API
+                # query string) could inject SQL through this
+                # path — every other ORDER BY emitter validates
+                # via ``_validate_identifier``; this one used to
+                # be the lone gap.
+                _validate_identifier(fname)
                 order_parts.append(f'"{fname}" {"DESC" if f.startswith("-") else "ASC"}')
             combined += " ORDER BY " + ", ".join(order_parts)
 

@@ -481,15 +481,34 @@ class Model(metaclass=ModelBase):
             return
         query.where_nodes.append(([pk_field.column], "exact", self.pk))
 
+    def _iter_reverse_fk_descriptors(self):
+        """Yield ``(name, ReverseFKDescriptor)`` for every reverse FK
+        descriptor reachable through the MRO.
+
+        Walking ``type(self).__dict__`` alone misses descriptors
+        installed on a parent class — a model that inherits from
+        another concrete model would silently skip cascade
+        handling for the parent's reverse relations. Use the MRO
+        walk instead so multi-level model hierarchies behave the
+        same as flat models.
+        """
+        from .related_managers import ReverseFKDescriptor
+
+        seen: set[str] = set()
+        for klass in type(self).__mro__:
+            for attr_name, attr_val in klass.__dict__.items():
+                if attr_name in seen:
+                    continue
+                if isinstance(attr_val, ReverseFKDescriptor):
+                    seen.add(attr_name)
+                    yield attr_name, attr_val
+
     def _handle_on_delete(self, using: str = "default") -> None:
         """Apply Python-level on_delete behaviour for all reverse FK relations."""
         from .exceptions import ProtectedError
         from .fields import CASCADE, DO_NOTHING, PROTECT, SET_DEFAULT, SET_NULL
-        from .related_managers import ReverseFKDescriptor
 
-        for attr_val in type(self).__dict__.values():
-            if not isinstance(attr_val, ReverseFKDescriptor):
-                continue
+        for _attr_name, attr_val in self._iter_reverse_fk_descriptors():
             fk_field = attr_val.fk_field
             on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
             if on_delete == DO_NOTHING:
@@ -513,6 +532,46 @@ class Model(metaclass=ModelBase):
                 related_qs.update(**{fk_field.name: None})
             elif on_delete == SET_DEFAULT:
                 related_qs.update(**{fk_field.name: fk_field.get_default()})
+
+    async def _ahandle_on_delete(self, using: str = "default") -> None:
+        """Async counterpart of :meth:`_handle_on_delete`.
+
+        The sync version blocks the event loop with synchronous
+        SQL when called from ``adelete``. This routes every
+        cascade / SET_NULL / SET_DEFAULT step through the async
+        queryset path so the event loop stays responsive.
+        """
+        from .exceptions import ProtectedError
+        from .fields import CASCADE, DO_NOTHING, PROTECT, SET_DEFAULT, SET_NULL
+        from .queryset import QuerySet
+
+        for _attr_name, attr_val in self._iter_reverse_fk_descriptors():
+            fk_field = attr_val.fk_field
+            on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
+            if on_delete == DO_NOTHING:
+                continue
+
+            related_qs = QuerySet(attr_val.source_model, using).filter(
+                **{fk_field.name: self.pk}
+            )
+
+            if on_delete == PROTECT:
+                objs = [obj async for obj in related_qs]
+                if objs:
+                    raise ProtectedError(
+                        f"Cannot delete {self!r} because related "
+                        f"{attr_val.source_model.__name__} objects exist.",
+                        objs,
+                    )
+            elif on_delete == CASCADE:
+                async for obj in related_qs:
+                    await obj.adelete(using=using)
+            elif on_delete == SET_NULL:
+                await related_qs.aupdate(**{fk_field.name: None})
+            elif on_delete == SET_DEFAULT:
+                await related_qs.aupdate(
+                    **{fk_field.name: fk_field.get_default()}
+                )
 
     def delete(self, using: str = "default") -> tuple[int, dict[str, int]]:
         from .db.connection import get_connection
@@ -632,7 +691,10 @@ class Model(metaclass=ModelBase):
         from .query import SQLQuery
         from .signals import post_delete, pre_delete
 
-        self._handle_on_delete(using=using)
+        # Use the async cascade handler so reverse-FK CASCADE /
+        # SET_NULL / SET_DEFAULT don't block the event loop with
+        # sync SQL calls.
+        await self._ahandle_on_delete(using=using)
 
         conn = get_async_connection(using)
         await pre_delete.asend(self.__class__, instance=self, using=using)

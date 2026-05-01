@@ -43,6 +43,19 @@ class ManyRelatedManager:
         from .query import SQLQuery
         return SQLQuery(self._rel_model)._adapt_placeholders(sql, conn)
 
+    def _invalidate_prefetch_cache(self) -> None:
+        """Drop the ``_prefetch_<name>`` slot on the owning instance.
+
+        Mutations (``add`` / ``remove`` / ``set`` / ``clear`` /
+        ``create``) change the underlying through-table state.
+        Without invalidation a subsequent ``manager.all()`` would
+        return the stale cache populated by an earlier
+        ``prefetch_related``, hiding the mutation from the
+        caller's perspective.
+        """
+        cache_key = f"_prefetch_{self.field.name}"
+        self.instance.__dict__.pop(cache_key, None)
+
     # ── Queryset access ───────────────────────────────────────────────────────
 
     def get_queryset(self):
@@ -89,6 +102,12 @@ class ManyRelatedManager:
         one multi-row INSERT for the missing ones. The previous "SELECT then
         INSERT per object" loop was 2 round-trips per object — adding 1000
         tags meant 2000 queries; now it's 2.
+
+        The SELECT-then-INSERT pair runs inside an :func:`atomic`
+        block: without it, two concurrent ``add()`` calls could
+        both observe ``existing=∅`` and race-INSERT duplicate
+        through rows (or trip the through table's UNIQUE
+        constraint with an :class:`IntegrityError`).
         """
         if not objs:
             return
@@ -97,30 +116,35 @@ class ManyRelatedManager:
         seen: set = set()
         target_pks = [pk for pk in target_pks if pk not in seen and not seen.add(pk)]
 
+        from .transaction import atomic
+
         conn = self._get_connection()
         through = self._through_table
         src_col, tgt_col = self._through_columns
 
-        existing = self._fetch_existing_targets(conn, target_pks)
-        to_add = [pk for pk in target_pks if pk not in existing]
-        if not to_add:
-            return
+        with atomic(using=self._db):
+            existing = self._fetch_existing_targets(conn, target_pks)
+            to_add = [pk for pk in target_pks if pk not in existing]
+            if not to_add:
+                self._invalidate_prefetch_cache()
+                return
 
-        extra_cols, extra_phs, extra_vals = self._through_defaults_sql(through_defaults)
-        # Multi-row VALUES (...), (...), ... — psycopg adapts the parameter list
-        # in one statement. SQLite >=3.7.11 (Python ships 3.x with it) too.
-        row_phs = ", ".join([f"(%s, %s{extra_phs})"] * len(to_add))
-        ins_sql = self._adapt(
-            f'INSERT INTO "{through}" ("{src_col}", "{tgt_col}"{extra_cols}) '
-            f"VALUES {row_phs}",
-            conn,
-        )
-        params: list[Any] = []
-        for pk in to_add:
-            params.append(self.instance.pk)
-            params.append(pk)
-            params.extend(extra_vals)
-        conn.execute_write(ins_sql, params)
+            extra_cols, extra_phs, extra_vals = self._through_defaults_sql(through_defaults)
+            # Multi-row VALUES (...), (...), ... — psycopg adapts the parameter list
+            # in one statement. SQLite >=3.7.11 (Python ships 3.x with it) too.
+            row_phs = ", ".join([f"(%s, %s{extra_phs})"] * len(to_add))
+            ins_sql = self._adapt(
+                f'INSERT INTO "{through}" ("{src_col}", "{tgt_col}"{extra_cols}) '
+                f"VALUES {row_phs}",
+                conn,
+            )
+            params: list[Any] = []
+            for pk in to_add:
+                params.append(self.instance.pk)
+                params.append(pk)
+                params.extend(extra_vals)
+            conn.execute_write(ins_sql, params)
+        self._invalidate_prefetch_cache()
 
     # ── helpers shared between sync and async ────────────────────────────────
 
@@ -188,6 +212,7 @@ class ManyRelatedManager:
             conn,
         )
         conn.execute_write(sql, [self.instance.pk] + list(target_pks))
+        self._invalidate_prefetch_cache()
 
     def set(
         self,
@@ -202,6 +227,13 @@ class ManyRelatedManager:
             self.add(*objs_list, through_defaults=through_defaults)
             return
         new_pks = {o.pk if hasattr(o, "pk") else o for o in objs_list}
+        # ``set()`` diffs against the *live* through-table state.
+        # If a previous ``add()``/``remove()`` ran without
+        # invalidating the prefetch cache, ``get_queryset()``
+        # would return that stale list and we'd compute the wrong
+        # diff (silent INSERT/DELETE errors). Force a fresh
+        # query by dropping the cache slot before the read.
+        self._invalidate_prefetch_cache()
         current_pks = {obj.pk for obj in self.get_queryset()}
         to_remove = list(current_pks - new_pks)
         to_add = [pk for pk in new_pks if pk not in current_pks]
@@ -218,6 +250,7 @@ class ManyRelatedManager:
             f'DELETE FROM "{through}" WHERE "{src_col}" = %s', conn
         )
         conn.execute_write(sql, [self.instance.pk])
+        self._invalidate_prefetch_cache()
 
     def create(self, **kwargs: Any) -> "Model":
         obj = self._rel_model.objects.create(**kwargs)
@@ -228,6 +261,18 @@ class ManyRelatedManager:
 
     async def aget_queryset(self):
         from .queryset import QuerySet
+
+        # Mirror :meth:`get_queryset`: if the instance was the
+        # target of a ``prefetch_related`` pass, the cache slot
+        # holds the resolved list — return that instead of a
+        # fresh DB round-trip. Without this, ``await
+        # mgr.aget_queryset()`` produced an N+1 silently in async
+        # code despite the user asking for prefetch.
+        cache_key = f"_prefetch_{self.field.name}"
+        if cache_key in self.instance.__dict__:
+            qs: QuerySet = QuerySet(self._rel_model, self._db)
+            qs._result_cache = list(self.instance.__dict__[cache_key])
+            return qs
 
         conn = self._get_async_connection()
         through = self._through_table
@@ -242,35 +287,44 @@ class ManyRelatedManager:
         return QuerySet(self._rel_model, self._db).filter(pk__in=pks)
 
     async def aadd(self, *objs: Any, through_defaults: dict | None = None) -> None:
-        """Async counterpart of :meth:`add`. Same 2-query batching."""
+        """Async counterpart of :meth:`add`. Same 2-query batching.
+
+        Wrapped in :func:`aatomic` to close the same SELECT-then-
+        INSERT race window the sync ``add`` covers.
+        """
         if not objs:
             return
         target_pks = [obj.pk if hasattr(obj, "pk") else obj for obj in objs]
         seen: set = set()
         target_pks = [pk for pk in target_pks if pk not in seen and not seen.add(pk)]
 
+        from .transaction import aatomic
+
         conn = self._get_async_connection()
         through = self._through_table
         src_col, tgt_col = self._through_columns
 
-        existing = await self._afetch_existing_targets(conn, target_pks)
-        to_add = [pk for pk in target_pks if pk not in existing]
-        if not to_add:
-            return
+        async with aatomic(using=self._db):
+            existing = await self._afetch_existing_targets(conn, target_pks)
+            to_add = [pk for pk in target_pks if pk not in existing]
+            if not to_add:
+                self._invalidate_prefetch_cache()
+                return
 
-        extra_cols, extra_phs, extra_vals = self._through_defaults_sql(through_defaults)
-        row_phs = ", ".join([f"(%s, %s{extra_phs})"] * len(to_add))
-        ins_sql = self._adapt(
-            f'INSERT INTO "{through}" ("{src_col}", "{tgt_col}"{extra_cols}) '
-            f"VALUES {row_phs}",
-            conn,
-        )
-        params: list[Any] = []
-        for pk in to_add:
-            params.append(self.instance.pk)
-            params.append(pk)
-            params.extend(extra_vals)
-        await conn.execute_write(ins_sql, params)
+            extra_cols, extra_phs, extra_vals = self._through_defaults_sql(through_defaults)
+            row_phs = ", ".join([f"(%s, %s{extra_phs})"] * len(to_add))
+            ins_sql = self._adapt(
+                f'INSERT INTO "{through}" ("{src_col}", "{tgt_col}"{extra_cols}) '
+                f"VALUES {row_phs}",
+                conn,
+            )
+            params: list[Any] = []
+            for pk in to_add:
+                params.append(self.instance.pk)
+                params.append(pk)
+                params.extend(extra_vals)
+            await conn.execute_write(ins_sql, params)
+        self._invalidate_prefetch_cache()
 
     async def aremove(self, *objs: Any) -> None:
         """Async counterpart of :meth:`remove`. Single batched DELETE."""
@@ -287,6 +341,7 @@ class ManyRelatedManager:
             conn,
         )
         await conn.execute_write(sql, [self.instance.pk] + list(target_pks))
+        self._invalidate_prefetch_cache()
 
     async def aset(
         self,
@@ -300,6 +355,10 @@ class ManyRelatedManager:
             await self.aclear()
             await self.aadd(*objs_list, through_defaults=through_defaults)
             return
+        # Same rationale as :meth:`set`: invalidate so the diff
+        # is computed from live state rather than stale prefetch
+        # cache.
+        self._invalidate_prefetch_cache()
         qs = await self.aget_queryset()
         current_pks = {obj.pk async for obj in qs}
         new_pks = {o.pk if hasattr(o, "pk") else o for o in objs_list}
@@ -318,6 +377,7 @@ class ManyRelatedManager:
             f'DELETE FROM "{through}" WHERE "{src_col}" = %s', conn
         )
         await conn.execute_write(sql, [self.instance.pk])
+        self._invalidate_prefetch_cache()
 
     async def acreate(self, **kwargs: Any) -> "Model":
         obj = await self._rel_model.objects.acreate(**kwargs)

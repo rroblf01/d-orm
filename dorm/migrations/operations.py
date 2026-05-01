@@ -227,13 +227,29 @@ class AlterField(Operation):
         # SQLite path — no real ALTER COLUMN support. Rebuild the
         # table per the canonical SQLite recipe:
         # https://www.sqlite.org/lang_altertable.html#otheralter
-        # 1. Create a new table with the up-to-date schema.
-        # 2. Copy rows over (column list shared between old and
-        #    new is the intersection of the two field sets — gone
-        #    columns are dropped, added columns get NULL or the
-        #    field default).
-        # 3. Drop the old table and rename the new one in place.
-        # 4. Recreate every index that pointed at the old table.
+        #
+        # The migration executor wraps every operation in
+        # ``atomic()``. ``PRAGMA foreign_keys`` is silently a
+        # no-op inside an open transaction, so we use
+        # ``PRAGMA defer_foreign_keys=ON`` instead — it DOES work
+        # inside a txn and tells SQLite to defer FK validation
+        # until COMMIT. That gives us a transaction-safe window
+        # in which to drop+rename the parent without invalidating
+        # child references.
+        #
+        # 1. ``PRAGMA defer_foreign_keys=ON`` (per-txn).
+        # 2. Create a new table with the up-to-date schema.
+        # 3. Copy rows over (column list shared between old and
+        #    new is the intersection of the two field sets).
+        # 4. Drop the old table and rename the new one in place.
+        # 5. Recreate every index AND every Meta.constraints
+        #    (CheckConstraint / UniqueConstraint) that lived on
+        #    the old table — both are stored in ``sqlite_schema``
+        #    and would be lost otherwise.
+        # 6. ``PRAGMA foreign_key_check`` to surface any
+        #    references the rebuild left dangling. Raise so the
+        #    surrounding atomic() rolls back rather than commits
+        #    a corrupted schema.
         if vendor != "sqlite":
             return
         new_fields = model_state.get("fields", {})
@@ -243,6 +259,10 @@ class AlterField(Operation):
             f"{app_label}.{self.model_name.lower()}", {}
         )
         old_fields = old_model_state.get("fields", {}) or new_fields
+
+        # ``defer_foreign_keys`` is per-transaction and
+        # auto-clears at COMMIT, so no cleanup needed.
+        connection.execute_script("PRAGMA defer_foreign_keys=ON")
 
         tmp = f"_dorm_alter_{table}"
         # Drop any leftover from a previously-failed rebuild before
@@ -287,6 +307,30 @@ class AlterField(Operation):
         for idx in model_state.get("options", {}).get("indexes", []) or []:
             forward, _ = idx.create_sql(table, vendor=vendor)
             connection.execute_script(forward)
+
+        # Re-create constraints declared on the model
+        # (Meta.constraints). CheckConstraint / UniqueConstraint
+        # both hang off the table definition in SQLite, so
+        # dropping it loses them too.
+        for c in model_state.get("options", {}).get("constraints", []) or []:
+            try:
+                forward = c.constraint_sql(table, connection)
+            except Exception:
+                forward = None
+            if forward:
+                connection.execute_script(forward)
+
+        # Surface any references the rebuild left dangling.
+        # ``PRAGMA foreign_key_check`` returns one row per
+        # violation; raise if non-empty so the surrounding
+        # ``atomic()`` block rolls back instead of committing a
+        # broken schema.
+        violations = list(connection.execute("PRAGMA foreign_key_check", []))
+        if violations:
+            raise RuntimeError(
+                f"AlterField rebuild on '{table}' produced FK violations: "
+                f"{violations!r}"
+            )
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
         pass
@@ -812,7 +856,13 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
                 else:
                     parts.append("DEFAULT TRUE" if field.default else "DEFAULT FALSE")
             elif isinstance(default_val, str):
-                parts.append(f"DEFAULT '{default_val}'")
+                # Escape single quotes by SQL-standard doubling
+                # (``'`` → ``''``). Without this a ``default="O'Brien"``
+                # would emit ``DEFAULT 'O'Brien'`` — broken DDL and
+                # an SQL-injection vector if the default ever comes
+                # from anything user-influenced.
+                escaped = default_val.replace("'", "''")
+                parts.append(f"DEFAULT '{escaped}'")
             elif default_val is not None:
                 parts.append(f"DEFAULT {default_val}")
 
