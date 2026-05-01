@@ -109,6 +109,7 @@ def cmd_makemigrations(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -142,9 +143,7 @@ def cmd_makemigrations(args):
             mig_dir = _find_migrations_dir(app)
             next_num = _next_migration_number(mig_dir)
             name = args.name or "enable_pgvector"
-            path = write_pgvector_extension_migration(
-                app, mig_dir, next_num, name=name
-            )
+            path = write_pgvector_extension_migration(app, mig_dir, next_num, name=name)
             print(f"  Created pgvector extension migration: {path}")
         return
 
@@ -188,6 +187,7 @@ def cmd_squashmigrations(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -214,7 +214,9 @@ def cmd_squashmigrations(args):
     in_range = [(num, name, mod) for num, name, mod in all_migs if start <= num <= end]
 
     if not in_range:
-        print(f"Error: no migrations found for '{app_label}' in range [{start}, {end}].")
+        print(
+            f"Error: no migrations found for '{app_label}' in range [{start}, {end}]."
+        )
         return
 
     operations = []
@@ -244,6 +246,7 @@ def cmd_migrate(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -288,6 +291,7 @@ def cmd_showmigrations(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
 
     from .migrations.executor import MigrationExecutor
@@ -311,6 +315,7 @@ def cmd_sql(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -334,8 +339,10 @@ def cmd_sql(args):
         for name in args.names:
             # Match by class name OR by app.ClassName
             matches = [
-                (label, m) for label, m in _model_registry.items()
-                if "." not in label and not m._meta.abstract
+                (label, m)
+                for label, m in _model_registry.items()
+                if "." not in label
+                and not m._meta.abstract
                 and (m.__name__ == name or label == name)
             ]
             if not matches:
@@ -364,10 +371,8 @@ def cmd_sql(args):
             continue
         cols = [c for c in cols if c]
         ddl = (
-            f'-- {model.__name__} ({label})\n'
-            f'CREATE TABLE "{table}" (\n  '
-            + ",\n  ".join(cols)
-            + "\n);"
+            f"-- {model.__name__} ({label})\n"
+            f'CREATE TABLE "{table}" (\n  ' + ",\n  ".join(cols) + "\n);"
         )
         print(ddl)
         print()
@@ -382,6 +387,7 @@ def cmd_dbcheck(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -395,7 +401,8 @@ def cmd_dbcheck(args):
 
     for app in apps_to_check:
         models = [
-            m for label, m in _model_registry.items()
+            m
+            for label, m in _model_registry.items()
             if "." not in label and m._meta.app_label == app and not m._meta.abstract
         ]
         if not models:
@@ -411,8 +418,8 @@ def cmd_dbcheck(args):
             db_columns = {c["name"] for c in conn.get_table_columns(table)}
             model_columns = {f.column for f in model._meta.fields if f.column}
 
-            missing = model_columns - db_columns      # in model, not in DB
-            extra = db_columns - model_columns        # in DB, not in model
+            missing = model_columns - db_columns  # in model, not in DB
+            extra = db_columns - model_columns  # in DB, not in model
 
             if not missing and not extra:
                 print(f"  ✓ {model.__name__} ({table})")
@@ -426,7 +433,9 @@ def cmd_dbcheck(args):
                 print(f"      missing in model: {c}")
 
     if drift_found:
-        print("\nDrift detected. Run 'dorm makemigrations' / 'dorm migrate' to reconcile.")
+        print(
+            "\nDrift detected. Run 'dorm makemigrations' / 'dorm migrate' to reconcile."
+        )
         sys.exit(1)
     print("\nAll checked models match the database schema.")
 
@@ -511,6 +520,7 @@ def cmd_shell(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -526,7 +536,7 @@ def cmd_shell(args):
         # IPython is an optional dev dependency — suppress the static import
         # check so ty doesn't fail on environments that don't have it. The
         # try/except still handles the runtime ImportError.
-        import IPython  # ty: ignore[unresolved-import]
+        import IPython
 
         IPython.embed(user_ns=local_vars, banner1=banner, using="asyncio")
         return
@@ -636,7 +646,7 @@ Uncomment the DATABASES block for the backend you want to use.
 # }
 '''
 
-_MODELS_TEMPLATE = '''import dorm
+_MODELS_TEMPLATE = """import dorm
 
 
 class User(dorm.Model):
@@ -650,7 +660,7 @@ class User(dorm.Model):
 
     def __str__(self):
         return self.username
-'''
+"""
 
 
 def cmd_init(args):
@@ -700,6 +710,7 @@ def cmd_inspectdb(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     from .conf import settings
+
     if not settings._configured:
         # Skip the load only when dorm was already configured by the
         # caller (typical in tests / programmatic embedding). Symmetric
@@ -742,6 +753,7 @@ def cmd_doctor(args):
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     from .conf import settings
+
     if not settings._configured:
         # Skip the load only when dorm was already configured by the
         # caller (typical in tests / programmatic embed). When unset,
@@ -785,7 +797,9 @@ def cmd_doctor(args):
                     "expect the occasional dead-conn surprise during PG restarts."
                 )
             opts = cfg.get("OPTIONS") or {}
-            if "sslmode" not in opts and (cfg.get("HOST") not in (None, "", "localhost", "127.0.0.1")):
+            if "sslmode" not in opts and (
+                cfg.get("HOST") not in (None, "", "localhost", "127.0.0.1")
+            ):
                 warnings.append(
                     f"DATABASES[{alias!r}]: no OPTIONS['sslmode'] for a non-local host; "
                     "set 'require' (or 'verify-full' if you have a CA) to avoid plaintext."
@@ -867,6 +881,7 @@ def cmd_doctor(args):
             location = opts.get("location")
             if location:
                 from pathlib import Path as _Path
+
                 if not _Path(location).is_dir():
                     warnings.append(
                         f"STORAGES[{alias!r}]: location {location!r} is not "
@@ -887,8 +902,7 @@ def cmd_doctor(args):
         elif "S3Storage" in backend:
             if not opts.get("bucket_name"):
                 warnings.append(
-                    f"STORAGES[{alias!r}]: S3Storage requires 'bucket_name' "
-                    "in OPTIONS."
+                    f"STORAGES[{alias!r}]: S3Storage requires 'bucket_name' in OPTIONS."
                 )
             if opts.get("access_key") or opts.get("secret_key"):
                 # Hardcoded creds in settings → near-universal red flag.
@@ -900,7 +914,12 @@ def cmd_doctor(args):
                     "/ env vars / ~/.aws/ instead."
                 )
             endpoint = opts.get("endpoint_url") or ""
-            if endpoint and endpoint.startswith("http://") and "localhost" not in endpoint and "127.0.0.1" not in endpoint:
+            if (
+                endpoint
+                and endpoint.startswith("http://")
+                and "localhost" not in endpoint
+                and "127.0.0.1" not in endpoint
+            ):
                 warnings.append(
                     f"STORAGES[{alias!r}]: endpoint_url={endpoint!r} uses "
                     "plain HTTP for a non-local host. Use https:// to "
@@ -940,6 +959,7 @@ def cmd_dumpdata(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -949,7 +969,8 @@ def cmd_dumpdata(args):
     targets: list = []
     if not args.targets:
         targets = [
-            model for label, model in _model_registry.items()
+            model
+            for label, model in _model_registry.items()
             if "." not in label and not model._meta.abstract
         ]
     else:
@@ -966,8 +987,10 @@ def cmd_dumpdata(args):
                     targets.append(_model_registry[spec])
                     continue
                 app_models = [
-                    m for label, m in _model_registry.items()
-                    if "." not in label and m._meta.app_label == spec
+                    m
+                    for label, m in _model_registry.items()
+                    if "." not in label
+                    and m._meta.app_label == spec
                     and not m._meta.abstract
                 ]
                 if not app_models:
@@ -998,6 +1021,7 @@ def cmd_loaddata(args):
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
     from .conf import settings
+
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
@@ -1064,13 +1088,17 @@ def main():
         help="Apply pending migrations (or rollback when a target is given)",
     )
     mg.add_argument(
-        "app_label", nargs="?", default=None,
+        "app_label",
+        nargs="?",
+        default=None,
         help="App to migrate (default: all apps)",
     )
     mg.add_argument(
-        "target", nargs="?", default=None,
+        "target",
+        nargs="?",
+        default=None,
         help="Target migration name / number prefix / 'zero' — "
-             "applies forward or rolls back as needed",
+        "applies forward or rolls back as needed",
     )
     mg.add_argument("--verbosity", type=int, default=1)
     mg.add_argument(
@@ -1078,9 +1106,9 @@ def main():
         action="store_true",
         default=False,
         help="Print the SQL that would be executed without touching the "
-             "database. The migration recorder is NOT updated, so the "
-             "next run still sees the same set of pending migrations. "
-             "Recommended as a pre-deploy review step.",
+        "database. The migration recorder is NOT updated, so the "
+        "next run still sees the same set of pending migrations. "
+        "Recommended as a pre-deploy review step.",
     )
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)
@@ -1092,7 +1120,9 @@ def main():
     sm.set_defaults(func=cmd_showmigrations)
 
     # squashmigrations
-    sq = sub.add_parser("squashmigrations", help="Squash a range of migrations into one")
+    sq = sub.add_parser(
+        "squashmigrations", help="Squash a range of migrations into one"
+    )
     sq.add_argument("app_label", help="App label")
     sq.add_argument(
         "start_migration",
@@ -1100,7 +1130,9 @@ def main():
         default="1",
         help="Migration number to start from (default: 1)",
     )
-    sq.add_argument("end_migration", help="Migration number to squash up to (inclusive)")
+    sq.add_argument(
+        "end_migration", help="Migration number to squash up to (inclusive)"
+    )
     sq.add_argument(
         "--squashed-name",
         default="squashed",
@@ -1122,14 +1154,17 @@ def main():
     sq2 = sub.add_parser(
         "sql",
         help="Print the CREATE TABLE DDL for one or more models. "
-             "Useful for sharing schema with DBAs or seeding fixtures.",
+        "Useful for sharing schema with DBAs or seeding fixtures.",
     )
     sq2.add_argument(
-        "names", nargs="*",
+        "names",
+        nargs="*",
         help="Model names — bare (``User``) or app-qualified (``users.User``).",
     )
     sq2.add_argument(
-        "--all", action="store_true", default=False,
+        "--all",
+        action="store_true",
+        default=False,
         help="Dump every model in INSTALLED_APPS.",
     )
     sq2.add_argument("--settings", default=None)
@@ -1139,11 +1174,12 @@ def main():
     dc = sub.add_parser(
         "dbcheck",
         help="Compare each model's columns against the live database schema "
-             "and print drift (missing columns, hand-edited tables, etc.). "
-             "Exits non-zero when drift is found — useful as a pre-deploy gate.",
+        "and print drift (missing columns, hand-edited tables, etc.). "
+        "Exits non-zero when drift is found — useful as a pre-deploy gate.",
     )
     dc.add_argument(
-        "apps", nargs="*",
+        "apps",
+        nargs="*",
         help="App labels to check (default: all)",
     )
     dc.add_argument("--settings", default=None)
