@@ -14,6 +14,45 @@ pip install 'djanorm[redis]'
 `djanorm` itself imports without `redis-py`. The helpful error
 surfaces only when you actually instantiate the cache backend.
 
+## Security — payloads are HMAC-signed
+
+!!! warning "Trust boundary"
+    Cached payloads are deserialised with `pickle.loads`, which
+    executes `__reduce__` on whatever bytes come back from the
+    backend. A Redis instance writeable by an attacker
+    (multi-tenant cluster, leaky ACL, no-auth deployment)
+    would let that attacker inject a malicious blob and
+    trigger arbitrary code execution at queryset materialisation
+    time.
+
+`dorm.cache` therefore signs every payload with HMAC-SHA256
+before it leaves the process and verifies the signature on the
+way back in. Unsigned / tampered / truncated blobs are dropped
+silently; the queryset falls through to the database as if
+the entry didn't exist.
+
+The signing key reads from these settings, in priority order:
+
+1. `CACHE_SIGNING_KEY` — recommended explicit setting.
+2. `SECRET_KEY` — Django convention; reused if present.
+3. A per-process random key — entries don't survive a process
+   restart (signed with the old key won't verify against the
+   new one), but the cache stays unforgeable. A one-time warning
+   logs to the `dorm.cache` logger so the operator knows the
+   cache isn't shared across workers.
+
+```python
+dorm.configure(
+    DATABASES={"default": {...}},
+    CACHES={"default": {"BACKEND": "dorm.cache.redis.RedisCache", ...}},
+    CACHE_SIGNING_KEY=os.environ["DORM_CACHE_KEY"],  # 32+ random bytes
+)
+```
+
+To disable signing (only for migrating an unsigned legacy cache
+on a private trusted network), set
+`CACHE_INSECURE_PICKLE = True`. Don't.
+
 ## Configuration
 
 ```python
@@ -31,6 +70,7 @@ dorm.configure(
             "TTL": 300,
         },
     },
+    CACHE_SIGNING_KEY=os.environ["DORM_CACHE_KEY"],
 )
 ```
 
@@ -101,6 +141,27 @@ on `Book` is cached) are **not** auto-invalidated — only the
 saved model's namespace is dropped. Use FK-aware invalidation
 in your application layer (or a shorter TTL) when you cache
 joined queries.
+
+### Stale-read race protection
+
+The naïve "read → fetch → store" flow has a subtle race: a
+writer that invalidates a key BETWEEN a reader's fetch and
+store steps would leave the reader's stale rows cached for one
+TTL window. `dorm.cache` closes that window with a per-model
+in-memory version counter. Every `post_save` / `post_delete`
+bumps the counter; the cache key includes `:vN:`; the store
+step re-reads the version after the DB fetch and lands the
+bytes under the (possibly bumped) key. A racing writer's bump
+points later readers at a key the racing reader never wrote.
+
+The counter is process-local. Cross-process invalidation still
+goes through `delete_pattern`. Helpers exposed on
+`dorm.cache`:
+
+- `model_cache_version(model)` → current counter value.
+- `bump_model_cache_version(model)` → atomic increment;
+  returns the new value. Called by the signal handler before
+  it issues `delete_pattern`.
 
 ## Cache outages don't break queries
 

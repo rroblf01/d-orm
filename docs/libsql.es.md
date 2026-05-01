@@ -129,8 +129,12 @@ dorm.configure(DATABASES={"default": cfg})
 ```
 libsql://libsql.tu-vps.com?authToken=…&NAME=local-replica.db
 libsql+https://libsql.tu-vps.com?authToken=…
-libsql:///path/to/local.db
+libsql:///relative/path.db        # tres slashes → ruta relativa
+libsql:////var/data/abs.db        # cuatro slashes → ruta absoluta
 ```
+
+Importan los slashes — tres = relativa al cwd, cuatro = absoluta.
+Misma convención que las URLs `sqlite://`.
 
 ### Turso Cloud (gestionado)
 

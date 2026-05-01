@@ -1033,9 +1033,17 @@ class QuerySet(Generic[_T]):
 
     # ── Result-cache helpers ──────────────────────────────────────────────────
 
-    def _cache_key(self) -> str | None:
-        """Stable hash of (model, sql, params). Returns ``None`` when
-        the queryset isn't opted into caching."""
+    def _cache_key(self, version: int | None = None) -> str | None:
+        """Stable hash of (model, version, sql, params). Returns
+        ``None`` when the queryset isn't opted into caching.
+
+        ``version`` is the per-model invalidation counter (see
+        :func:`dorm.cache.model_cache_version`). Including it in
+        the key makes a write at T1 invalidate every reader's
+        in-flight key derived at T0 — the stale-read race
+        window collapses to a single uncacheable miss instead of
+        a TTL-long lifetime for a wrong row.
+        """
         if self._cache_alias is None:
             return None
         try:
@@ -1051,15 +1059,16 @@ class QuerySet(Generic[_T]):
         except Exception:
             params_bytes = repr(params).encode("utf-8")
         digest = hashlib.sha1(sql.encode("utf-8") + params_bytes).hexdigest()
-        from .cache import model_cache_namespace
+        from .cache import model_cache_namespace, model_cache_version
 
-        return f"{model_cache_namespace(self.model)}:{digest}"
+        v = version if version is not None else model_cache_version(self.model)
+        return f"{model_cache_namespace(self.model)}:v{v}:{digest}"
 
     def _cache_lookup_sync(self) -> list[_T] | None:
         if self._cache_alias is None:
             return None
         try:
-            from .cache import get_cache
+            from .cache import get_cache, verify_payload
 
             backend = get_cache(self._cache_alias)
         except Exception:
@@ -1073,10 +1082,18 @@ class QuerySet(Generic[_T]):
             return None
         if not payload:
             return None
+        # Verify the HMAC signature BEFORE pickle.loads so an
+        # attacker-controlled Redis can't trigger arbitrary code
+        # execution. ``verify_payload`` returns ``None`` when the
+        # signature header is missing / invalid; treat that as a
+        # cache miss.
+        verified = verify_payload(payload)
+        if verified is None:
+            return None
         try:
             import pickle
 
-            blob = pickle.loads(payload)
+            blob = pickle.loads(verified)
         except Exception:
             return None
         # Stored shape: list[dict[attname, value]] for model rows;
@@ -1097,12 +1114,17 @@ class QuerySet(Generic[_T]):
         if self._cache_alias is None:
             return
         try:
-            from .cache import get_cache
+            from .cache import get_cache, model_cache_version, sign_payload
 
             backend = get_cache(self._cache_alias)
         except Exception:
             return
-        key = self._cache_key()
+        # Re-read the model version AFTER the DB fetch — if a
+        # concurrent writer bumped it, store under the new key so
+        # later readers (which use the new version) see the row.
+        # Storing under the OLD key would leave a stale entry alive
+        # until TTL.
+        key = self._cache_key(version=model_cache_version(self.model))
         if key is None:
             return
         # Serialise model instances by their ``__dict__`` (the same
@@ -1119,7 +1141,7 @@ class QuerySet(Generic[_T]):
             import pickle
 
             payload = pickle.dumps(wire, protocol=4)
-            backend.set(key, payload, timeout=self._cache_timeout)
+            backend.set(key, sign_payload(payload), timeout=self._cache_timeout)
         except Exception:
             pass
 
@@ -1127,7 +1149,7 @@ class QuerySet(Generic[_T]):
         if self._cache_alias is None:
             return None
         try:
-            from .cache import get_cache
+            from .cache import get_cache, verify_payload
 
             backend = get_cache(self._cache_alias)
         except Exception:
@@ -1141,10 +1163,13 @@ class QuerySet(Generic[_T]):
             return None
         if not payload:
             return None
+        verified = verify_payload(payload)
+        if verified is None:
+            return None
         try:
             import pickle
 
-            blob = pickle.loads(payload)
+            blob = pickle.loads(verified)
         except Exception:
             return None
         rebuilt: list[_T] = []
@@ -1161,12 +1186,15 @@ class QuerySet(Generic[_T]):
         if self._cache_alias is None:
             return
         try:
-            from .cache import get_cache
+            from .cache import get_cache, model_cache_version, sign_payload
 
             backend = get_cache(self._cache_alias)
         except Exception:
             return
-        key = self._cache_key()
+        # See note in :meth:`_cache_store_sync` — re-read the
+        # version after fetch so a racing writer's bump points
+        # later reads at the new key.
+        key = self._cache_key(version=model_cache_version(self.model))
         if key is None:
             return
         wire: list[Any] = []
@@ -1179,7 +1207,7 @@ class QuerySet(Generic[_T]):
             import pickle
 
             payload = pickle.dumps(wire, protocol=4)
-            await backend.aset(key, payload, timeout=self._cache_timeout)
+            await backend.aset(key, sign_payload(payload), timeout=self._cache_timeout)
         except Exception:
             pass
 
@@ -3049,6 +3077,12 @@ class ValuesListQuerySet(QuerySet[Any]):
         qs._query = self._query.clone()
         qs._flat = self._flat
         qs._fields = list(self._fields)
+        # Preserve the cache opt-in across the chain — without
+        # this, ``qs.cache().values_list("name").filter(...)``
+        # silently dropped the caching configuration on the
+        # second clone.
+        qs._cache_alias = self._cache_alias
+        qs._cache_timeout = self._cache_timeout
         return qs
 
     def _resolve_fields(self) -> list[str]:
@@ -3113,6 +3147,10 @@ class CombinedQuerySet(QuerySet[_T]):
         qs._combined_queries = list(self._combined_queries)
         qs._combinator = self._combinator
         qs._union_all = self._union_all
+        # Preserve cache opt-in across UNION / INTERSECT / EXCEPT
+        # chains — same rationale as ``QuerySet._clone``.
+        qs._cache_alias = self._cache_alias
+        qs._cache_timeout = self._cache_timeout
         return qs
 
     def _build_sql(self, connection) -> tuple[str, list]:

@@ -13,6 +13,43 @@ pip install 'djanorm[redis]'
 Sin la extra, `djanorm` importa limpio. El error útil sale solo
 al instanciar el backend.
 
+## Seguridad — payloads firmados con HMAC
+
+!!! warning "Trust boundary"
+    Los payloads cacheados se deserializan con `pickle.loads`,
+    que ejecuta `__reduce__` sobre cualquier byte que devuelva
+    el backend. Una instancia Redis escribible por un atacante
+    (cluster multi-tenant, ACL leaky, deployment sin auth)
+    permitiría inyectar un blob malicioso → arbitrary code
+    execution al hidratar el queryset.
+
+`dorm.cache` firma cada payload con HMAC-SHA256 antes de
+salir del proceso y verifica la firma al volver. Blobs sin
+firma / manipulados / truncados se descartan silenciosamente;
+el queryset cae a la base de datos como si no existiera entry.
+
+La signing key viene de estos settings, en orden de prioridad:
+
+1. `CACHE_SIGNING_KEY` — recomendado, explícito.
+2. `SECRET_KEY` — convención Django; reusado si está.
+3. Clave random per-proceso — entries no sobreviven restart
+   (firma con clave vieja no verifica), pero caché sigue
+   inforjable. Warning logged una vez al logger `dorm.cache`
+   para que el operador sepa que caché no se comparte entre
+   workers.
+
+```python
+dorm.configure(
+    DATABASES={"default": {...}},
+    CACHES={"default": {"BACKEND": "dorm.cache.redis.RedisCache", ...}},
+    CACHE_SIGNING_KEY=os.environ["DORM_CACHE_KEY"],  # 32+ bytes random
+)
+```
+
+Para desactivar firma (sólo migrando caché legacy sin firmar
+en red privada de confianza), usar `CACHE_INSECURE_PICKLE = True`.
+No lo hagas.
+
 ## Configuración
 
 ```python
@@ -90,6 +127,26 @@ Writes cross-model (guardar un `Author` con queryset cacheado
 sobre `Book`) **no** se invalidan automáticamente — solo el
 namespace del modelo guardado. Maneja FK-aware invalidation
 en app o usa TTL corto en queries con JOIN.
+
+### Protección stale-read race
+
+El flujo naïve "read → fetch → store" tiene race sutil: un
+writer que invalida key ENTRE fetch y store del reader dejaría
+las rows viejas cacheadas durante un TTL completo.
+`dorm.cache` cierra la ventana con un contador de versión
+in-memory por modelo. Cada `post_save`/`post_delete` lo bump-ea;
+la cache key incluye `:vN:`; el step de store re-lee la
+versión POST-fetch y guarda los bytes bajo la key (posiblemente
+bumpeada). El bump del writer apunta lecturas posteriores a
+una key que el racer nunca escribió.
+
+Contador es process-local. Invalidación cross-process sigue
+yendo por `delete_pattern`. Helpers en `dorm.cache`:
+
+- `model_cache_version(model)` → valor actual.
+- `bump_model_cache_version(model)` → increment atómico;
+  devuelve nuevo valor. El signal handler lo llama antes de
+  emitir `delete_pattern`.
 
 ## Caídas de caché no rompen queries
 

@@ -133,8 +133,13 @@ dorm.configure(DATABASES={"default": cfg})
 ```
 libsql://libsql.your-vps.com?authToken=…&NAME=local-replica.db
 libsql+https://libsql.your-vps.com?authToken=…
-libsql:///path/to/local.db
+libsql:///relative/path.db        # three slashes → relative path
+libsql:////var/data/abs.db        # four slashes  → absolute path
 ```
+
+Slash count matters — three slashes mean a path relative to the
+working directory, four slashes mean an absolute path. Same
+convention as the `sqlite://` URLs you may already know.
 
 ### Turso Cloud (managed)
 

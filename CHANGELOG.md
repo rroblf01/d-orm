@@ -9,7 +9,95 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [2.5.0] - 2026-05-02
 
 Minor release. Two opt-in features land alongside the v2.4.1
-bug-hunt corpus:
+bug-hunt corpus, plus a follow-up audit pass that closed five
+issues (B1, B4, B5, B7, B9) found while writing coverage tests.
+
+### Security — cache payloads now HMAC-signed
+
+- ``pickle.loads`` over Redis bytes is RCE if the cache is
+  reachable by an attacker (multi-tenant Redis, no-auth
+  deployment). Every cached payload now ships with an
+  HMAC-SHA256 signature header (``b"dormsig1:<hex64>:<pickle>"``).
+  The signing key reads from ``settings.CACHE_SIGNING_KEY`` →
+  ``settings.SECRET_KEY`` → a per-process random key (with a
+  one-time warning so the operator knows the cache isn't
+  shared across workers).
+- Loads verify the signature with ``hmac.compare_digest`` BEFORE
+  ``pickle.loads`` runs. Unsigned / tampered / truncated blobs
+  are dropped silently — the queryset falls through to the
+  database.
+- New settings: ``CACHE_SIGNING_KEY`` (recommended),
+  ``CACHE_INSECURE_PICKLE`` (default ``False``; opt-out for
+  unsigned legacy caches you can't migrate).
+- Helpers exposed: ``dorm.cache.sign_payload`` /
+  ``dorm.cache.verify_payload`` for callers building custom
+  cache backends or test harnesses.
+
+### Fixed — Stale-read race between read and write
+
+- The naïve "read → DB fetch → store" flow could cache a stale
+  row if a concurrent ``Model.save()`` invalidated the key
+  *between* the reader's fetch and store steps. Closed with a
+  per-model in-memory version counter: every save / delete
+  bumps it; ``_cache_key`` includes ``":vN:"``; ``_cache_store_*``
+  re-reads the version after the DB fetch and stores under the
+  (possibly bumped) key. A racing writer's bump now points
+  later readers at the new key — the stale entry never gets
+  written.
+- New: ``dorm.cache.model_cache_version`` /
+  ``dorm.cache.bump_model_cache_version``. Counter is
+  process-local; cross-process coherence still goes through
+  ``delete_pattern``.
+
+### Fixed — `parse_database_url("libsql:////abs")` returned a relative path
+
+- The libsql URL parser stripped one slash too many for the
+  four-slash absolute form. ``libsql:////var/data/db.sqlite``
+  produced ``var/data/db.sqlite`` — the open() landed next to
+  the working directory instead of the intended ``/var/...``.
+  Mirrors the sqlite branch's correct logic now: keep one
+  leading slash for the absolute form, strip the lone slash
+  for the relative one.
+
+### Fixed — `ValuesListQuerySet._clone` / `CombinedQuerySet._clone` dropped cache state
+
+- The base ``QuerySet._clone`` propagates ``_cache_alias`` /
+  ``_cache_timeout``, but the two subclass overrides forgot.
+  ``qs.cache().values_list("name").filter(active=True)`` lost
+  caching on the second clone — silent miss every call.
+
+### Fixed — `execute_script` async fallback corrupted quoted `;` literals
+
+- The libsql async wrapper's ``executescript``-not-available
+  fallback split on bare ``;`` — any DDL / DML containing a
+  quoted ``;`` (``INSERT INTO t VALUES ('a;b')``, identifier
+  ``"weird;name"``) got partitioned mid-literal and the
+  resulting statements failed at parse time. Replaced with a
+  shared quote-aware helper (``_split_statements`` in
+  ``dorm/db/backends/sqlite.py``) that ignores ``;`` inside
+  single- or double-quoted runs.
+
+### libsql backend — earlier round of fixes
+
+- async wrapper crashed on Python 3.14 + libsql_experimental
+  due to native code issues and thread-safety violations
+  (``asyncio.to_thread`` fans across multiple workers; libsql
+  connections aren't thread-safe). Migrated to ``pyturso``
+  (the official Turso Python SDK), pinned the async path to a
+  single-thread ``ThreadPoolExecutor`` for remote / embedded-
+  replica modes, and use ``turso.aio`` natively for local-only
+  mode.
+- ``LibSQLDatabaseWrapper.sync_replica`` raised
+  ``ValueError: Sync is not supported in databases opened in
+  Memory mode`` when called against a local-only wrapper —
+  pyturso exposes ``conn.sync`` even for memory DBs but
+  rejects the call. Now skipped when ``SYNC_URL`` isn't
+  configured.
+- Bind parameters: pyturso (and libsql_experimental) reject
+  ``list``, accept only ``tuple`` / ``Mapping``. Both sync and
+  async wrappers coerce in their execute-shaped methods.
+
+### libsql backend — features
 
 - **libsql backend** — talk to local files, remote
   Turso / sqld endpoints, or run as an embedded replica that
@@ -19,12 +107,6 @@ bug-hunt corpus:
   (``F32_BLOB(N)`` + ``vector_distance_l2`` /
   ``vector_distance_cos``) is wired into ``VectorField`` so
   embeddings round-trip without the sqlite-vec extension.
-- **Result-cache layer** — opt-in ``QuerySet.cache(timeout=…)``
-  chain method backed by Redis (``redis-py`` client) or any
-  pluggable ``dorm.cache.BaseCache`` subclass. Cache outages
-  fall through to the database silently; signal-driven
-  invalidation drops every cached queryset for a model on
-  save / delete.
 
 Both features are gated behind optional dependencies — install
 ``djanorm[libsql]`` and / or ``djanorm[redis]`` only when you
@@ -36,23 +118,28 @@ need them. ``djanorm`` itself imports without either client.
   (sync) and ``LibSQLAsyncDatabaseWrapper`` (async). Three
   modes share a single configuration shape:
   - **Local file** — drop-in SQLite replacement.
-  - **Remote-only** — Turso / sqld over HTTPS / WebSocket.
-    ``SYNC_URL`` + ``AUTH_TOKEN`` are the wire knobs.
+  - **Self-hosted ``sqld`` (VPS)** — typical production layout.
+    ``SYNC_URL`` (``https://...``) + ``AUTH_TOKEN`` connect to
+    your own server.
   - **Embedded replica** — local file + ``SYNC_URL`` keeps the
     file in sync with the remote master. ``sync_replica()``
     on the wrapper triggers an explicit pull.
+  - **Turso Cloud** — same wire protocol as self-hosted ``sqld``;
+    point ``SYNC_URL`` at ``libsql://<db>-<org>.turso.io``.
+- Powered by ``pyturso`` — the official Turso Python SDK.
+  Local-only async uses ``turso.aio`` natively; embedded
+  replica / remote-only async runs the sync client on a
+  dedicated single-thread ``ThreadPoolExecutor`` (pyturso
+  connections aren't thread-safe, so the default
+  ``asyncio.to_thread`` pool would fan calls across multiple
+  workers and produce native crashes).
 - URL parser (``parse_database_url``) recognises ``libsql://``,
   ``libsql+wss://``, ``libsql+ws://``, ``libsql+http://`` and
   ``libsql+https://``. Auth tokens come from the ``authToken``
   query parameter; the optional ``NAME`` query parameter sets
   the embedded-replica file path.
-- Async path marshals onto a worker thread (``asyncio.to_thread``)
-  because the libsql Python client is sync-only today.
-  Throughput is fine for typical apps; PostgreSQL stays the
-  recommended option for heavy fan-out async workloads.
-- Client lookup tries ``libsql_experimental`` first, falls back
-  to ``libsql``, and raises a clear ``ImproperlyConfigured``
-  pointing at ``pip install 'djanorm[libsql]'`` if neither is
+- Client lookup raises ``ImproperlyConfigured`` pointing at
+  ``pip install 'djanorm[libsql]'`` if pyturso isn't
   installed.
 
 ### Added — vector support on libsql

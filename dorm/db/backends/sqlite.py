@@ -45,6 +45,43 @@ _JOURNAL_MODE_SQL: dict[str, str] = {
 _VALID_JOURNAL_MODES = frozenset(_JOURNAL_MODE_SQL)
 
 
+def _split_statements(sql: str) -> list[str]:
+    """Split *sql* on ``;`` while ignoring delimiters inside SQL
+    string literals.
+
+    Naïve ``sql.split(";")`` corrupts any DDL/DML containing a
+    ``;`` inside a quoted literal (``INSERT INTO t VALUES ('a;b')``)
+    or inside a double-quoted identifier (``"weird;name"``).
+    Used by the libsql async wrapper's ``execute_script``
+    fall-back path when the underlying connection lacks
+    ``executescript``.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    for ch in sql:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            continue
+        if ch == ";" and not in_single and not in_double:
+            stmt = "".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
 def _is_single_statement(sql: str) -> bool:
     """Return True if ``sql`` contains exactly one SQL statement.
 

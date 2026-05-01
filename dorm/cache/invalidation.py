@@ -32,7 +32,13 @@ _lock = threading.Lock()
 
 def _drop_model(sender: Any, **_kwargs: Any) -> None:
     """Synchronous post-save / post-delete handler."""
+    from . import bump_model_cache_version
+
     try:
+        # Bump the version FIRST so any racing ``_cache_store_*``
+        # call lands its bytes under a key no later read uses —
+        # closes the read→DB→store stale-write race window.
+        bump_model_cache_version(sender)
         namespace = model_cache_namespace(sender)
         from ..conf import settings
 
@@ -54,7 +60,10 @@ def _drop_model(sender: Any, **_kwargs: Any) -> None:
 
 async def _adrop_model(sender: Any, **_kwargs: Any) -> None:
     """Asynchronous post-save / post-delete handler."""
+    from . import bump_model_cache_version
+
     try:
+        bump_model_cache_version(sender)
         namespace = model_cache_namespace(sender)
         from ..conf import settings
 

@@ -207,17 +207,24 @@ def test_cache_outage_falls_through_to_db(memcache: BaseCache) -> None:
 
 
 def test_cached_rows_round_trip_via_pickle(memcache: BaseCache) -> None:
+    from dorm.cache import verify_payload
+
     a = Author.objects.create(name="Pickleable", age=99)
     rows = list(Author.objects.filter(pk=a.pk).cache(timeout=10))
     assert rows[0].pk == a.pk
 
-    # Inspect the raw bytes — must round-trip through pickle.
+    # Inspect the raw bytes — must round-trip through pickle
+    # AFTER stripping the HMAC signature header. Direct
+    # ``pickle.loads`` on the wire bytes is rejected by the new
+    # signing layer (good — that's the whole point).
     qs = Author.objects.filter(pk=a.pk).cache(timeout=10)
     key = qs._cache_key()
     assert key is not None
     payload = memcache.get(key)
     assert payload is not None
-    blob = pickle.loads(payload)
+    inner = verify_payload(payload)
+    assert inner is not None, "payload signature must verify"
+    blob = pickle.loads(inner)
     assert isinstance(blob, list)
     assert blob and "_dorm_model_row" in blob[0]
 

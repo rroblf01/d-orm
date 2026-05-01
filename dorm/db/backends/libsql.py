@@ -39,7 +39,11 @@ import threading
 from typing import Any
 
 from ...exceptions import ImproperlyConfigured
-from .sqlite import SQLiteAsyncDatabaseWrapper, SQLiteDatabaseWrapper
+from .sqlite import (
+    SQLiteAsyncDatabaseWrapper,
+    SQLiteDatabaseWrapper,
+    _split_statements,
+)
 
 
 def _import_turso():
@@ -444,18 +448,20 @@ class LibSQLAsyncDatabaseWrapper(SQLiteAsyncDatabaseWrapper):
                 try:
                     conn.executescript(sql)
                 except AttributeError:
-                    for stmt in (s.strip() for s in sql.split(";")):
-                        if stmt:
-                            conn.execute(stmt)
+                    # Fallback when the underlying connection
+                    # exposes only ``execute``. Use the
+                    # quote-aware splitter so ``;`` inside SQL
+                    # string literals doesn't corrupt the script.
+                    for stmt in _split_statements(sql):
+                        conn.execute(stmt)
 
             await self._run_remote(_do)
             return
         conn = await self._get_async_conn()
         execscript = getattr(conn, "executescript", None)
         if execscript is None:
-            for stmt in (s.strip() for s in sql.split(";")):
-                if stmt:
-                    await conn.execute(stmt)
+            for stmt in _split_statements(sql):
+                await conn.execute(stmt)
             return
         await execscript(sql)
 

@@ -171,6 +171,17 @@ class Settings:
     #         },
     #     }
     CACHES: dict = {}
+    # HMAC signing key for the queryset result cache. ``pickle.loads``
+    # on attacker-controlled bytes is RCE — every payload is signed
+    # with HMAC-SHA256 derived from this key (or ``SECRET_KEY``)
+    # and verified before deserialisation. See
+    # ``dorm.cache.sign_payload`` / ``verify_payload``.
+    CACHE_SIGNING_KEY: str = ""
+    SECRET_KEY: str = ""
+    # Disable HMAC verification on cache reads. Default False —
+    # only set this when migrating an unsigned legacy cache and
+    # you can guarantee Redis is on a private network with auth.
+    CACHE_INSECURE_PICKLE: bool = False
 
     _configured = False
 
@@ -302,10 +313,28 @@ def parse_database_url(url: str) -> dict:
         cfg_libsql: dict[str, _AnyL] = {"ENGINE": "libsql"}
         qs = parse_qs(parsed.query)
 
+        # Normalise the local-replica / local-only path the same
+        # way the ``sqlite`` branch above does:
+        #
+        #   ``libsql:///relative/db``      →  ``relative/db``
+        #   ``libsql:////tmp/abs.db``      →  ``/tmp/abs.db``  (absolute)
+        #   ``libsql://host?NAME=local.db``→  ``local.db``     (replica)
+        #
+        # ``urlparse`` puts everything after the empty netloc into
+        # ``parsed.path`` with an extra leading slash; one strip
+        # gives the relative form. The four-slash form arrives as
+        # ``//tmp/abs.db`` — KEEP one leading slash so the absolute
+        # path survives. Stripping a second time (the previous
+        # behaviour) silently turned ``/var/data/db`` into
+        # ``var/data/db`` and the open call landed on a relative
+        # path next to the working directory.
         local_path = parsed.path or ""
-        if local_path.startswith("//"):
+        if not parsed.netloc and local_path.startswith("//"):
+            # Four-slash absolute form — drop one slash, keep the
+            # leading one that marks the path as absolute.
             local_path = local_path[1:]
-        if local_path.startswith("/") and not parsed.netloc:
+        elif not parsed.netloc and local_path.startswith("/"):
+            # Three-slash relative form — drop the lone slash.
             local_path = local_path[1:]
 
         if parsed.netloc:
@@ -375,6 +404,14 @@ def configure(**kwargs):
         try:
             from .cache import reset_caches as _reset_caches
             _reset_caches()
+        except Exception:
+            pass
+    # Reset the memoised signing key whenever its source settings
+    # are touched so the next sign / verify reads the new value.
+    if any(k in kwargs for k in ("CACHE_SIGNING_KEY", "SECRET_KEY")):
+        try:
+            from .cache import reset_signing_key as _reset_signing_key
+            _reset_signing_key()
         except Exception:
             pass
 
