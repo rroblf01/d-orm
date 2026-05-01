@@ -24,7 +24,10 @@ from .conf import _validate_identifier
 
 
 _VALID_METHODS = frozenset(
-    {"btree", "hash", "gin", "gist", "brin", "spgist", "bloom"}
+    # ``hnsw`` and ``ivfflat`` are pgvector's index methods. Listing
+    # them here so :class:`HnswIndex` / :class:`IvfflatIndex` can
+    # subclass :class:`Index` without working around the validator.
+    {"btree", "hash", "gin", "gist", "brin", "spgist", "bloom", "hnsw", "ivfflat"}
 )
 
 # Indexable expressions accept a small grammar of SQL forms (function
@@ -205,9 +208,22 @@ class Index:
                 pred_sql = _inline_literal(pred_sql, pred_params)
             where_clause = f" WHERE {pred_sql}"
 
+        # Index methods that accept storage parameters (pgvector's
+        # ``hnsw`` / ``ivfflat`` are the in-tree examples) emit a
+        # ``WITH (k = v, …)`` suffix. The default :class:`Index`
+        # leaves ``self.with_options`` empty so the clause stays out
+        # of the generated SQL on every existing call site.
+        with_clause = ""
+        with_opts = getattr(self, "with_options", None)
+        if with_opts:
+            rendered = ", ".join(
+                f"{k} = {v}" for k, v in sorted(with_opts.items())
+            )
+            with_clause = f" WITH ({rendered})"
+
         forward = (
             f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}"'
-            f'{method_clause} ({cols}){where_clause}'
+            f'{method_clause} ({cols}){with_clause}{where_clause}'
         )
         reverse = f'DROP INDEX IF EXISTS "{idx_name}"'
         return forward, reverse

@@ -64,6 +64,7 @@ plugins:
             Transactions: Transacciones
             Soft delete: Soft delete
             FastAPI integration: Integración con FastAPI
+            Vector search (pgvector): Búsqueda vectorial (pgvector)
             CLI reference: Referencia del CLI
             Production deployment: Despliegue en producción
             Cookbook: Recetario
@@ -73,6 +74,7 @@ plugins:
             QuerySet & Manager: QuerySet y Manager
             Signals: Señales
             Pydantic interop: Interop con Pydantic
+            pgvector: pgvector
             Connection / health: Conexión y health-check
   - mkdocstrings:
       handlers:
@@ -98,6 +100,7 @@ nav:
       - Signals: signals.md
       - Soft delete: softdelete.md
       - FastAPI integration: fastapi.md
+      - Vector search (pgvector): pgvector.md
       - CLI reference: cli.md
       - Production deployment: production.md
       - Cookbook: cookbook.md
@@ -109,6 +112,7 @@ nav:
       - Transactions: api/transaction.md
       - Signals: api/signals.md
       - Pydantic interop: api/pydantic.md
+      - pgvector: api/pgvector.md
       - Connection / health: api/connection.md
 
 markdown_extensions:

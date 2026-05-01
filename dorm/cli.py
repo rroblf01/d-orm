@@ -127,6 +127,27 @@ def cmd_makemigrations(args):
             print(f"  Created empty migration: {path}")
         return
 
+    # ── pgvector extension migration ─────────────────────────────────────────
+    if getattr(args, "enable_pgvector", False):
+        if not args.apps:
+            print(
+                "Error: specify at least one app when using "
+                "--enable-pgvector. Example: dorm makemigrations "
+                "--enable-pgvector myapp"
+            )
+            return
+        from .migrations.writer import write_pgvector_extension_migration
+
+        for app in args.apps:
+            mig_dir = _find_migrations_dir(app)
+            next_num = _next_migration_number(mig_dir)
+            name = args.name or "enable_pgvector"
+            path = write_pgvector_extension_migration(
+                app, mig_dir, next_num, name=name
+            )
+            print(f"  Created pgvector extension migration: {path}")
+        return
+
     # ── Auto-detect changes ───────────────────────────────────────────────────
     from .migrations.autodetector import MigrationAutodetector
     from .migrations.loader import MigrationLoader
@@ -1022,6 +1043,17 @@ def main():
         default=None,
         metavar="NAME",
         help="Custom name suffix for the empty migration file (default: 'custom')",
+    )
+    mm.add_argument(
+        "--enable-pgvector",
+        action="store_true",
+        default=False,
+        dest="enable_pgvector",
+        help=(
+            "Generate a migration that enables the pgvector PostgreSQL "
+            "extension. Pair with at least one app label so the file "
+            "lands in the right migrations directory."
+        ),
     )
     mm.add_argument("--settings", default=None)
     mm.set_defaults(func=cmd_makemigrations)

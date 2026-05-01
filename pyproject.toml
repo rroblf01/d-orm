@@ -92,6 +92,19 @@ image = ["Pillow>=10.0"]
 # schema at the boundary), so pydantic.EmailStr / HttpUrl are NOT used and
 # email-validator is not required.
 pydantic = ["pydantic>=2.0"]
+# Vector-search support — enables ``VectorField``, distance
+# expressions and ANN-index helpers under ``dorm.contrib.pgvector``.
+# The extra installs both backends' Python packages:
+#   * ``pgvector`` registers a psycopg adapter for PostgreSQL.
+#   * ``sqlite-vec`` ships the loadable extension binary that
+#     :class:`VectorExtension` loads on every SQLite connection.
+# The actual server-side extension still has to be installed
+# (``apt install postgresql-XX-pgvector`` for PG; sqlite-vec is
+# entirely client-side, so the pip package is enough).
+pgvector = [
+    "pgvector>=0.3",
+    "sqlite-vec>=0.1",
+]
 # Build the API reference site at https://rroblf01.github.io/d-orm/
 # locally: ``uv run mkdocs serve``
 docs = [
@@ -100,7 +113,7 @@ docs = [
     "mkdocstrings[python]>=1.0.4",
     "mkdocs-static-i18n>=1.3.1",
 ]
-all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel,s3,image]"]
+all = ["djanorm[dev,sqlite,postgresql,pydantic,docs,otel,s3,image,pgvector]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"

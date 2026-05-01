@@ -120,6 +120,12 @@ class SQLiteDatabaseWrapper:
         self._conns: dict[int, sqlite3.Connection] = {}
         self._conns_lock = threading.Lock()
         self._autocommit: bool = False
+        # Set to True by ``dorm.contrib.pgvector.VectorExtension``
+        # when its forward step runs against a SQLite connection;
+        # :meth:`_new_connection` then auto-loads sqlite-vec into
+        # every fresh connection so ``vec_distance_*`` is available
+        # regardless of pool churn / thread fan-out.
+        self._vec_extension_enabled: bool = False
 
     def _new_connection(self) -> sqlite3.Connection:
         # Validate before we open: an ImproperlyConfigured raised after
@@ -138,6 +144,17 @@ class SQLiteDatabaseWrapper:
                 conn.execute(_JOURNAL_MODE_SQL[mode])
             if self._autocommit:
                 conn.isolation_level = None
+            # If a ``VectorExtension`` migration set ``_vec_extension_enabled``
+            # on this wrapper (or any caller flipped the flag at app
+            # startup), load sqlite-vec into every fresh connection so
+            # ``vec_distance_*`` is available regardless of which thread
+            # opens the connection or how often the pool turns over.
+            if getattr(self, "_vec_extension_enabled", False):
+                from ...contrib.pgvector.operations import (
+                    load_sqlite_vec_extension,
+                )
+
+                load_sqlite_vec_extension(conn)
         except Exception:
             try:
                 conn.close()

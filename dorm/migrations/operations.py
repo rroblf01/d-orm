@@ -201,15 +201,92 @@ class AlterField(Operation):
             state.models[key]["fields"][self.name] = self.field
 
     def database_forwards(self, app_label: str, connection, from_state, to_state):
-        # SQLite doesn't support ALTER COLUMN; PostgreSQL does
-        if getattr(connection, "vendor", "sqlite") == "postgresql":
-            model_state = to_state.models.get(f"{app_label}.{self.model_name.lower()}", {})
-            table = model_state.get("options", {}).get("db_table") or f"{app_label}_{self.model_name.lower()}"
-            col = getattr(self.field, "column", self.name)
+        vendor = getattr(connection, "vendor", "sqlite")
+        model_state = to_state.models.get(
+            f"{app_label}.{self.model_name.lower()}", {}
+        )
+        table = model_state.get("options", {}).get("db_table") or (
+            f"{app_label}_{self.model_name.lower()}"
+        )
+        col = getattr(self.field, "column", self.name) or self.name
+
+        if vendor == "postgresql":
+            # PG handles ALTER COLUMN natively. We re-emit type AND
+            # nullability — single AlterField may flip either or
+            # both, and the user expects both to land.
             db_t = self.field.db_type(connection)
             connection.execute_script(
                 f'ALTER TABLE "{table}" ALTER COLUMN "{col}" TYPE {db_t}'
             )
+            null_clause = "DROP NOT NULL" if self.field.null else "SET NOT NULL"
+            connection.execute_script(
+                f'ALTER TABLE "{table}" ALTER COLUMN "{col}" {null_clause}'
+            )
+            return
+
+        # SQLite path — no real ALTER COLUMN support. Rebuild the
+        # table per the canonical SQLite recipe:
+        # https://www.sqlite.org/lang_altertable.html#otheralter
+        # 1. Create a new table with the up-to-date schema.
+        # 2. Copy rows over (column list shared between old and
+        #    new is the intersection of the two field sets — gone
+        #    columns are dropped, added columns get NULL or the
+        #    field default).
+        # 3. Drop the old table and rename the new one in place.
+        # 4. Recreate every index that pointed at the old table.
+        if vendor != "sqlite":
+            return
+        new_fields = model_state.get("fields", {})
+        if not new_fields:
+            return
+        old_model_state = from_state.models.get(
+            f"{app_label}.{self.model_name.lower()}", {}
+        )
+        old_fields = old_model_state.get("fields", {}) or new_fields
+
+        tmp = f"_dorm_alter_{table}"
+        # Drop any leftover from a previously-failed rebuild before
+        # we start: ``CREATE TABLE`` would otherwise complain.
+        connection.execute_script(f'DROP TABLE IF EXISTS "{tmp}"')
+
+        # Build the CREATE TABLE for the new shape.
+        cols_sql = []
+        for fname, f in new_fields.items():
+            sql = _field_to_column_sql(fname, f, connection)
+            if sql:
+                cols_sql.append(sql)
+        connection.execute_script(
+            f'CREATE TABLE "{tmp}" (\n  ' + ",\n  ".join(cols_sql) + "\n)"
+        )
+
+        # Copy intersection of column names. A new NOT NULL
+        # column without a default would crash here; the migration
+        # writer warns elsewhere on that pattern.
+        common = []
+        for fname, f in new_fields.items():
+            if fname in old_fields and f.db_type(connection) is not None:
+                col_name = (
+                    getattr(f, "column", None)
+                    or getattr(f, "db_column", None)
+                    or fname
+                )
+                common.append(f'"{col_name}"')
+        if common:
+            col_list = ", ".join(common)
+            connection.execute_script(
+                f'INSERT INTO "{tmp}" ({col_list}) '
+                f'SELECT {col_list} FROM "{table}"'
+            )
+
+        connection.execute_script(f'DROP TABLE "{table}"')
+        connection.execute_script(
+            f'ALTER TABLE "{tmp}" RENAME TO "{table}"'
+        )
+
+        # Re-create indexes declared on the model (Meta.indexes).
+        for idx in model_state.get("options", {}).get("indexes", []) or []:
+            forward, _ = idx.create_sql(table, vendor=vendor)
+            connection.execute_script(forward)
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
         pass

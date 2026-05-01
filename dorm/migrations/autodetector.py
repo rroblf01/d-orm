@@ -200,17 +200,37 @@ class MigrationAutodetector:
             for fname in set(to_fields) - set(from_fields) - renamed_new_fields:
                 ops.append(AddField(model_name=to_m["name"], name=fname, field=to_fields[fname]))
 
-            # AlterField
+            # AlterField — detect any meaningful change to the
+            # field, not just a SQL-type-string change. Comparing
+            # only ``db_type`` misses:
+            #   * VectorField on SQLite — every dimension maps to
+            #     ``BLOB`` so a 384→1536 swap looked identical.
+            #   * Nullability / default / max_length tweaks on
+            #     fields whose db_type is dimension-agnostic.
+            # Fall back to the *serialised* field source: if the
+            # migration writer would emit different Python for the
+            # two fields, that's a real change and a migration is
+            # warranted.
+            from .writer import _serialize_field
+
             for fname in set(from_fields) & set(to_fields) - renamed_old_fields:
                 old_f = from_fields[fname]
                 new_f = to_fields[fname]
                 try:
                     old_t = old_f.db_type(dc)
                     new_t = new_f.db_type(dc)
-                    if old_t != new_t:
-                        ops.append(AlterField(model_name=to_m["name"], name=fname, field=new_f))
                 except Exception:
-                    pass
+                    old_t = new_t = None
+                try:
+                    old_s = _serialize_field(old_f)
+                    new_s = _serialize_field(new_f)
+                except Exception:
+                    old_s = new_s = None
+                changed = (old_t is not None and old_t != new_t) or (
+                    old_s is not None and old_s != new_s
+                )
+                if changed:
+                    ops.append(AlterField(model_name=to_m["name"], name=fname, field=new_f))
 
         # ── Index changes ─────────────────────────────────────────────────────
         for new_key, from_key in key_map.items():

@@ -8,12 +8,209 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.4.0] - 2026-04-30
 
-The 2.4 release ships four feature additions targeting the
-performance / DX axis: a built-in N+1 detector, ``prefetch_related``
-support for reverse ``GenericRelation``, ``only()`` / ``defer()``
-that compose with ``select_related`` via dotted paths, and the
-``create_schema_for`` / ``update_schema_for`` Pydantic helpers for
-typical CRUD request bodies.
+Big release. Four DX features (N+1 detector, GenericRelation
+prefetch, only/defer with select_related, Pydantic Create/Update
+schemas), full **vector search** support (pgvector + sqlite-vec)
+under one ``dorm.contrib.pgvector`` module, and a chain of latent
+bug fixes the new test passes surfaced.
+
+### Added — Vector search (`dorm.contrib.pgvector`)
+
+Same module covers both backends:
+
+| Backend       | Column type   | Distance functions                     |
+|---------------|--------------|----------------------------------------|
+| PostgreSQL    | ``vector(N)`` | ``<->`` / ``<=>`` / ``<#>`` operators  |
+| SQLite        | ``BLOB``      | ``vec_distance_L2`` / ``vec_distance_cosine`` |
+
+- **`VectorField(dimensions=N)`** — declares the column. Vendor-aware
+  ``db_type`` (``vector(N)`` on PG, ``BLOB`` on SQLite) and
+  ``get_db_prep_value`` (text on PG, packed little-endian float32
+  on SQLite). Validates length on write; round-trips
+  ``list[float]`` / ``tuple`` / ``numpy.ndarray`` / pgvector's
+  ``Vector`` / SQLite BLOB / memoryview on read.
+- **`L2Distance` / `CosineDistance` / `MaxInnerProduct`** — distance
+  expressions that compile per-vendor: pgvector operators on PG,
+  ``vec_distance_*`` calls on SQLite. Compose with
+  ``annotate()`` + ``order_by()`` for kNN. ``MaxInnerProduct``
+  raises ``NotImplementedError`` on SQLite (sqlite-vec ships no
+  negated-IP function — use ``CosineDistance`` over normalised
+  embeddings instead).
+- **`HnswIndex` / `IvfflatIndex`** — index helpers for the two
+  pgvector ANN methods. ``opclass=`` defaults to
+  ``vector_l2_ops``; method-specific storage parameters
+  (``m=``, ``ef_construction=``, ``lists=``) flow through to a
+  ``WITH (k = v, …)`` clause via the new ``Index.with_options``
+  hook. (Vector indexes on SQLite require sqlite-vec's ``vec0``
+  virtual table — not yet wrapped.)
+- **`VectorExtension`** migration operation:
+  - PG → ``CREATE EXTENSION IF NOT EXISTS "vector"`` forwards,
+    ``DROP EXTENSION IF EXISTS "vector"`` backwards.
+  - SQLite → loads sqlite-vec into the migration's connection AND
+    flips ``SQLiteDatabaseWrapper._vec_extension_enabled`` so every
+    future connection auto-loads the extension.
+- **`load_sqlite_vec_extension(conn)`** — public helper for manual
+  loading from app boot / ASGI lifespan / worker startup.
+- **`dorm makemigrations --enable-pgvector <app>`** — CLI flag that
+  writes the boilerplate migration calling ``VectorExtension()``.
+- **`djanorm[pgvector]` extra** — installs both the ``pgvector``
+  Python package (psycopg adapter) and ``sqlite-vec`` (loadable
+  extension binary) so a single install line covers both backends.
+- Step-by-step documentation at [`docs/pgvector.md`](docs/pgvector.en.md)
+  with separate sections for the PostgreSQL and SQLite paths.
+
+### Added — N+1 detector
+
+- **`dorm.contrib.nplusone.NPlusOneDetector`** — context manager
+  that hooks ``pre_query``, normalises every executed SQL to a
+  parameter-stripped template, counts hits per template, and (in
+  strict mode) raises ``NPlusOneError`` at exit when a template
+  fired more than ``threshold`` times. ``raise_on_detect=False``
+  produces a non-fatal report via ``detector.report()`` for
+  staging-style auditing.
+- **`assert_no_nplusone()`** — pytest-friendly helper.
+  ``NPlusOneError`` subclasses ``AssertionError`` so pytest's
+  traceback rewriting kicks in.
+- DDL noise (``CREATE`` / ``DROP`` / ``ALTER`` / ``PRAGMA``,
+  transaction control) filtered by default; caller can override
+  via ``ignore=``.
+- Identifier characters (``"authors"."id"``) preserved during
+  normalisation; only string / numeric / NULL **literals**
+  collapse to ``?`` so unrelated queries don't bucket together.
+
+### Added — `prefetch_related` on reverse `GenericRelation`
+
+- **Reverse polymorphic relations now batch.**
+  ``Article.objects.prefetch_related("tags")`` resolves every tag
+  pointing at every article in a single SELECT
+  (``content_type = ct AND object_id IN (…)``), groups by
+  ``object_id``, and stamps each article's manager cache. The
+  ``GenericRelation`` manager's ``.all()`` reads from that cache
+  before falling back to the live query — same contract as
+  Django's prefetch + reverse-FK relation.
+- Async parity via ``_aprefetch_generic_relation``.
+- ``Prefetch("tags", queryset=…)`` honoured — the user-supplied
+  filters / ordering / select_related are AND-ed onto the
+  ``content_type`` predicate.
+
+### Added — `only()` / `defer()` compose with `select_related`
+
+- **Dotted paths now restrict the related projection.**
+  ``Author.objects.select_related("publisher").only("name", "publisher__name")``
+  emits a single LEFT OUTER JOIN that pulls only ``"authors"."id"``,
+  ``"authors"."name"``, ``"publishers"."id"``, and
+  ``"publishers"."name"`` — previously the projection-restriction
+  short-circuited the JOIN entirely, silently degrading to a
+  per-row N+1 on the related side.
+- PK is always implicit so the hydrated related instance keeps a
+  valid identity even when only non-PK columns were listed.
+- ``defer("publisher__bio")`` is the inverse: keeps every related
+  column except the named ones.
+- Bare names (``only("name")``) keep their legacy semantics:
+  parent-only restriction. Mixed (``only("name").defer("publisher__bio")``)
+  works because the two sets live in separate state buckets.
+
+### Added — Pydantic Create / Update schema helpers
+
+- **`create_schema_for(model)`** — drops auto-incrementing PKs and
+  ``GeneratedField`` columns automatically (server-controlled),
+  keeps required fields required, propagates real defaults. Plain
+  ``BaseModel`` subclass suitable as a FastAPI request body.
+  Default class name ``f"{Model.__name__}Create"``.
+- **`update_schema_for(model)`** — every remaining column becomes
+  ``T | None`` with default ``None`` (PATCH semantics). Built via
+  ``pydantic.create_model`` directly so the field-default
+  propagation can be neutralised — a column with
+  ``default=False`` mustn't advertise that default to the client
+  when partial-update semantics say "no change". Constraint
+  translation (``max_length``, ``ge=0``, ``Literal[…]`` for
+  ``choices``, …) still applies — PATCH bodies aren't a free pass.
+- Both helpers accept ``name=``, ``exclude=`` (extends the auto-PK
+  drop), and ``base=`` (custom ``BaseModel`` ancestor).
+
+### Fixed — `select_related` + `only()` was silently a no-op
+
+- The SQL builder used to short-circuit the ``select_related`` JOIN
+  whenever ``only()`` / ``defer()`` was active, on the (incorrect)
+  assumption that the restricted projection would conflict with
+  the aliased SR columns. The aliased columns
+  (``"_sr_<path>_<col>"``) are namespaced by construction; emitting
+  both is safe.
+- ``ORDER BY`` now qualifies the parent column with the table name
+  whenever any JOIN is in flight (WHERE-derived **or**
+  select_related). Previously it qualified only when ``self.joins``
+  was truthy and missed the SR case, producing ``ambiguous column
+  name: id`` once a parent ``"id"`` and a related ``"id"`` both
+  appeared unqualified.
+
+### Fixed — `select_related` + WHERE column shared with related table
+
+- WHERE column now qualified when ``select_related`` is active.
+  ``Author.objects.filter(name="x").select_related("publisher")``
+  previously emitted ``WHERE "name" = …`` without a table prefix —
+  PostgreSQL raised ``column reference "name" is ambiguous`` and
+  SQLite silently picked the parent's column. ``_resolve_column``
+  now treats both ``self.joins`` and ``self.select_related_fields``
+  as triggers for qualification.
+
+### Fixed — `DecimalField` returned `float` on SQLite
+
+- ``DecimalField.from_db_value`` coerces the cursor's value to
+  ``decimal.Decimal``. SQLite stores NUMERIC with REAL affinity,
+  so ``sqlite3`` returned floats — the field's annotation
+  promised ``Decimal`` but the runtime value didn't match,
+  breaking arithmetic with ``TypeError: unsupported operand
+  type(s) for +: 'float' and 'decimal.Decimal'``. PG's psycopg
+  adapter already returned ``Decimal``; an ``isinstance`` guard
+  keeps that path zero-cost.
+
+### Fixed — Migration autodetector missed non-type-changing field edits
+
+- The autodetector compared only ``field.db_type(connection)``,
+  which collapses different dimensions of a SQLite VectorField to
+  the same ``BLOB`` (and similarly drops nullability / default /
+  ``max_length`` tweaks for fields whose SQL type stays the same).
+  The diff now also compares the writer's serialised output, so
+  any edit the migration writer would emit differently triggers
+  an ``AlterField``.
+
+### Fixed — `AlterField` on SQLite was a no-op
+
+- SQLite's ``ALTER TABLE`` doesn't support ``ALTER COLUMN``, so
+  the operation silently did nothing. ``AlterField.database_forwards``
+  now follows SQLite's `recommended rebuild recipe
+  <https://www.sqlite.org/lang_altertable.html#otheralter>`_:
+  create a new table with the up-to-date schema, copy the column
+  intersection, drop the old, rename, and recreate any
+  ``Meta.indexes`` declared on the model. PG path now also flips
+  nullability (``DROP NOT NULL`` / ``SET NOT NULL``) on top of the
+  existing ``ALTER COLUMN TYPE``.
+
+### Fixed — Migration writer dropped `VectorField(dimensions=…)`
+
+- The writer's ``_serialize_field`` had no branch for
+  ``VectorField``, so generated migrations emitted
+  ``VectorField()`` and crashed at import with
+  ``TypeError: __init__() missing 1 required positional argument:
+  'dimensions'``. The branch + the matching ``_FIELD_IMPORTS``
+  entry are now in place.
+
+### Tests
+
+- ``tests/test_pgvector.py`` — ~100 cases. Unit-level field /
+  expression / index helper coverage that runs on plain SQLite
+  without any extension; integration cases that auto-skip when
+  pgvector / sqlite-vec aren't loaded but verify round-trip + kNN
+  ordering + index DDL when they are.
+- ``tests/test_bug_hunt_v2_4.py`` — 80 cases targeting historically
+  bug-prone ORM patterns (empty-input boundaries, NULL FK +
+  ``select_related``, Q-object identities, Decimal precision
+  round-trip, ``get_or_create`` / ``update_or_create`` semantics,
+  CASCADE depth, NULL ordering, unicode / SQL-special characters,
+  M2M idempotency, transaction rollback nesting, F-expression
+  equality, UNIQUE conflict → ``IntegrityError``, FK column
+  ordering). Both the Decimal and ambiguous-column bugs above
+  were caught by tests in this file.
 
 ### Added — N+1 detector
 
