@@ -536,7 +536,7 @@ def cmd_shell(args):
         # IPython is an optional dev dependency — suppress the static import
         # check so ty doesn't fail on environments that don't have it. The
         # try/except still handles the runtime ImportError.
-        import IPython
+        import IPython  # ty: ignore[unresolved-import]
 
         IPython.embed(user_ns=local_vars, banner1=banner, using="asyncio")
         return
