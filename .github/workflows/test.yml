@@ -67,6 +67,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra=all
 
+      - name: Add swap
+        # Hosted runners ship with 7GB RAM and the suite + PG service
+        # + 2 xdist workers occasionally trip the OOM killer, leaving
+        # `worker 'gwN' crashed` flakes. 8GB of swap absorbs the spikes.
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
       - name: Type check
         run: uv run ty check
 
@@ -77,7 +87,10 @@ jobs:
         # --cov-fail-under floors the line-coverage at the current level
         # so accidental drops break CI. Raise the number whenever you
         # add tests; never silently lower it.
-        run: uv run pytest -n 2 --tb=short -q --cov=dorm --cov-fail-under=83
+        # --max-worker-restart lets xdist resurrect a worker the OOM
+        # killer took out instead of dropping its coverage data and
+        # tanking the whole run.
+        run: uv run pytest -n 2 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=83
 
   # Catch PG-version-specific behavior (advisory locks, IDENTITY columns,
   # syntax differences) by running the suite against the supported range.
@@ -133,8 +146,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra=all
 
+      - name: Add swap
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
       - name: Run tests
         # --cov-fail-under floors the line-coverage at the current level
         # so accidental drops break CI. Raise the number whenever you
         # add tests; never silently lower it.
-        run: uv run pytest -n 2 --tb=short -q --cov=dorm --cov-fail-under=83
+        run: uv run pytest -n 2 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=83
