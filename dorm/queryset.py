@@ -955,8 +955,18 @@ class QuerySet(Generic[_T]):
             cached = await self._cache_lookup_async()
             if cached is not None:
                 return cached
+            # Snapshot the model version BEFORE the async fetch
+            # (see ``_fetch_all`` for the rationale) so a writer
+            # that commits mid-fetch orphans our store under the
+            # old key instead of clobbering future reads with
+            # stale rows.
+            from .cache import model_cache_version
+
+            version_at_fetch = (
+                model_cache_version(self.model) if self._cache_alias else None
+            )
             rows = [item async for item in self._aiterator()]
-            await self._cache_store_async(rows)
+            await self._cache_store_async(rows, version=version_at_fetch)
             return rows
         return _materialize().__await__()
 
@@ -1027,9 +1037,23 @@ class QuerySet(Generic[_T]):
         if cached is not None:
             self._result_cache = cached  # type: ignore[assignment]
             return
+        # Snapshot the model's invalidation version BEFORE the DB
+        # fetch. If a concurrent writer commits between the
+        # snapshot and the store call below, that writer bumps
+        # the version + ``delete_pattern`` before our store
+        # lands; storing under the OLD (pre-bump) key leaves the
+        # stale rows orphaned because every later reader uses
+        # the NEW version. Storing under the NEW version (the
+        # earlier behaviour) would publish stale rows under the
+        # very key those readers consult — TTL-long staleness.
+        from .cache import model_cache_version
+
+        version_at_fetch = (
+            model_cache_version(self.model) if self._cache_alias else None
+        )
         rows = list(self._iterator())  # type: ignore[assignment]
         self._result_cache = rows
-        self._cache_store_sync(rows)
+        self._cache_store_sync(rows, version=version_at_fetch)
 
     # ── Result-cache helpers ──────────────────────────────────────────────────
 
@@ -1172,7 +1196,9 @@ class QuerySet(Generic[_T]):
                 rebuilt.append(entry)
         return rebuilt
 
-    def _cache_store_sync(self, rows: list[_T]) -> None:
+    def _cache_store_sync(
+        self, rows: list[_T], *, version: int | None = None
+    ) -> None:
         if self._cache_alias is None:
             return
         try:
@@ -1181,12 +1207,17 @@ class QuerySet(Generic[_T]):
             backend = get_cache(self._cache_alias)
         except Exception:
             return
-        # Re-read the model version AFTER the DB fetch — if a
-        # concurrent writer bumped it, store under the new key so
-        # later readers (which use the new version) see the row.
-        # Storing under the OLD key would leave a stale entry alive
-        # until TTL.
-        key = self._cache_key(version=model_cache_version(self.model))
+        # Use the version captured BEFORE the DB fetch (passed in
+        # by ``_fetch_all``). A writer that committed during the
+        # fetch already bumped the counter and called
+        # ``delete_pattern`` — storing under the old version
+        # leaves the entry orphaned (every later reader uses the
+        # bumped version and ignores it), which is exactly what
+        # we want: no stale row leaks to future readers. If
+        # ``version`` is omitted (callers other than
+        # ``_fetch_all``) we fall back to the current value.
+        v = version if version is not None else model_cache_version(self.model)
+        key = self._cache_key(version=v)
         if key is None:
             return
         # Serialise model instances by their ``__dict__`` (the same
@@ -1244,7 +1275,9 @@ class QuerySet(Generic[_T]):
                 rebuilt.append(entry)
         return rebuilt
 
-    async def _cache_store_async(self, rows: list[_T]) -> None:
+    async def _cache_store_async(
+        self, rows: list[_T], *, version: int | None = None
+    ) -> None:
         if self._cache_alias is None:
             return
         try:
@@ -1253,10 +1286,12 @@ class QuerySet(Generic[_T]):
             backend = get_cache(self._cache_alias)
         except Exception:
             return
-        # See note in :meth:`_cache_store_sync` — re-read the
-        # version after fetch so a racing writer's bump points
-        # later reads at the new key.
-        key = self._cache_key(version=model_cache_version(self.model))
+        # Same rationale as :meth:`_cache_store_sync` — use the
+        # caller-supplied pre-fetch version so a racing writer's
+        # bump orphans the store rather than publishing stale
+        # rows under the new key.
+        v = version if version is not None else model_cache_version(self.model)
+        key = self._cache_key(version=v)
         if key is None:
             return
         wire: list[Any] = []
