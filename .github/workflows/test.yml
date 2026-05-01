@@ -70,12 +70,17 @@ jobs:
       - name: Add swap
         # Hosted runners ship with 7GB RAM and the suite + PG service
         # + 2 xdist workers occasionally trip the OOM killer, leaving
-        # `worker 'gwN' crashed` flakes. 8GB of swap absorbs the spikes.
+        # `worker 'gwN' crashed` flakes. Swap absorbs the spikes.
+        # Runners already ship with an active /swapfile, so we replace
+        # it with a larger one rather than creating a fresh path.
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile /swapfile
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Type check
         run: uv run ty check
@@ -148,10 +153,13 @@ jobs:
 
       - name: Add swap
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile /swapfile
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Run tests
         # --cov-fail-under floors the line-coverage at the current level
