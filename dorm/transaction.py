@@ -5,6 +5,8 @@ import contextvars
 import functools
 import inspect
 import logging
+import re as _re
+import secrets as _secrets
 import threading
 from typing import Any, Awaitable, Callable, Union
 
@@ -450,3 +452,58 @@ def aatomic(using: str | Callable[..., Any] = "default"):
     if callable(using) and not isinstance(using, str):
         return _AsyncAtomicContextManager("default")(using)
     return _AsyncAtomicContextManager(using)
+
+
+# ── Manual savepoint API (3.1+) ──────────────────────────────────────────────
+#
+# ``atomic()`` already nests via savepoints automatically. The functions
+# below expose the SQL-level primitives directly for users who need to
+# branch / rollback inside a single ``atomic()`` block without unwinding
+# the whole transaction. Mirrors Django's
+# ``django.db.transaction.savepoint`` family.
+
+# Savepoint IDs minted by :func:`savepoint` are ``s_<hex>`` — anything
+# else gets rejected to keep arbitrary user input out of the SQL we
+# splice into ``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO``.
+_SAVEPOINT_RE = _re.compile(r"^s_[0-9a-f]+$")
+
+
+def _connection_for(using: str = "default"):
+    from .db.connection import get_connection
+
+    return get_connection(using)
+
+
+def savepoint(using: str = "default") -> str:
+    """Create a savepoint inside the current transaction. Returns the
+    savepoint ID (a unique-per-process token suitable for SQL
+    splicing); pass it to :func:`savepoint_commit` or
+    :func:`savepoint_rollback`.
+
+    Must be called inside an ``atomic()`` block. Without an outer
+    transaction the savepoint emits unmatched DDL that the backend
+    rejects.
+    """
+    sid = "s_" + _secrets.token_hex(8)
+    _connection_for(using).execute_script(f"SAVEPOINT {sid}")
+    return sid
+
+
+def savepoint_commit(sid: str, using: str = "default") -> None:
+    """Release *sid* — its writes stay part of the outer transaction."""
+    if not _SAVEPOINT_RE.match(sid):
+        # Defence-in-depth: callers should only pass IDs returned
+        # by :func:`savepoint`. Reject anything that wouldn't
+        # round-trip through ``token_hex`` to avoid SQL splicing
+        # of arbitrary user input.
+        raise ValueError(f"invalid savepoint id: {sid!r}")
+    _connection_for(using).execute_script(f"RELEASE SAVEPOINT {sid}")
+
+
+def savepoint_rollback(sid: str, using: str = "default") -> None:
+    """Roll back every write made since *sid* without aborting the
+    outer transaction. The savepoint is then released automatically
+    by the rollback (no need to call :func:`savepoint_commit`)."""
+    if not _SAVEPOINT_RE.match(sid):
+        raise ValueError(f"invalid savepoint id: {sid!r}")
+    _connection_for(using).execute_script(f"ROLLBACK TO SAVEPOINT {sid}")

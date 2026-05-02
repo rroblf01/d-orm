@@ -132,6 +132,8 @@ class MigrationExecutor:
         app_label: str,
         migrations_dir: str | Path,
         dry_run: bool = False,
+        fake: bool = False,
+        fake_initial: bool = False,
     ) -> list[tuple[str, list]] | None:
         """Apply all pending migrations for *app_label*.
 
@@ -140,6 +142,18 @@ class MigrationExecutor:
         executed and returns the list. The migration recorder is **not**
         updated, so subsequent runs see the same set of pending
         migrations. Useful as a pre-deploy review step.
+
+        When ``fake=True``, mark every pending migration as applied
+        WITHOUT running its operations. Use when the schema already
+        matches the desired state — typically when adopting dorm
+        against a hand-managed legacy database, or when re-pointing
+        the recorder after a manual fix.
+
+        When ``fake_initial=True``, only the *initial* migration of
+        each app (the lowest-numbered one with no ``dependencies``)
+        gets faked, AND only when its ``CreateModel`` operations'
+        target tables already exist. Subsequent migrations run for
+        real. Mirrors Django's ``migrate --fake-initial`` flag.
         """
         migrations_dir = Path(migrations_dir)
         with _migration_lock(self.connection):
@@ -158,7 +172,12 @@ class MigrationExecutor:
                 self._sync_squashed(app_label, all_migs)
             applied = self._applied_names(app_label)
             return self._apply_forward(
-                app_label, all_migs, applied, dry_run=dry_run
+                app_label,
+                all_migs,
+                applied,
+                dry_run=dry_run,
+                fake=fake,
+                fake_initial=fake_initial,
             )
 
     def rollback(self, app_label: str, migrations_dir: str | Path, target: str) -> None:
@@ -253,6 +272,52 @@ class MigrationExecutor:
             f"Available migrations: {available}"
         )
 
+    def _table_exists(self, table: str) -> bool:
+        """Cross-vendor check used by ``fake_initial`` to decide
+        whether the schema already matches a CreateModel op."""
+        vendor = getattr(self.connection, "vendor", "sqlite")
+        try:
+            if vendor == "postgresql":
+                rows = self.connection.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = %s LIMIT 1",
+                    [table],
+                )
+            else:
+                rows = self.connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = ? LIMIT 1",
+                    [table],
+                )
+            return bool(list(rows))
+        except Exception:
+            # If the introspection probe itself fails, fall back to
+            # "doesn't exist" so the migration runs the real DDL.
+            return False
+
+    def _should_fake_migration(
+        self, app_label: str, module, fake_initial: bool
+    ) -> bool:
+        """Decide whether a single migration should be faked under
+        ``fake_initial`` semantics: only the initial (no dependencies)
+        migration gets faked, and only when every ``CreateModel`` it
+        contains targets a table that already exists."""
+        if not fake_initial:
+            return False
+        if getattr(module, "dependencies", None):
+            return False
+        from .operations import CreateModel
+
+        creates = [op for op in getattr(module, "operations", []) if isinstance(op, CreateModel)]
+        if not creates:
+            return False
+        for op in creates:
+            table = op.options.get("db_table") or f"{app_label}_{op.name.lower()}"
+            if not self._table_exists(table):
+                return False
+        return True
+
     def _apply_forward(
         self,
         app_label: str,
@@ -260,6 +325,8 @@ class MigrationExecutor:
         applied: set[str],
         target_num: int | None = None,
         dry_run: bool = False,
+        fake: bool = False,
+        fake_initial: bool = False,
     ) -> list[tuple[str, list]] | None:
         unapplied = [
             (num, name, mod) for num, name, mod in all_migs
@@ -281,9 +348,32 @@ class MigrationExecutor:
 
         try:
             for number, name, module in unapplied:
+                will_fake = fake or self._should_fake_migration(
+                    app_label, module, fake_initial
+                )
                 if self.verbosity:
-                    label = "Would apply" if dry_run else "Applying"
+                    if dry_run:
+                        label = "Would apply"
+                    elif will_fake:
+                        label = "Faking"
+                    else:
+                        label = "Applying"
                     print(f"  {label} {app_label}.{name}...", end=" ")
+                if will_fake and not dry_run:
+                    # Just walk the state forward (so the loader's
+                    # ``ProjectState`` stays in sync for downstream
+                    # operations) and record the migration as
+                    # applied. Skip ``database_forwards`` entirely.
+                    to_state = from_state.clone()
+                    for op in getattr(module, "operations", []):
+                        op.state_forwards(app_label, to_state)
+                    from_state = to_state.clone()
+                    self.recorder.record_applied(app_label, name)
+                    for rep_app, rep_name in getattr(module, "replaces", []):
+                        self.recorder.record_applied(rep_app, rep_name)
+                    if self.verbosity:
+                        print("FAKED")
+                    continue
 
                 # Each migration runs inside a single transaction so that
                 # a failure in op N rolls back ops 1..N-1. Without this,

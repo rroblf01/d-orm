@@ -613,6 +613,110 @@ class QuerySet(Generic[_T]):
         qs._cache_timeout = self._cache_timeout
         return qs
 
+    def dates(
+        self, field: str, kind: str, order: str = "ASC"
+    ) -> list:
+        """Return distinct truncated date values for *field*.
+
+        *kind* — one of ``"day"``, ``"week"``, ``"month"``,
+        ``"year"``. Truncates each fetched value in Python and
+        de-duplicates so a chronological archive list is one DB
+        round-trip.
+
+        Returns ``list[date]`` rather than a chainable QuerySet —
+        the Django shape relies on a SQL-level ``GROUP BY`` of an
+        ``annotate``-derived column, which the dorm queryset
+        compiler currently doesn't accept cleanly. The Python
+        materialisation is correct on every backend; the chainable
+        variant lands once the compiler grows that path."""
+        import datetime as _dt
+
+        if kind not in ("day", "week", "month", "year"):
+            raise ValueError(
+                f"dates() kind must be one of "
+                f"['day', 'week', 'month', 'year'], got {kind!r}."
+            )
+        if order.upper() not in ("ASC", "DESC"):
+            raise ValueError("dates() order must be 'ASC' or 'DESC'.")
+
+        def _trunc(value: Any) -> Any:
+            if isinstance(value, _dt.datetime):
+                value = value.date()
+            if not isinstance(value, _dt.date):
+                return value
+            if kind == "day":
+                return value
+            if kind == "week":
+                # Truncate to ISO Monday — matches Django's TruncWeek.
+                return value - _dt.timedelta(days=value.weekday())
+            if kind == "month":
+                return value.replace(day=1)
+            return value.replace(month=1, day=1)  # year
+
+        seen: list = []
+        seen_set: set = set()
+        for raw in self.values_list(field, flat=True):
+            if raw is None:
+                continue
+            truncated = _trunc(raw)
+            if truncated in seen_set:
+                continue
+            seen_set.add(truncated)
+            seen.append(truncated)
+        seen.sort(reverse=(order.upper() == "DESC"))
+        return seen
+
+    def datetimes(
+        self, field: str, kind: str, order: str = "ASC"
+    ) -> list:
+        """Distinct truncated datetimes for *field*.
+
+        *kind* — ``"hour"``, ``"minute"``, ``"second"`` in addition
+        to every kind :meth:`dates` accepts. Returns a Python list
+        (see :meth:`dates` for why)."""
+        import datetime as _dt
+
+        kinds = {"second", "minute", "hour", "day", "week", "month", "year"}
+        if kind not in kinds:
+            raise ValueError(
+                f"datetimes() kind must be one of {sorted(kinds)}, got {kind!r}."
+            )
+        if order.upper() not in ("ASC", "DESC"):
+            raise ValueError("datetimes() order must be 'ASC' or 'DESC'.")
+
+        def _trunc(value: Any) -> Any:
+            if isinstance(value, _dt.date) and not isinstance(value, _dt.datetime):
+                value = _dt.datetime.combine(value, _dt.time())
+            if not isinstance(value, _dt.datetime):
+                return value
+            if kind == "second":
+                return value.replace(microsecond=0)
+            if kind == "minute":
+                return value.replace(second=0, microsecond=0)
+            if kind == "hour":
+                return value.replace(minute=0, second=0, microsecond=0)
+            base = value.replace(hour=0, minute=0, second=0, microsecond=0)
+            if kind == "day":
+                return base
+            if kind == "week":
+                return base - _dt.timedelta(days=base.weekday())
+            if kind == "month":
+                return base.replace(day=1)
+            return base.replace(month=1, day=1)  # year
+
+        seen: list = []
+        seen_set: set = set()
+        for raw in self.values_list(field, flat=True):
+            if raw is None:
+                continue
+            truncated = _trunc(raw)
+            if truncated in seen_set:
+                continue
+            seen_set.add(truncated)
+            seen.append(truncated)
+        seen.sort(reverse=(order.upper() == "DESC"))
+        return seen
+
     def alias(self, **kwargs: Any) -> QuerySet[_T]:
         """Add named expressions usable in :meth:`filter`, :meth:`exclude`
         and :meth:`order_by` without including them in the ``SELECT`` list.

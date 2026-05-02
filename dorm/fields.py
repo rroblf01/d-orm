@@ -295,6 +295,59 @@ class Field(Generic[_T]):
             self.verbose_name = name.replace("_", " ")
         cls._meta.add_field(self)
 
+    def deconstruct(self) -> tuple[str | None, str, list, dict]:
+        """Return a 4-tuple suitable for migration serialisation:
+        ``(name, dotted_class_path, args, kwargs)``.
+
+        Mirrors Django's :meth:`django.db.models.Field.deconstruct`
+        so custom fields the user writes — and migration tools that
+        consume them — can reconstruct a ``Field`` instance from
+        the serialised form by:
+
+        .. code-block:: python
+
+            from importlib import import_module
+            mod_path, _, cls_name = path.rpartition(".")
+            cls = getattr(import_module(mod_path), cls_name)
+            field = cls(*args, **kwargs)
+
+        The default implementation walks the constructor's keyword
+        arguments and emits whichever ones differ from the
+        framework-shipped defaults. Subclasses with extra
+        constructor parameters should override and call ``super()``
+        first to extend the kwargs dict.
+        """
+        path = f"{type(self).__module__}.{type(self).__qualname__}"
+        kwargs: dict[str, Any] = {}
+        # Mirror Django's "include only non-default values" rule —
+        # keeps generated migrations terse and re-readable.
+        defaults = {
+            "primary_key": False,
+            "max_length": None,
+            "unique": False,
+            "blank": False,
+            "null": False,
+            "db_index": False,
+            "default": NOT_PROVIDED,
+            "editable": True,
+            "serialize": True,
+            "choices": None,
+            "help_text": "",
+            "db_column": None,
+            "db_tablespace": None,
+            "validators": [],
+        }
+        for attr, default in defaults.items():
+            val = getattr(self, attr, default)
+            if val != default:
+                kwargs[attr] = val
+        # ``unique=primary_key`` is a derived value — drop it when it
+        # only mirrors ``primary_key=True`` (otherwise the
+        # reconstruction emits ``unique=True`` redundantly).
+        if kwargs.get("primary_key") and kwargs.get("unique") is True:
+            kwargs.pop("unique", None)
+        return self.name, path, [], kwargs
+
     @overload
     def __get__(self, instance: None, owner: type) -> "Field[_T]": ...
     @overload
@@ -617,7 +670,51 @@ class TimeField(Field[datetime.time]):
         return "TIME"
 
 
+def _settings_use_tz() -> bool:
+    """Read ``settings.USE_TZ`` defensively — settings may be
+    unconfigured (e.g. during model class construction at import
+    time). Default ``False`` matches Django <4.0 to avoid breaking
+    existing dorm projects on upgrade."""
+    try:
+        from .conf import settings
+
+        return bool(getattr(settings, "USE_TZ", False))
+    except Exception:
+        return False
+
+
+def _settings_default_tz() -> datetime.tzinfo:
+    """Resolve ``settings.TIME_ZONE`` to a ``tzinfo``. Falls back to
+    UTC when the value is missing or unrecognised; tests / CLI tools
+    that don't configure dorm still get a sensible default."""
+    try:
+        from .conf import settings
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        name = getattr(settings, "TIME_ZONE", "UTC") or "UTC"
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            return datetime.timezone.utc
+    except Exception:
+        return datetime.timezone.utc
+
+
 class DateTimeField(Field[datetime.datetime]):
+    """Datetime column.
+
+    ``settings.USE_TZ`` controls timezone handling:
+
+    - ``False`` (default, Django <4 behaviour): naive datetimes are
+      stored as-is. Aware datetimes are stored verbatim.
+    - ``True`` (Django ≥4 behaviour): every read returns a
+      tz-aware datetime. Naive datetimes coming in from the user
+      are interpreted in ``settings.TIME_ZONE`` and converted to
+      UTC before storage. PostgreSQL columns become
+      ``TIMESTAMP WITH TIME ZONE`` so the engine round-trips the
+      offset.
+    """
+
     def __init__(self, auto_now: bool = False, auto_now_add: bool = False, **kwargs):
         self.auto_now = auto_now
         self.auto_now_add = auto_now_add
@@ -627,17 +724,36 @@ class DateTimeField(Field[datetime.datetime]):
             kwargs.setdefault("default", lambda: datetime.datetime.now(datetime.timezone.utc))
         super().__init__(**kwargs)
 
+    def _make_aware(self, value: datetime.datetime) -> datetime.datetime:
+        """Attach ``settings.TIME_ZONE`` to *value* when it's naive
+        and ``USE_TZ`` is on. Already-aware datetimes pass through."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=_settings_default_tz())
+        return value
+
     def to_python(self, value):
         if value is None:
             return None
         if isinstance(value, datetime.datetime):
+            if _settings_use_tz():
+                return self._make_aware(value)
             return value
         if isinstance(value, str):
-            return datetime.datetime.fromisoformat(value)
+            parsed = datetime.datetime.fromisoformat(value)
+            if _settings_use_tz():
+                return self._make_aware(parsed)
+            return parsed
         return value
 
     def get_db_prep_value(self, value):
         if isinstance(value, datetime.datetime):
+            if _settings_use_tz():
+                # Normalise to UTC before serialising — backends
+                # store either ``TIMESTAMPTZ`` (PG) which preserves
+                # the offset, or text (SQLite) which collapses to
+                # whatever we write. UTC is the only safe wire form.
+                aware = self._make_aware(value)
+                return aware.astimezone(datetime.timezone.utc).isoformat()
             return value.isoformat()
         return value
 
@@ -645,12 +761,31 @@ class DateTimeField(Field[datetime.datetime]):
         if value is None:
             return None
         if isinstance(value, str):
-            return datetime.datetime.fromisoformat(value)
-        return value
+            parsed = datetime.datetime.fromisoformat(value)
+        elif isinstance(value, datetime.datetime):
+            parsed = value
+        else:
+            return value
+        if _settings_use_tz():
+            # SQLite stores ISO text without a guaranteed offset;
+            # PostgreSQL TIMESTAMPTZ rehydrates with offset attached.
+            # Either way we want a UTC-aware datetime on the
+            # Python side so callers can compare across rows safely.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            else:
+                parsed = parsed.astimezone(datetime.timezone.utc)
+        return parsed
 
     def db_type(self, connection) -> str:
         vendor = getattr(connection, "vendor", "sqlite")
-        return "TIMESTAMP" if vendor == "postgresql" else "DATETIME"
+        if vendor == "postgresql":
+            return (
+                "TIMESTAMP WITH TIME ZONE"
+                if _settings_use_tz()
+                else "TIMESTAMP"
+            )
+        return "DATETIME"
 
     def pre_save(self, model_instance, add: bool):
         assert self.attname is not None

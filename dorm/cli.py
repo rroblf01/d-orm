@@ -259,6 +259,8 @@ def cmd_migrate(args):
     app_label = getattr(args, "app_label", None)
     target = getattr(args, "target", None)
     dry_run = getattr(args, "dry_run", False)
+    fake = getattr(args, "fake", False)
+    fake_initial = getattr(args, "fake_initial", False)
     apps = [app_label] if app_label else installed_apps
 
     for app in apps:
@@ -280,7 +282,10 @@ def cmd_migrate(args):
                 # continued and the process exited 0.
                 sys.exit(1)
         else:
-            captured = executor.migrate(app, mig_dir, dry_run=dry_run)
+            captured = executor.migrate(
+                app, mig_dir,
+                dry_run=dry_run, fake=fake, fake_initial=fake_initial,
+            )
             if dry_run and captured:
                 print(f"\n--- SQL that would run for '{app}' ---")
                 for sql, params in captured:
@@ -1288,6 +1293,24 @@ def main():
         "next run still sees the same set of pending migrations. "
         "Recommended as a pre-deploy review step. ``--plan`` is an "
         "alias kept for users coming from Django's migrate command.",
+    )
+    mg.add_argument(
+        "--fake",
+        action="store_true",
+        default=False,
+        help="Mark every pending migration as applied WITHOUT running "
+        "its operations. Use when the schema already matches "
+        "the desired state — typically when adopting dorm against "
+        "a hand-managed legacy database.",
+    )
+    mg.add_argument(
+        "--fake-initial",
+        action="store_true",
+        default=False,
+        help="Like --fake but only the initial migration of each app "
+        "(no dependencies) is faked, and only when every "
+        "CreateModel target table already exists. Subsequent "
+        "migrations run for real.",
     )
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)

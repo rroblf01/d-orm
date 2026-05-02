@@ -32,6 +32,27 @@ class Options:
         self.constraints: list = []
         self.abstract: bool = False
         self.managed: bool = True
+        # Proxy models share the parent's DB table — they exist only
+        # at the Python class layer to add methods / managers without
+        # a separate migration. The autodetector skips them so
+        # ``makemigrations`` doesn't emit a phantom CreateModel.
+        self.proxy: bool = False
+        # ``concrete_model`` is the closest non-proxy ancestor whose
+        # table actually backs the rows. For non-proxy models it's
+        # ``self.model``; for proxies it's the parent's concrete
+        # model. Set in ``contribute_to_class`` once we have the
+        # class object.
+        self.concrete_model: Any = None
+        # Custom permissions surface as ``[(codename, name), ...]``.
+        # When ``dorm.contrib.auth`` is in ``INSTALLED_APPS``, the
+        # post-migrate hook in ``dorm.contrib.auth.management``
+        # ensures one ``Permission`` row per entry exists.
+        self.permissions: list[tuple[str, str]] = []
+        # Verbose names for admin / form labels — kept here so the
+        # ORM core doesn't need an admin app to round-trip a
+        # readable model name through migrations.
+        self.verbose_name: str = ""
+        self.verbose_name_plural: str = ""
         self.fields: list = []
         self.pk: Any = None
         self.managers: list = []
@@ -50,6 +71,21 @@ class Options:
             self.db_table = f"{label_segment}_{self.model_name}"
         if not self.ordering:
             self.ordering = []
+        # Resolve the concrete model: walk the MRO looking for the
+        # first non-proxy ancestor that's also a Model. For non-proxy
+        # classes that's ``self.model``; for proxies it's the parent
+        # whose table actually exists.
+        self.concrete_model = self.model
+        if self.proxy:
+            for parent in cls.__mro__[1:]:
+                p_meta = getattr(parent, "_meta", None)
+                if p_meta is None:
+                    continue
+                if not getattr(p_meta, "proxy", False) and not getattr(p_meta, "abstract", False):
+                    self.concrete_model = parent
+                    # Proxies share their parent's storage.
+                    self.db_table = p_meta.db_table
+                    break
         # Validate that db_table is safe to splice into SQL.
         if not self.abstract:
             from .conf import _validate_identifier
@@ -153,6 +189,24 @@ class ModelBase(type):
                 for field in parent._meta.fields:
                     field_copy = copy.deepcopy(field)
                     declared_fields.append((field_copy.name, field_copy))
+
+        # Proxy-model inheritance: ``Meta.proxy = True`` shares the
+        # concrete parent's table and field set. Inherit field
+        # **instances** (not deep copies) so the proxy and its
+        # concrete model truly point at the same column descriptors —
+        # Django convention. Only one concrete parent is supported;
+        # multi-table inheritance lives outside this scope.
+        proxy_flag = bool(getattr(meta, "proxy", False)) if meta else False
+        if proxy_flag:
+            for parent in parents:
+                p_meta = getattr(parent, "_meta", None)
+                if p_meta is None:
+                    continue
+                if p_meta.abstract or getattr(p_meta, "proxy", False):
+                    continue
+                for field in p_meta.fields:
+                    declared_fields.append((field.name, field))
+                break
 
         # Sort by creation counter to preserve declaration order
         declared_fields.sort(key=lambda x: x[1].creation_counter)
@@ -309,10 +363,16 @@ class _ModelState:
     exist yet.
     """
 
-    __slots__ = ("adding",)
+    __slots__ = ("adding", "db")
 
-    def __init__(self, *, adding: bool = True) -> None:
+    def __init__(self, *, adding: bool = True, db: str | None = None) -> None:
         self.adding = adding
+        # Alias the row was hydrated from (or written to). Set by
+        # :meth:`Model.from_db` and by the queryset's hydration
+        # path; useful when third-party libs (history tracking,
+        # multi-DB routers) need to know which alias an instance
+        # belongs to without re-resolving via the router.
+        self.db = db
 
 
 class Model(metaclass=ModelBase):
@@ -824,6 +884,36 @@ class Model(metaclass=ModelBase):
             for i, field in enumerate(concrete):
                 if i < len(row):
                     instance.__dict__[field.attname] = field.from_db_value(row[i])
+        return instance
+
+    @classmethod
+    def from_db(cls, db: str | None, field_names: list[str], values: list) -> "Self":
+        """Hook for custom hydration logic — Django parity.
+
+        Default behaviour: zip ``field_names`` and ``values`` into
+        a kwargs dict, build the instance via :meth:`_from_db_row`
+        and stamp the resulting object's ``_state.db`` with *db*
+        (the alias the row came from).
+
+        Subclasses override this to add per-instance derived
+        attributes that are cheap to compute on hydration but
+        wasteful to compute on every access. The signature mirrors
+        Django's ``Model.from_db`` so libraries that hook in
+        through it (history-tracking, soft-delete extensions, …)
+        keep working when migrated from Django.
+        """
+        instance = cls.__new__(cls)
+        state = _ModelState(adding=False)
+        state.db = db
+        instance.__dict__ = {"_state": state}
+        concrete = [f for f in cls._meta.fields if f.column]
+        # Build a column → value map from the parallel lists. We
+        # accept either column names or attnames in ``field_names``
+        # so callers can hand us either Django-style.
+        by_name = dict(zip(field_names, values))
+        for field in concrete:
+            raw = by_name.get(field.column, by_name.get(field.attname))
+            instance.__dict__[field.attname] = field.from_db_value(raw)
         return instance
 
     def clean_fields(self, exclude: list[str] | None = None) -> None:

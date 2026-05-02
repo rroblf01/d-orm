@@ -60,6 +60,21 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "json_has_key": ("{col} ? %s", lambda v: v),       # JSONB
     "json_has_any": ("{col} ?| %s", lambda v: v),      # JSONB, list of keys
     "json_has_all": ("{col} ?& %s", lambda v: v),      # JSONB, list of keys
+    # ── Django-name aliases (3.1+) ────────────────────────────────────────
+    # Django's contrib.postgres uses these spellings on
+    # ``JSONField`` / ``ArrayField``. The ``contains`` lookup is
+    # field-type ambiguous — for strings the LIKE version above is
+    # right; for JSON/array, callers should use ``contained_by`` /
+    # ``has_*`` explicitly. We don't shadow ``contains`` here to
+    # avoid breaking string filters; users wanting JSON containment
+    # use ``array_contains`` (covers JSONB too) or the new aliases
+    # below for the singular operators.
+    "contained_by": ("{col} <@ %s", lambda v: v),       # ARRAY, JSONB
+    "has_key": ("{col} ? %s", lambda v: v),             # JSONB
+    "has_keys": ("{col} ?& %s", lambda v: v),           # JSONB, list
+    "has_any_keys": ("{col} ?| %s", lambda v: v),       # JSONB, list
+    "overlap": ("{col} && %s", lambda v: v),            # ARRAY
+    "len": ("array_length({col}, 1) = %s", lambda v: v),  # ARRAY (PG)
     # ── Full-text search (PostgreSQL only) ────────────────────────────────
     # ``to_tsvector(<config>, col) @@ plainto_tsquery(<config>, %s)`` —
     # the canonical "match this column against the search string"

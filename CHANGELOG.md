@@ -8,20 +8,177 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Roadmap (not yet shipped)
 
-- **MySQL / MariaDB backend** (slated v3.1). Mirrors the
-  ``postgresql`` backend shape with vendor-specific dialect
-  (``ON DUPLICATE KEY UPDATE``, backtick identifiers, no
-  transactional DDL). Scope: ~600 LOC + testcontainers fixture.
-- **Multi-tenant schema-per-tenant** (slated v3.1). PG
-  ``search_path`` switching via a ``TenantContext`` context
-  manager + per-tenant migration runner.
-- **History / audit trail** (slated v3.1). ``HistoricalModel``
-  mixin auto-creates a ``<Model>History`` shadow table fed by
-  ``pre_save`` / ``pre_delete``.
-- **Connection-pool autoscaling**. Adjust ``MAX_POOL_SIZE`` based
-  on observed saturation. Risky — needs careful rollout.
-- **`dorm migrate-from-django` converter**. Parses Django
-  ``models.py``, emits dorm-shaped equivalents.
+- **MySQL / MariaDB backend full implementation** (slated v3.2).
+  Scaffold ships in 3.1 (recognises ``ENGINE = "mysql"`` so
+  configs parse) but the wire-up raises ``ImproperlyConfigured``
+  pointing at the v3.2 milestone.
+- **Per-tenant migration runner** (slated v3.2). The runtime
+  ``TenantContext`` ships in 3.1; the auto-CREATE-SCHEMA + per-
+  tenant migrate command lands with the second cut.
+- **History / audit trail** ``HistoricalModel`` mixin (slated v3.2).
+- **Connection-pool autoscaling** (slated v3.2). Risky — needs
+  careful rollout.
+- **`dorm migrate-from-django` converter** (slated v3.2). Parses
+  Django ``models.py``, emits dorm-shaped equivalents.
+- **`FilteredRelation`** — JOIN with condition (slated v4.0).
+  Significant queryset-compiler lift; defer until the compiler
+  refactor lands.
+
+## [3.1.0] - 2026-05-02
+
+Django-parity sprint. Closes the last 7 🔴 gaps in the audit
+matrix plus 5 🟠 power-user items. **No breaking changes** versus
+3.0; every addition is opt-in or covered by a default-off setting.
+
+### Added — `settings.USE_TZ` actually wired up
+
+- ``DateTimeField`` reads ``settings.USE_TZ`` (default ``False``).
+  When ``True``, naive datetimes are interpreted in
+  ``settings.TIME_ZONE`` and converted to UTC for storage. PostgreSQL
+  columns become ``TIMESTAMP WITH TIME ZONE`` so the engine
+  preserves the offset; SQLite stores UTC-isoformat.
+- ``from_db_value`` always returns tz-aware datetimes when
+  ``USE_TZ`` is on, normalised to UTC. Cross-row comparisons stay
+  honest regardless of the writer's local zone.
+- ``settings.TIME_ZONE`` resolves through ``zoneinfo.ZoneInfo``;
+  unrecognised values fall back to UTC silently.
+
+### Added — `Meta.proxy = True`
+
+- Proxy models share their concrete parent's table (no migration,
+  no duplicate columns) and inherit field instances directly so a
+  proxy's ``_meta.fields`` points at the same descriptors. The
+  autodetector skips them; only the concrete parent emits a
+  ``CreateModel``.
+- ``Options.concrete_model`` resolves to the closest non-proxy
+  ancestor whose table backs the rows — useful for libs that need
+  to know "where do this instance's bytes live".
+
+### Added — `QuerySet.dates()` / `QuerySet.datetimes()`
+
+- Returns ``list[date]`` / ``list[datetime]`` of distinct
+  truncated values for *field*. Truncation happens in Python (the
+  queryset compiler's annotation+distinct combo isn't ready for the
+  SQL-level shape yet); chainable variants land alongside the
+  compiler refactor in v4.
+- ``dates()`` accepts ``"day"``, ``"week"``, ``"month"``,
+  ``"year"``. ``datetimes()`` adds ``"hour"`` / ``"minute"`` /
+  ``"second"``. Order argument respects ``"ASC"`` / ``"DESC"``.
+
+### Added — `dorm migrate --fake` / `--fake-initial`
+
+- ``--fake`` marks every pending migration as applied without
+  running its operations. Use when adopting dorm against a hand-
+  managed legacy database — the schema already matches and you
+  just want the recorder synced.
+- ``--fake-initial`` only fakes each app's *initial* migration
+  (no dependencies), and only when every ``CreateModel`` it
+  contains targets a table that already exists. Subsequent
+  migrations run for real. Mirrors Django's flag of the same
+  name.
+- ``MigrationExecutor.migrate(... fake=, fake_initial=)`` exposes
+  the same shape programmatically.
+
+### Added — JSONField / ArrayField PG operators
+
+- New lookup names matching Django's contrib.postgres spellings:
+  ``__contained_by`` (``<@``), ``__has_key`` (``?``),
+  ``__has_keys`` (``?&``), ``__has_any_keys`` (``?|``),
+  ``__overlap`` (``&&``), ``__len`` (``array_length(col, 1)``).
+  Existing ``__array_contains`` / ``__array_overlap`` /
+  ``__json_has_*`` aliases stay for users who already wrote them.
+
+### Added — `Field.deconstruct()`
+
+- Default base-class implementation returns
+  ``(name, dotted_path, args, kwargs)`` and emits only kwargs that
+  differ from the framework defaults. Custom field classes get
+  serialisation in the migration writer for free; subclasses with
+  extra constructor parameters override and call ``super()``.
+
+### Added — `Model.from_db(db, field_names, values)`
+
+- Django-parity classmethod for custom hydration logic. Default
+  implementation zips the parallel lists and stamps the resulting
+  ``_state.db`` with the alias the row came from. Libs that hook
+  through it (history-tracking, soft-delete extensions) keep
+  working when migrated from Django.
+
+### Added — `dorm.contrib.auth.tokens`
+
+- Stateless HMAC-signed reset tokens, framework-agnostic. The
+  signature binds to the user's ``last_login`` / ``password`` /
+  ``email`` so a single use of the token (which changes the
+  password) invalidates every outstanding URL.
+- ``PasswordResetTokenGenerator`` with configurable
+  ``timeout`` (default 24h) and ``salt_namespace`` (domain
+  separation between password-reset / email-verification / etc.).
+- Stateful alternative ``generate_short_lived_token`` for cases
+  where the caller needs a one-row revoke list.
+
+### Added — `Meta.permissions` + `dorm.contrib.auth.management.sync_permissions`
+
+- ``Meta.permissions = [(codename, name), ...]`` declares custom
+  per-model permissions. Default verbs (``add``, ``change``,
+  ``delete``, ``view``) get auto-emitted per concrete model.
+- ``sync_permissions()`` materialises the declarations into rows
+  in the ``auth_permission`` table. Idempotent — safe to call
+  every deploy.
+
+### Added — `transaction.savepoint` / `savepoint_commit` / `savepoint_rollback`
+
+- Manual savepoint API for branching / rolling back inside a
+  single ``atomic()`` block without unwinding it. Returns a
+  random savepoint ID (``s_<hex>``) that's safe to splice into
+  SQL; callers that pass arbitrary strings get ``ValueError`` to
+  prevent SQL injection through the savepoint name.
+
+### Added — MySQL backend scaffold
+
+- ``ENGINE = "mysql"`` parses through ``parse_database_url`` and
+  the connection wrappers raise ``ImproperlyConfigured`` pointing
+  at the v3.2 milestone. Lets users pin on a forward-compatible
+  config string today.
+
+### Added — Multi-tenant `dorm.contrib.tenants`
+
+- ``TenantContext(name)`` / ``aTenantContext(name)`` set
+  PostgreSQL's ``search_path`` to ``<schema>, public`` for the
+  duration of a context. Per-task isolation via ``ContextVar`` —
+  concurrent FastAPI / Starlette requests routed to different
+  tenants don't bleed.
+- ``current_tenant()`` lookup for ``DATABASE_ROUTERS`` /
+  middleware. ``register_tenant(name)`` for the future migration
+  runner. Schema names validated against the same identifier
+  regex used elsewhere — no SQL injection through tenant names.
+
+### Tests
+
+- ``tests/test_v3_1_use_tz.py`` — datetime round-trip with
+  ``USE_TZ`` on/off, naive→aware conversion, PG TIMESTAMPTZ
+  selection.
+- ``tests/test_v3_1_proxy.py`` — proxy inheritance shares table,
+  proxy skipped from migration state, ``concrete_model`` wiring.
+- ``tests/test_v3_1_dates.py`` — round-trip distinct truncation
+  for every kind, order ASC/DESC, kind / order validation.
+- ``tests/test_v3_1_migrations_fake.py`` — ``fake`` flag records
+  without running, ``fake_initial`` only fires when table exists.
+- ``tests/test_v3_1_jsonfield.py`` — new lookup names compile to
+  the right PG operator.
+- ``tests/test_v3_1_deconstruct.py`` — base ``Field.deconstruct``
+  returns sane shape and round-trips through ``cls(**kwargs)``.
+- ``tests/test_v3_1_from_db.py`` — alias stamped on ``_state.db``,
+  hydration matches column / attname mapping.
+- ``tests/test_v3_1_auth_tokens.py`` — make/check round-trip,
+  password-change invalidation, timeout enforcement, namespace
+  separation, malformed input handling.
+- ``tests/test_v3_1_permissions.py`` — default permissions
+  per concrete model, custom Meta entries, idempotence,
+  abstract / proxy skip.
+- ``tests/test_v3_1_savepoint.py`` — savepoint commit / rollback
+  round-trip, invalid id rejection.
+- ``tests/test_v3_1_tenants.py`` — schema validation, context
+  state restoration, non-PG backend rejection.
 
 ## [3.0.0] - 2026-05-02
 

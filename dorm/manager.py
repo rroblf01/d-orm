@@ -126,6 +126,12 @@ class BaseManager(Generic[_T]):
     def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
         return self.get_queryset().values_list(*fields, flat=flat)
 
+    def dates(self, field: str, kind: str, order: str = "ASC") -> list:
+        return self.get_queryset().dates(field, kind, order)
+
+    def datetimes(self, field: str, kind: str, order: str = "ASC") -> list:
+        return self.get_queryset().datetimes(field, kind, order)
+
     def get(self, *args: Any, **kwargs: Any) -> _T:
         return self.get_queryset().get(*args, **kwargs)
 

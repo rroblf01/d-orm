@@ -50,6 +50,12 @@ class ProjectState:
             # makemigrations / migrate path is skipped.
             if not getattr(meta, "managed", True):
                 continue
+            # Proxy models share their concrete parent's table — they
+            # exist only at the Python class layer, so a migration
+            # ``CreateModel`` would emit a phantom DDL for a table
+            # that already lives at the parent.
+            if getattr(meta, "proxy", False):
+                continue
             target_app = meta.app_label
             if app_label and target_app != app_label:
                 continue
