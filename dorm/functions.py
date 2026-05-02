@@ -206,6 +206,103 @@ class Abs(Func):
     function = "ABS"
 
 
+class Power(Func):
+    """POWER(base, exponent)."""
+
+    function = "POWER"
+
+
+class Sqrt(Func):
+    """SQRT(expr) — square root. SQLite needs ≥3.35 (math built-ins)."""
+
+    function = "SQRT"
+
+
+class Mod(Func):
+    """MOD(dividend, divisor) — integer / float modulo."""
+
+    function = "MOD"
+
+
+class Sign(Func):
+    """SIGN(expr) — -1 / 0 / 1."""
+
+    function = "SIGN"
+
+
+class Ceil(Func):
+    """CEIL(expr) — round up to next integer."""
+
+    function = "CEIL"
+
+
+class Floor(Func):
+    """FLOOR(expr) — round down to next integer."""
+
+    function = "FLOOR"
+
+
+class Log(Func):
+    """LOG(base, expr) — logarithm in arbitrary base. ``LOG(expr)`` for
+    natural log on backends that accept the single-arg form; use
+    :class:`Ln` for portability."""
+
+    function = "LOG"
+
+
+class Ln(Func):
+    """LN(expr) — natural logarithm."""
+
+    function = "LN"
+
+
+class Exp(Func):
+    """EXP(expr) — Euler's number raised to *expr*."""
+
+    function = "EXP"
+
+
+class Random(Func):
+    """RANDOM() — backend-native random in [0, 1) (PG) or signed
+    integer (SQLite). Use ``ABS(Random()) % N`` for an integer in a
+    bounded range; emit ``ORDER BY Random()`` for shuffled selection.
+    """
+
+    function = "RANDOM"
+
+    def __init__(self, output_field: Any = None) -> None:
+        super().__init__(output_field=output_field)
+
+
+class NullIf(Func):
+    """NULLIF(a, b) — returns NULL when ``a == b``, else ``a``. Useful
+    for converting sentinel values back to NULL before division /
+    aggregation."""
+
+    function = "NULLIF"
+
+    def __init__(self, a: Any, b: Any, output_field: Any = None) -> None:
+        super().__init__(a, b, output_field=output_field)
+
+
+class Trim(Func):
+    """TRIM(expr) — strip whitespace from both ends."""
+
+    function = "TRIM"
+
+
+class LTrim(Func):
+    """LTRIM(expr) — strip leading whitespace."""
+
+    function = "LTRIM"
+
+
+class RTrim(Func):
+    """RTRIM(expr) — strip trailing whitespace."""
+
+    function = "RTRIM"
+
+
 class Now(Func):
     """CURRENT_TIMESTAMP — current date/time."""
 

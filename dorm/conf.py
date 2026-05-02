@@ -226,6 +226,11 @@ class Settings:
     # change instead of a stale replica row. Set to ``0`` or ``None``
     # to disable.
     READ_AFTER_WRITE_WINDOW: float | None = 3.0
+    # Application-level field encryption (``dorm.contrib.encrypted``).
+    # Single-key form for the simple case; switch to the list when
+    # rotating. Both empty by default — opt in by setting one.
+    FIELD_ENCRYPTION_KEY: str = ""
+    FIELD_ENCRYPTION_KEYS: list = []
 
     _configured = False
 

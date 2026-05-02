@@ -51,7 +51,7 @@ dorm migrate blog zero             # rollback every migration
 
 | Flag | Purpose |
 |---|---|
-| `--dry-run` / `--plan` (2.6+) | print SQL only; don't touch the DB or update the recorder. ``--plan`` is an alias kept for users coming from Django |
+| `--dry-run` / `--plan` (3.0+) | print SQL only; don't touch the DB or update the recorder. ``--plan`` is an alias kept for users coming from Django |
 | `--verbosity N` | 0 = silent, 1 = default, 2 = verbose |
 | `--settings PATH` | settings module to load |
 
@@ -123,7 +123,7 @@ If IPython is installed, you get IPython; otherwise the standard
 REPL. Settings are loaded and `INSTALLED_APPS` are imported, so you
 can `from blog.models import Post` and start querying right away.
 
-## `dorm lint-migrations` (2.6+)
+## `dorm lint-migrations` (3.0+)
 
 Walk every migration in `INSTALLED_APPS` and emit findings for known
 online-deploy footguns. Exits non-zero on findings — wire as a CI

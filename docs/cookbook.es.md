@@ -246,7 +246,7 @@ Para tests de integración con PostgreSQL, usa
 [`testcontainers`](https://testcontainers-python.readthedocs.io/)
 para levantar un Postgres efímero por sesión.
 
-### Asertar conteo de queries (`assertNumQueries`, `assertMaxQueries`) (2.6+)
+### Asertar conteo de queries (`assertNumQueries`, `assertMaxQueries`) (3.0+)
 
 Fija el número exacto de queries de un code path — o el techo —
 para defenderte de regresiones N+1. Tanto la forma context manager

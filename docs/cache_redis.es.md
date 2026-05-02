@@ -283,7 +283,7 @@ Cuándo **no**:
 - **Counters de consistencia fuerte** — invalidación coarse
   los machaca constantemente.
 
-## LRU en proceso: `LocMemCache` (2.6+)
+## LRU en proceso: `LocMemCache` (3.0+)
 
 Para tests, scripts mono-proceso o como capa local delante de Redis,
 usa el LRU en proceso sin pulling de `redis-py`:
@@ -302,7 +302,7 @@ Mismo contrato que `RedisCache` — sync + async, `delete_pattern` para
 invalidación por señal. NO compartido entre procesos worker: cada
 gunicorn / uvicorn tiene su dict.
 
-## Row-cache: `Manager.cache_get(pk=…)` (2.6+)
+## Row-cache: `Manager.cache_get(pk=…)` (3.0+)
 
 Lookup individual por PK que pasa por la cache antes de la DB.
 Usa la misma versión de invalidación por modelo que
@@ -317,7 +317,7 @@ user = await User.objects.acache_get(pk=42)
 Misses caen silenciosamente a DB. Caída de cache también — la fila
 en DB es la fuente de verdad.
 
-### Batch row-cache: `cache_get_many(pks=[...])` (2.6+)
+### Batch row-cache: `cache_get_many(pks=[...])` (3.0+)
 
 Recupera múltiples filas por PK en un único round-trip. Hits van por
 cache; misses se agrupan en una sola query ``WHERE pk IN (...)`` y

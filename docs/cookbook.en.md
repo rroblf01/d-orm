@@ -242,7 +242,7 @@ For PostgreSQL integration tests, use
 [`testcontainers`](https://testcontainers-python.readthedocs.io/) to
 spin a throwaway Postgres per session.
 
-### Asserting query counts (`assertNumQueries`, `assertMaxQueries`) (2.6+)
+### Asserting query counts (`assertNumQueries`, `assertMaxQueries`) (3.0+)
 
 Pin the exact number of queries a code path issues — or the upper
 bound — to defend against N+1 regressions. Both the context-manager

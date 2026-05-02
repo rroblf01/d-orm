@@ -51,7 +51,7 @@ dorm migrate blog zero             # rollback de todas las migraciones
 
 | Flag | Para qué |
 |---|---|
-| `--dry-run` / `--plan` (2.6+) | imprime solo el SQL; no toca la BD ni actualiza el recorder. ``--plan`` es alias para usuarios que vienen de Django |
+| `--dry-run` / `--plan` (3.0+) | imprime solo el SQL; no toca la BD ni actualiza el recorder. ``--plan`` es alias para usuarios que vienen de Django |
 | `--verbosity N` | 0 = silencioso, 1 = default, 2 = verbose |
 | `--settings PATH` | módulo de settings a cargar |
 
@@ -125,7 +125,7 @@ Si tienes IPython instalado, lo usa; si no, cae al REPL estándar.
 Los settings se cargan y las `INSTALLED_APPS` se importan, así que
 puedes hacer `from blog.models import Post` y empezar a consultar.
 
-## `dorm lint-migrations` (2.6+)
+## `dorm lint-migrations` (3.0+)
 
 Recorre cada migración en `INSTALLED_APPS` y emite hallazgos para
 patrones peligrosos en deploy online. Sale con código != 0 ante

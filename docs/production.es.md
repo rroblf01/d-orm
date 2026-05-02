@@ -309,7 +309,7 @@ Configuración (gana la primera fuente que no sea `None`):
 
 | Origen | Ejemplo | Notas |
 |---|---|---|
-| `settings.SLOW_QUERY_MS` (2.6+) | `dorm.configure(SLOW_QUERY_MS=200)` | siempre gana; recomendado en producción |
+| `settings.SLOW_QUERY_MS` (3.0+) | `dorm.configure(SLOW_QUERY_MS=200)` | siempre gana; recomendado en producción |
 | Variable de entorno `DORM_SLOW_QUERY_MS` | `export DORM_SLOW_QUERY_MS=300` | fallback cuando no hay setting explícita |
 | Default | `500.0` | si nada está configurado |
 

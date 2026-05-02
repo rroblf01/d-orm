@@ -6,11 +6,45 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.6.0] - 2026-05-02
+### Roadmap (not yet shipped)
 
-Minor release. Observability and dev-tooling pass — every
-addition is opt-in or zero-cost when unused, so existing apps
-upgrade with no behaviour change.
+- **MySQL / MariaDB backend** (slated v3.1). Mirrors the
+  ``postgresql`` backend shape with vendor-specific dialect
+  (``ON DUPLICATE KEY UPDATE``, backtick identifiers, no
+  transactional DDL). Scope: ~600 LOC + testcontainers fixture.
+- **Multi-tenant schema-per-tenant** (slated v3.1). PG
+  ``search_path`` switching via a ``TenantContext`` context
+  manager + per-tenant migration runner.
+- **History / audit trail** (slated v3.1). ``HistoricalModel``
+  mixin auto-creates a ``<Model>History`` shadow table fed by
+  ``pre_save`` / ``pre_delete``.
+- **Connection-pool autoscaling**. Adjust ``MAX_POOL_SIZE`` based
+  on observed saturation. Risky — needs careful rollout.
+- **`dorm migrate-from-django` converter**. Parses Django
+  ``models.py``, emits dorm-shaped equivalents.
+
+## [3.0.0] - 2026-05-02
+
+Major release. Three originally-planned minors (2.6 / 2.7 / 2.8)
+land together — the breadth of additions warrants the version
+jump but **NO breaking changes versus 2.5.0**. Every new feature
+is opt-in or zero-cost when unused; existing apps upgrade with
+no behaviour change.
+
+The release groups into three themes:
+
+1. **Observability + dev tooling** (was 2.6) — slow-query
+   warning, retry knobs, query-count guard, sticky
+   read-after-write window, `dorm lint-migrations`,
+   request-scoped `QueryLog`, `LocMemCache`,
+   `Manager.cache_get` row cache.
+2. **Auth + parity + DX** (was 2.7) — `dorm.contrib.auth`,
+   `dorm.contrib.asyncguard`, expanded DB function corpus,
+   `Meta.managed = False`, async-aware `dorm shell`,
+   benchmark suite skeleton, "no-asgiref" migration docs.
+3. **Encryption + metrics** (was 2.8) — `EncryptedCharField` /
+   `EncryptedTextField` (AES-GCM, key rotation),
+   `dorm.contrib.prometheus` exporter.
 
 ### Added — `settings.SLOW_QUERY_MS`
 
@@ -34,26 +68,6 @@ upgrade with no behaviour change.
   test ``monkeypatch.setenv`` workflows keep observing the
   current value without an explicit cache flush.
 
-### Changed — `Settings` tracks explicit overrides
-
-- New private attribute ``Settings._explicit_settings`` records
-  the names of settings the user passed to ``configure(...)``.
-  Resolvers can now distinguish a class-level default (apply
-  env-var or built-in fallback first) from an explicit user
-  choice (always wins). Currently consumed by the
-  slow-query-threshold resolver only; future resolvers (cache
-  TTLs, retry knobs, …) can hook in the same way.
-
-### Tests
-
-- ``tests/test_slow_query_setting_v2_6.py`` — covers the new
-  resolution order, ``None``-disables behaviour,
-  ``configure``-driven cache invalidation, and the
-  ``cacheable`` flag returned by ``_resolve_slow_query_ms``.
-- Pre-existing env-var-only tests in
-  ``tests/test_production_readiness.py`` keep working unchanged
-  (env path is still active when no explicit setting is given).
-
 ### Added — `settings.RETRY_ATTEMPTS` / `settings.RETRY_BACKOFF`
 
 - Same resolver shape as ``SLOW_QUERY_MS``: explicit setting >
@@ -75,13 +89,14 @@ upgrade with no behaviour change.
 - Per-task isolation via ``ContextVar`` — concurrent ASGI
   requests / asyncio tasks get independent counters.
 
-### Added — `dorm.test.assertNumQueries`
+### Added — `dorm.test.assertNumQueries` / `assertMaxQueries`
 
-- Django-parity helper. Context-manager form asserts an exact
-  query count on exit; decorator form
-  (``assertNumQueriesFactory(N)``) wraps a test function. Both
-  use the same ``ContextVar``-based listener as the query-count
-  guard so async tests don't bleed counters across tasks.
+- Django-parity helpers. Context-manager forms assert exact
+  / ≤-N query counts on exit; decorator forms
+  (``assertNumQueriesFactory(N)``, ``assertMaxQueriesFactory(N)``)
+  wrap a sync or ``async def`` test function. Both use the same
+  ``ContextVar``-based listener as the query-count guard so
+  async tests don't bleed counters across tasks.
 
 ### Added — sticky read-after-write window
 
@@ -107,13 +122,14 @@ upgrade with no behaviour change.
   online-deploy footguns. Exits non-zero on findings — wire as
   a CI gate.
 - Rules: ``DORM-M001`` AddField NOT NULL with default
-  (full-table backfill), ``DORM-M002`` AlterField type change
-  (table rewrite), ``DORM-M003`` AddIndex without
+  (full-table backfill), ``DORM-M002`` AlterField (review type
+  vs. flag-flip), ``DORM-M003`` AddIndex without
   ``concurrently=True`` (PG ACCESS EXCLUSIVE lock),
   ``DORM-M004`` RunPython without ``reverse_code``
   (irreversible).
-- ``--format=json`` for machine-parseable output. Suppress
-  per-file with ``# noqa: DORM-M00X``.
+- ``--format=json`` for machine-parseable output, ``--rule
+  DORM-M00X`` to filter, ``--exit-zero`` for advisory CI runs.
+  Suppress per-file with ``# noqa: DORM-M00X``.
 
 ### Added — `dorm migrate --plan`
 
@@ -127,8 +143,9 @@ upgrade with no behaviour change.
 - ``QueryLog`` context manager captures every SQL statement
   inside a block: ``sql`` / ``params`` / ``alias`` /
   ``elapsed_ms`` / ``error``. ``summary()`` groups by SQL
-  template (placeholders normalised to ``?``) with count /
-  total / p50 / p95 timings.
+  template (placeholders normalised to ``?``) and returns
+  ``list[TemplateStats]`` with count / total / p50 / p95
+  timings.
 - ``QueryLogASGIMiddleware`` wraps any ASGI app; the per-request
   log lands on ``scope["dorm_querylog"]`` for downstream
   handlers / middlewares to inspect.
@@ -149,42 +166,158 @@ upgrade with no behaviour change.
   DB. Uses the per-model invalidation version so a
   ``post_save`` on the model bumps both queryset-cache entries
   and row-cache entries in lock-step.
-- Async parity via ``acache_get``. Cache miss / outage falls
-  through silently — same ``try / except`` policy as
-  ``RedisCache``.
+- ``cache_get_many(pks=[…])`` — batch read; misses collapse
+  into one ``WHERE pk IN (...)`` query and write back to
+  cache.
+- Async parity via ``acache_get`` / ``acache_get_many``. Cache
+  miss / outage falls through silently — same ``try / except``
+  policy as ``RedisCache``.
+
+### Added — `dorm.contrib.auth`
+
+- ``User`` / ``Group`` / ``Permission`` models — framework-agnostic.
+  Provides only the data model and password-hashing helpers; login
+  views, sessions and middleware are NOT included (that's the web
+  framework's job).
+- Password hashing via stdlib ``hashlib.pbkdf2_hmac`` with format
+  ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` — same shape Django
+  emits, so passwords migrate cleanly between the two ORMs. No
+  ``passlib`` / ``bcrypt`` / ``argon2`` dependency.
+- ``UserManager.create_user`` / ``create_superuser`` ensure
+  passwords land hashed instead of stored in the clear.
+- ``user.set_password()`` / ``check_password()`` / ``has_perm()``
+  with both sync and async (``ahas_perm``) variants. Group-based
+  permission checks walk forward M2M only — no reverse-M2M
+  traversal that would break across vendors.
+
+### Added — `dorm.contrib.asyncguard`
+
+- ``enable_async_guard(mode="warn"|"raise"|"raise_first")`` connects
+  to ``pre_query`` and walks the call stack — sync ORM calls
+  inside a running event loop trigger the configured action; async
+  ORM calls stay silent. Frame walking distinguishes the two paths
+  by looking for ``async def`` frames inside the ``dorm`` package.
+- ``SyncCallInAsyncContext`` inherits from :class:`BaseException`
+  so it bypasses the dispatcher's ``except Exception`` and
+  surfaces as a 500, not a logged-and-swallowed warning.
+- Recommended for development / test environments — disabled by
+  default in production.
+
+### Added — DB function corpus
+
+- Math: ``Power``, ``Sqrt``, ``Mod``, ``Sign``, ``Ceil``, ``Floor``,
+  ``Log``, ``Ln``, ``Exp``, ``Random``.
+- Util: ``NullIf``.
+- String: ``Trim``, ``LTrim``, ``RTrim``.
+- All cross-backend on PG and SQLite ≥3.35 (Python 3.11+ ships
+  recent enough libsqlite3 by default). MySQL coverage lands with
+  the v3.1 backend.
+
+### Added — `Meta.managed = False`
+
+- Models with ``managed = False`` are skipped by
+  ``ProjectState.from_apps`` — ``makemigrations`` no longer emits
+  a ``CreateModel`` for tables the user marks as externally
+  managed (legacy schema, view, foreign data wrapper).
+- Runtime queries / saves keep working unchanged — only the
+  migration emission path is affected.
+
+### Added — async-aware `dorm shell`
+
+- The fallback REPL (when IPython is absent) now compiles input
+  with ``PyCF_ALLOW_TOP_LEVEL_AWAIT`` so
+  ``await Article.objects.aget(pk=1)`` works directly. ``--no-async``
+  reverts to the classic stdlib REPL.
+
+### Added — benchmark suite skeleton
+
+- ``bench/run.py`` — stdlib-only microbenchmark runner.
+  Scenarios: ``create``, ``bulk_create``, ``get``, ``filter_count``,
+  ``list_first_n``. JSON output suitable for committing under
+  ``bench/results/`` and charting later.
+- ``tests/test_v2_7_bench_smoke.py`` — ensures the runner survives
+  one end-to-end sqlite run with the smallest parameters.
+
+### Added — `dorm.contrib.encrypted`
+
+- ``EncryptedCharField`` and ``EncryptedTextField`` store
+  ciphertext on disk and decrypt transparently on read. Backed by
+  AES-GCM via the optional ``cryptography`` package
+  (``djanorm[encrypted]``).
+- Deterministic mode (default) keeps equality lookup working —
+  same plaintext produces the same ciphertext via an
+  HMAC-derived nonce. Switch to ``deterministic=False`` for
+  random-nonce indistinguishability when equality lookups aren't
+  required.
+- Key rotation: ``settings.FIELD_ENCRYPTION_KEYS`` accepts a list
+  of keys (newest first); decryption tries each in order so old
+  rows keep decrypting after a primary-key roll.
+- Tampered ciphertext is rejected with a clear ``ValueError``
+  rather than silently returning ``None`` — better to surface the
+  bug than mask it.
+- New settings: ``FIELD_ENCRYPTION_KEY`` (single-key form) and
+  ``FIELD_ENCRYPTION_KEYS`` (list-form for rotation).
+
+### Added — `dorm.contrib.prometheus`
+
+- Stdlib-only Prometheus text-exposition exporter — no
+  ``prometheus_client`` dependency. Connects to ``post_query`` to
+  emit ``dorm_queries_total`` (counter), ``dorm_query_duration_seconds``
+  (histogram), plus optional pool / cache gauges.
+- ``install()`` attaches the listener; ``uninstall()`` removes it
+  and resets state. Idempotent so a FastAPI lifespan can wire it
+  without ceremony.
+- ``record_cache_hit(alias)`` / ``record_cache_miss(alias)``
+  helpers for custom cache backends that want their numbers in the
+  exposition.
+
+### Changed — `Settings` tracks explicit overrides
+
+- New private attribute ``Settings._explicit_settings`` records
+  the names of settings the user passed to ``configure(...)``.
+  Resolvers can now distinguish a class-level default (apply
+  env-var or built-in fallback first) from an explicit user
+  choice (always wins). Used by every memoised setting (slow
+  query, retry knobs, …) — future resolvers register one
+  ``MemoizedSetting`` instance and the central registry handles
+  the rest.
 
 ### CLI
 
 - ``dorm init`` template now scaffolds (commented-out by default
-  except for ``SLOW_QUERY_MS``) every new 2.6 knob:
+  except for ``SLOW_QUERY_MS``) every new 3.0 knob:
   ``RETRY_ATTEMPTS``, ``RETRY_BACKOFF``, ``QUERY_COUNT_WARN``,
   ``READ_AFTER_WRITE_WINDOW``, ``DATABASE_ROUTERS`` example,
-  and a ``CACHES`` block with both Redis and LocMemCache
-  examples.
-- ``dorm lint-migrations`` registered as a top-level subcommand.
-- ``dorm migrate --plan`` accepted as an alias for
-  ``--dry-run``.
+  a ``CACHES`` block with both Redis and LocMemCache examples,
+  and ``FIELD_ENCRYPTION_KEY`` placeholder.
+- ``dorm lint-migrations`` registered as a top-level subcommand
+  with ``--format`` / ``--rule`` / ``--exit-zero`` / ``--settings``
+  flags.
+- ``dorm migrate --plan`` accepted as an alias for ``--dry-run``.
 
 ### Documentation
 
-- ``docs/production.en.md`` / ``docs/production.es.md`` — new
-  subsections under *Observability* covering ``SLOW_QUERY_MS``,
+- ``docs/production.{en,es}.md`` — new subsections under
+  *Observability* covering ``SLOW_QUERY_MS``,
   ``RETRY_ATTEMPTS`` / ``RETRY_BACKOFF``, ``QUERY_COUNT_WARN``,
   ``READ_AFTER_WRITE_WINDOW`` and the request-scoped
-  ``QueryLog`` collector. New top-level *Migration safety* section
-  documenting ``dorm lint-migrations`` rules.
-- ``docs/cli.en.md`` / ``docs/cli.es.md`` — new
-  ``dorm lint-migrations`` section with ``--rule`` / ``--exit-zero`` /
-  ``--format`` flags. ``dorm migrate`` flag table now lists
-  ``--plan`` as the Django-style alias for ``--dry-run``.
-- ``docs/cache_redis.en.md`` / ``docs/cache_redis.es.md`` — new
-  ``LocMemCache`` configuration block and
-  ``Manager.cache_get(pk=…)`` / ``cache_get_many(pks=[…])`` row
-  cache subsection (sync + async).
-- ``docs/cookbook.en.md`` / ``docs/cookbook.es.md`` — testing
-  fixtures section grew an ``assertNumQueries`` /
-  ``assertMaxQueries`` cookbook entry covering the
-  context-manager and decorator forms (sync + async).
+  ``QueryLog`` collector. New top-level *Migration safety*
+  section documenting ``dorm lint-migrations`` rules.
+- ``docs/cli.{en,es}.md`` — new ``dorm lint-migrations`` section
+  with ``--rule`` / ``--exit-zero`` / ``--format`` flags.
+  ``dorm migrate`` flag table now lists ``--plan`` as the
+  Django-style alias for ``--dry-run``.
+- ``docs/cache_redis.{en,es}.md`` — new ``LocMemCache``
+  configuration block and ``Manager.cache_get(pk=…)`` /
+  ``cache_get_many(pks=[…])`` row-cache subsection (sync + async).
+- ``docs/cookbook.{en,es}.md`` — testing fixtures section grew
+  an ``assertNumQueries`` / ``assertMaxQueries`` entry covering
+  the context-manager and decorator forms (sync + async).
+- ``docs/migration-from-django.{en,es}.md`` — new
+  *You don't need ``asgiref``* section with a Django↔dorm
+  cheatsheet (every ``sync_to_async(qs.X)`` has a native ``aX``
+  counterpart) plus call-outs for the optional ``contrib.auth``,
+  ``contrib.encrypted`` and ``contrib.prometheus`` modules.
 
 ### Internal
 
@@ -203,15 +336,44 @@ upgrade with no behaviour change.
   lazy-copy-then-mutate: each task takes one private dict on
   first write, then mutates in place for the rest of the request.
 - ``QueryRecord`` and ``TemplateStats`` are now ``@dataclass(slots=True)``.
-  ``QueryLog.summary()`` returns ``list[TemplateStats]``; pre-2.6
+  ``QueryLog.summary()`` returns ``list[TemplateStats]``;
   consumers that read dict keys should switch to attribute access
   or call ``.to_dict()``.
-- ``Settings._explicit_settings`` moved from class-level mutable
-  default to an instance attribute set in ``__init__``.
+- ``Settings._explicit_settings`` lives on the instance (set in
+  ``__init__``) instead of as a class-level mutable default.
 - Per-query counters in ``query_count_guard`` and
   ``assertNumQueries`` mutate a single-element ``list[int]`` in
   place instead of calling ``ContextVar.set`` per query — saves
   one ``Token`` allocation per signal.
+
+### Tests
+
+- ``tests/test_slow_query_setting_v2_6.py`` — ``SLOW_QUERY_MS``
+  resolution order, ``None``-disables behaviour,
+  ``configure``-driven cache invalidation, ``cacheable`` flag.
+- ``tests/test_v2_6_features.py`` + ``test_v2_6_audit_fixes.py``
+  + ``test_v2_6_improvements.py`` — query-count guard,
+  ``assertNumQueries``, sticky window, lint rules, querylog,
+  LocMemCache, row-cache, audit-fix regression tests, and the
+  ``MemoizedSetting`` / ``ScopedCollector`` helper coverage.
+- ``tests/test_v2_7_auth.py`` — password-hashing helpers + User /
+  Group / Permission round-trip, key reuse, salt entropy,
+  superuser-flag enforcement, group-permission resolution.
+- ``tests/test_v2_7_asyncguard.py`` — guard activation modes,
+  warn dedup, sync-context inertness, listener teardown.
+- ``tests/test_v2_7_functions.py`` — SQL-shape pinning for every
+  new function and re-export check against ``dorm.__all__``.
+- ``tests/test_v2_7_parity.py`` — ``in_bulk``,
+  ``Manager.from_queryset``, ``Prefetch(to_attr=…)`` and
+  ``Meta.managed = False`` round-trips.
+- ``tests/test_v2_7_bench_smoke.py`` — benchmark runner survives
+  an end-to-end sqlite run.
+- ``tests/test_v2_8_encrypted.py`` — round-trip, deterministic /
+  random nonce semantics, key rotation, tamper detection,
+  missing / invalid key handling, field-level prep / from_db_value
+  path. Skipped when ``cryptography`` isn't installed.
+- ``tests/test_v2_8_prometheus.py`` — install idempotence, query
+  recording, exposition shape, label escaping, uninstall reset.
 
 ## [2.5.0] - 2026-05-02
 

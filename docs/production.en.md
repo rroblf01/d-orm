@@ -306,7 +306,7 @@ Configuration (first non-`None` source wins):
 
 | Source | Example | Notes |
 |---|---|---|
-| `settings.SLOW_QUERY_MS` (2.6+) | `dorm.configure(SLOW_QUERY_MS=200)` | always wins; recommended for production |
+| `settings.SLOW_QUERY_MS` (3.0+) | `dorm.configure(SLOW_QUERY_MS=200)` | always wins; recommended for production |
 | Env var `DORM_SLOW_QUERY_MS` | `export DORM_SLOW_QUERY_MS=300` | fallback when no explicit setting |
 | Default | `500.0` | applied if neither is configured |
 

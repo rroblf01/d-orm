@@ -41,6 +41,15 @@ class ProjectState:
             meta = model_cls._meta
             if meta.abstract:
                 continue
+            # ``Meta.managed = False`` means the user wants to use this
+            # model class against an externally-managed table (legacy
+            # schema, view, foreign data wrapper). dorm should NOT
+            # generate migrations for it — same convention Django
+            # uses. Field validation, queryset emission and runtime
+            # operations all keep working; only the
+            # makemigrations / migrate path is skipped.
+            if not getattr(meta, "managed", True):
+                continue
             target_app = meta.app_label
             if app_label and target_app != app_label:
                 continue

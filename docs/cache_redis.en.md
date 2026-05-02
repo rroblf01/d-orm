@@ -309,7 +309,7 @@ When **not** to cache:
   coarse, so a fast-write counter would invalidate constantly
   and hammer the cache.
 
-## In-process LRU: `LocMemCache` (2.6+)
+## In-process LRU: `LocMemCache` (3.0+)
 
 For tests, single-process scripts, or as a layer in front of Redis,
 use the bundled in-process LRU instead of pulling in `redis-py`:
@@ -328,7 +328,7 @@ Same contract as `RedisCache` — sync + async helpers, `delete_pattern`
 for signal-driven invalidation. NOT shared across worker processes:
 each gunicorn / uvicorn worker holds its own dict.
 
-## Row-cache: `Manager.cache_get(pk=…)` (2.6+)
+## Row-cache: `Manager.cache_get(pk=…)` (3.0+)
 
 Single-row lookup that goes through the cache before hitting the DB.
 Uses the same per-model invalidation version as `QuerySet.cache(...)`,
@@ -343,7 +343,7 @@ user = await User.objects.acache_get(pk=42)
 Cache misses fall through silently. Cache outages also fall
 through — the row from the database is the source of truth.
 
-### Batch row-cache: `cache_get_many(pks=[...])` (2.6+)
+### Batch row-cache: `cache_get_many(pks=[...])` (3.0+)
 
 Fetch many rows by primary key in a single round-trip. Hits go
 through the cache; misses are batched into one ``WHERE pk IN (...)``

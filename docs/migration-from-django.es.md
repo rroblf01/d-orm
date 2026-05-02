@@ -100,17 +100,61 @@ comportan como sus hermanos de Django. Nuevo en dorm:
 Aún **no hay flag `--fake`**; si necesitas marcar una migración como
 aplicada sin ejecutarla, hazlo manualmente vía la tabla del recorder.
 
+## No necesitas `asgiref` (3.0+)
+
+Django incluye `asgiref.sync` porque el ORM de Django fue sync-only
+durante años — toda llamada al modelo dentro de una vista async
+necesitaba envolverse en `sync_to_async(...)` para no bloquear el
+event loop. dorm tiene **path async nativo desde el día uno**, así
+que el puente es innecesario.
+
+| Django (ORM sync) | dorm (async-nativo) |
+|---|---|
+| `await sync_to_async(User.objects.get)(pk=1)` | `await User.objects.aget(pk=1)` |
+| `await sync_to_async(list)(qs)` | `[u async for u in qs.aiterator()]` o `await qs` |
+| `await sync_to_async(User.objects.create)(...)` | `await User.objects.acreate(...)` |
+| `await sync_to_async(user.save)()` | `await user.asave()` |
+| `await sync_to_async(qs.update)(...)` | `await qs.aupdate(...)` |
+| `with transaction.atomic(): ...` | `async with aatomic(): ...` |
+
+Cada método de queryset / manager en dorm tiene contraparte `a*`
+que pasa por el wrapper async del backend — sin thread pool, sin
+puente sync-async, sin alloc de Token por llamada. **No importes
+`asgiref` para código de ORM.** Si te ves alcanzando `sync_to_async`
+alrededor de un `Model.objects.*`, cambia al método `a*` que toca.
+
+Para detectarlo en dev / tests, activa el async-guard:
+
+```python
+# conftest.py o startup de app (solo desarrollo)
+from dorm.contrib.asyncguard import enable_async_guard
+enable_async_guard(mode="warn")     # WARNING por call site infractor
+# enable_async_guard(mode="raise")  # raise en todos los infractores
+```
+
+El guard engancha `pre_query` y recorre el call stack — llamadas
+sync al ORM dentro de un event loop disparan la acción configurada;
+las llamadas async pasan en silencio.
+
 ## Lo que falta a propósito
 
 - **Sin admin.** dorm es un ORM, no un framework CMS.
-- **Sin `auth` / `contrib.*`.** Construye identidad / sesiones /
-  etc. con lo que provea tu framework.
 - **Sin middleware request/response.** dorm no tiene capa HTTP.
 - **Sin datetimes con timezone** todavía. `TIME_ZONE` / `USE_TZ`
   son settings reservados; los datetimes se almacenan exactamente
   como los pasas.
-- **Sin content types / GenericForeignKey.** Específicos del modelo
-  de app registry de Django.
+- **`dorm.contrib.auth` opcional** (3.0+). Modelos User / Group /
+  Permission con hashing PBKDF2 de stdlib — vistas de login,
+  sesiones y middleware NO están; eso lo hace tu framework.
+- **`GenericForeignKey`** vive en `dorm.contrib.contenttypes`,
+  con la misma forma que Django.
+- **Cifrado opcional** (3.0+) via ``dorm.contrib.encrypted``
+  (`EncryptedCharField` / `EncryptedTextField`). AES-GCM, modo
+  determinista para lookups de igualdad, rotación de claves.
+  Requiere ``pip install 'djanorm[encrypted]'``.
+- **Exporter Prometheus opcional** (3.0+) via
+  ``dorm.contrib.prometheus`` — contadores + histogramas en
+  formato text-exposition plano, sin SDK externo.
 
 ## Lo que es mejor que Django
 

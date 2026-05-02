@@ -603,7 +603,42 @@ def cmd_shell(args):
     except ImportError:
         pass
 
-    code.interact(banner=banner, local=local_vars)
+    if getattr(args, "no_async", False):
+        # Classic stdlib REPL — no top-level await. Useful when the
+        # async-aware path interacts badly with a debugger / TTY in
+        # rare environments.
+        code.interact(banner=banner, local=local_vars)
+        return
+
+    # Async-aware REPL (3.0+): top-level ``await`` works without
+    # wrapping in ``asyncio.run`` / coroutine functions, mirroring
+    # ``python -m asyncio`` and IPython's ``using="asyncio"`` mode.
+    # The compiled code object carries ``PyCF_ALLOW_TOP_LEVEL_AWAIT``
+    # so ``await Article.objects.aget(pk=1)`` evaluates inline.
+    import ast
+    import asyncio
+
+    class _AsyncConsole(code.InteractiveConsole):
+        def __init__(self, locals: dict | None = None) -> None:
+            super().__init__(locals=locals)
+            self.compile.compiler.flags |= ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                self._loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self._loop)
+
+        def runcode(self, code):  # type: ignore[override]
+            try:
+                result = eval(code, self.locals)
+                if asyncio.iscoroutine(result):
+                    self._loop.run_until_complete(result)
+            except SystemExit:
+                raise
+            except BaseException:
+                self.showtraceback()
+
+    _AsyncConsole(locals=local_vars).interact(banner=banner)
 
 
 _SETTINGS_TEMPLATE = '''"""djanorm settings.
@@ -724,6 +759,17 @@ SLOW_QUERY_MS = 500.0
 # logs a one-time warning.
 # CACHE_SIGNING_KEY = ""
 # CACHE_REQUIRE_SIGNING_KEY = False  # raise instead of falling back, in prod
+
+# ── Field encryption (dorm.contrib.encrypted) ─────────────────────────────────
+# Single base64-encoded 32-byte AES-256 key for ``EncryptedCharField`` /
+# ``EncryptedTextField``. Generate with::
+#
+#   python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+#
+# Multi-key list form for rotation — newest first. Requires
+# ``pip install 'djanorm[encrypted]'``.
+# FIELD_ENCRYPTION_KEY = ""
+# FIELD_ENCRYPTION_KEYS = []
 
 # ── File storage (dorm.FileField) ─────────────────────────────────────────────
 # Uncomment one of the blocks below if you use ``dorm.FileField``. If left
