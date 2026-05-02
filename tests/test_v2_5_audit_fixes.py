@@ -159,8 +159,13 @@ def test_verify_rejects_tampered_signature() -> None:
 
     inner = pickle.dumps([{"name": "x"}])
     signed = sign_payload(inner)
-    # Flip a byte inside the digest section.
-    tampered = signed[:9] + b"f" + signed[10:]
+    # Flip first digest byte. Replacement MUST differ from the
+    # original byte — using a fixed hex char (``b"f"``) was
+    # flaky because the random per-process signing key sometimes
+    # produced a digest whose first hex char already was ``f``.
+    # Pick a byte that never appears in a hex digest so the
+    # comparison always fails.
+    tampered = signed[:9] + b"!" + signed[10:]
     assert verify_payload(tampered) is None
 
 
