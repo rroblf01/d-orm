@@ -207,6 +207,25 @@ class Settings:
     # cost beyond the timing already collected). Set to ``0``
     # to log every query as slow (useful in development).
     SLOW_QUERY_MS: float | None = 500.0
+    # Transient-error retry. Same resolution shape as
+    # ``SLOW_QUERY_MS`` (settings → env → default). Retries only
+    # fire OUTSIDE a transaction so committed work is never
+    # re-applied. ``RETRY_ATTEMPTS=1`` disables the retry loop.
+    RETRY_ATTEMPTS: int = 3
+    RETRY_BACKOFF: float = 0.1
+    # Per-block / per-request query-count guard. ``None`` disables
+    # the warning. When set, ``dorm.contrib.querycount.query_count_guard``
+    # uses this as the default ``warn_above`` if the caller doesn't
+    # pass one explicitly. Pair with the ``nplusone`` contrib for
+    # a fuller observability story.
+    QUERY_COUNT_WARN: int | None = None
+    # Sticky read-after-write window in seconds. After a write through
+    # ``router_db_for_write`` the DB router will keep returning the
+    # primary alias for reads of the same model for this many seconds,
+    # so a request that writes and immediately re-reads sees its own
+    # change instead of a stale replica row. Set to ``0`` or ``None``
+    # to disable.
+    READ_AFTER_WRITE_WINDOW: float | None = 3.0
 
     _configured = False
     # Names of settings the user passed to ``configure(...)`` at least
@@ -456,6 +475,16 @@ def configure(**kwargs):
             _invalidate_slow_query_cache()
         except Exception:
             pass
+    if "RETRY_ATTEMPTS" in kwargs or "RETRY_BACKOFF" in kwargs:
+        try:
+            from .db.utils import _invalidate_retry_cache
+            _invalidate_retry_cache()
+        except Exception:
+            pass
+    # Sticky read-after-write window state lives in a ContextVar so
+    # the router knows which (model, alias) pairs are still inside
+    # the freshness window. The settings change itself doesn't need
+    # to drop the ContextVar; future reads will see the new window.
 
 
 def _autodiscover_settings() -> bool:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import atexit
+import contextvars
 import threading
+import time as _stickytime
 from typing import Any
 
 from ..exceptions import ImproperlyConfigured
@@ -11,11 +13,100 @@ _async_connections: dict[str, Any] = {}
 _sync_lock = threading.Lock()
 
 
+# Sticky read-after-write state. Maps ``(app_label, ModelName)`` to the
+# ``time.monotonic()`` timestamp at which the freshness window expires.
+# Held in a ``ContextVar`` so concurrent ASGI requests / asyncio tasks
+# see independent windows — a write in request A doesn't pin reads in
+# request B to the primary.
+_sticky_until: contextvars.ContextVar[dict[tuple[str, str], float]] = (
+    contextvars.ContextVar("dorm_sticky_until", default={})
+)
+
+
+def _model_key(model: Any) -> tuple[str, str]:
+    """``(app_label, ModelName)`` for the sticky map. Falls back to a
+    safe sentinel when called with a non-model object so the helper
+    doesn't crash inside a router that exposes plain strings."""
+    meta = getattr(model, "_meta", None)
+    if meta is None:
+        return ("", getattr(model, "__name__", str(model)))
+    return (
+        getattr(meta, "app_label", "") or "",
+        getattr(meta, "model_name", "") or model.__class__.__name__,
+    )
+
+
+def _read_after_write_window() -> float:
+    """Configured sticky window in seconds (``0`` disables)."""
+    try:
+        from ..conf import settings
+
+        val = getattr(settings, "READ_AFTER_WRITE_WINDOW", None)
+    except Exception:
+        return 0.0
+    if val is None:
+        return 0.0
+    try:
+        return max(0.0, float(val))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _mark_recent_write(model: Any) -> None:
+    """Record a write through the router so subsequent reads of the
+    same model in the same context return the primary alias for the
+    configured window. Cheap no-op when the window is zero."""
+    window = _read_after_write_window()
+    if window <= 0:
+        return
+    key = _model_key(model)
+    current = _sticky_until.get()
+    # Copy-on-write so different tasks (sharing the same ContextVar
+    # default at start-of-task) end up with independent dicts.
+    nxt = dict(current)
+    nxt[key] = _stickytime.monotonic() + window
+    _sticky_until.set(nxt)
+
+
+def _is_sticky(model: Any) -> bool:
+    key = _model_key(model)
+    current = _sticky_until.get()
+    expires = current.get(key)
+    if expires is None:
+        return False
+    if expires <= _stickytime.monotonic():
+        # Expired — drop the entry so the dict doesn't grow unbounded
+        # across long-lived contexts. Copy-on-write again so we don't
+        # mutate the dict shared with sibling tasks.
+        nxt = {k: v for k, v in current.items() if k != key}
+        _sticky_until.set(nxt)
+        return False
+    return True
+
+
+def clear_read_after_write_window() -> None:
+    """Drop every recorded sticky entry on the current context. Useful
+    in tests or middleware that want a clean window per request."""
+    _sticky_until.set({})
+
+
 def router_db_for_read(model, *, default: str = "default", **hints) -> str:
     """Consult ``settings.DATABASE_ROUTERS`` for the alias to use when
     reading rows of *model*. First router that returns a truthy string
-    wins; otherwise *default*."""
+    wins; otherwise *default*.
+
+    When a write through :func:`router_db_for_write` happened on the
+    current context within the last
+    ``settings.READ_AFTER_WRITE_WINDOW`` seconds (default 3.0), the
+    router is *bypassed* and *default* is returned — so the request
+    that wrote the row sees its own change instead of a stale replica
+    snapshot. Pass ``sticky=False`` in ``hints`` to opt out of this
+    behaviour for a specific call (analytics queries that explicitly
+    want the replica even right after a write)."""
     from ..conf import settings
+
+    if hints.get("sticky", True) and _is_sticky(model):
+        return default
 
     for router in getattr(settings, "DATABASE_ROUTERS", []) or []:
         fn = getattr(router, "db_for_read", None)
@@ -31,8 +122,12 @@ def router_db_for_read(model, *, default: str = "default", **hints) -> str:
 
 
 def router_db_for_write(model, *, default: str = "default", **hints) -> str:
-    """Mirror of :func:`router_db_for_read` for writes."""
+    """Mirror of :func:`router_db_for_read` for writes. Records the
+    write so subsequent reads stay sticky to the primary for the
+    configured window."""
     from ..conf import settings
+
+    _mark_recent_write(model)
 
     for router in getattr(settings, "DATABASE_ROUTERS", []) or []:
         fn = getattr(router, "db_for_write", None)

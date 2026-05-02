@@ -144,6 +144,29 @@ Un pool cuyo `pool_available` se queda a cero con
 `requests_waiting > 0` durante periodos prolongados es el indicador
 adelantado de una app limitada por conexiones.
 
+## Seguridad de migraciones: `dorm lint-migrations`
+
+Audita cada migración en `INSTALLED_APPS` buscando footguns de
+deploy online. Sale con código != 0 ante hallazgos — engánchalo como
+gate de CI.
+
+```bash
+$ dorm lint-migrations
+DORM-M001 myapp/migrations/0003_add_score.py: AddField with null=False and a default backfills every row...
+
+1 finding(s).
+```
+
+| Código | Trigger | Motivo |
+|--------|---------|--------|
+| `DORM-M001` | `AddField(null=False, default=…)` | backfill de toda la tabla |
+| `DORM-M002` | `AlterField` cambio de tipo | reescritura de tabla en PG / MySQL |
+| `DORM-M003` | `AddIndex` sin `concurrently=True` (PG) | lock ACCESS EXCLUSIVE |
+| `DORM-M004` | `RunPython` sin `reverse_code` | migración irreversible |
+
+Silencia por archivo con `# noqa: DORM-M00X`. Salida JSON para CI:
+`dorm lint-migrations --format=json`.
+
 ## Despliegue de migraciones
 
 El orden recomendado:
@@ -201,6 +224,63 @@ es el indicador líder de una app constreñida por conexiones.
 Para debugging puntual, `qs.explain(analyze=True)` devuelve la
 salida del planner. Engánchalo a un endpoint solo-dev o úsalo en
 `dorm shell`.
+
+### Reintentos (`RETRY_ATTEMPTS` / `RETRY_BACKOFF`)
+
+Misma resolución que `SLOW_QUERY_MS` — setting explícito > env var >
+default. Solo se reintenta FUERA de transacción (dentro reaplicaría
+trabajo ya commiteado). `RETRY_ATTEMPTS=1` desactiva el bucle.
+Equivalentes en env: `DORM_RETRY_ATTEMPTS` / `DORM_RETRY_BACKOFF`.
+
+```python
+dorm.configure(RETRY_ATTEMPTS=5, RETRY_BACKOFF=0.25)
+```
+
+### Guardia de queries por bloque (`QUERY_COUNT_WARN`)
+
+Guard ligero contra N+1: cuenta queries dentro de un context manager
+y emite un WARNING si supera el umbral. Combínalo con
+`dorm.contrib.nplusone` para observabilidad más completa.
+
+```python
+from dorm.contrib.querycount import query_count_guard
+
+with query_count_guard(warn_above=20, label="GET /articles"):
+    return [article_dict(a) for a in Article.objects.all()]
+```
+
+`warn_above` cae a `settings.QUERY_COUNT_WARN` si el caller no lo
+pasa. ``None`` (default) deja el guard inerte (cuenta sin avisar).
+
+### Ventana sticky read-after-write (`READ_AFTER_WRITE_WINDOW`)
+
+Cuando `DATABASE_ROUTERS` enruta lecturas a una réplica, una request
+que escribe y vuelve a leer puede ver una fila stale antes de que la
+réplica replique. El router registra cada escritura por modelo en un
+`ContextVar` y fija las lecturas siguientes del mismo modelo al
+alias primary durante `READ_AFTER_WRITE_WINDOW` segundos (default
+3.0). `0` o `None` desactiva.
+
+Para queries de analítica que prefieren la réplica incluso justo
+tras una escritura, pasa `sticky=False` por los hints del router
+(reenviados por `Manager.get_queryset()` cuando llamas a
+``Model.objects.using("replica", sticky=False)``).
+
+### `dorm.contrib.querylog` — captura de queries por request
+
+Captura cada sentencia SQL dentro de un bloque ``QueryLog``. Middleware
+ASGI incluido: envuelve cada request HTTP / WebSocket y expone el
+log en ``scope["dorm_querylog"]``.
+
+```python
+from dorm.contrib.querylog import QueryLog, QueryLogASGIMiddleware
+
+with QueryLog() as log:
+    do_work()
+log.summary()
+
+app = QueryLogASGIMiddleware(your_asgi_app)
+```
 
 ### Aviso de query lenta (`SLOW_QUERY_MS`)
 

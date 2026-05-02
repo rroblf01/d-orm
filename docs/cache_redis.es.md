@@ -282,3 +282,37 @@ Cuándo **no**:
   rate ~0%, pagas serialización para nada.
 - **Counters de consistencia fuerte** — invalidación coarse
   los machaca constantemente.
+
+## LRU en proceso: `LocMemCache` (2.6+)
+
+Para tests, scripts mono-proceso o como capa local delante de Redis,
+usa el LRU en proceso sin pulling de `redis-py`:
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "dorm.cache.locmem.LocMemCache",
+        "OPTIONS": {"maxsize": 1024},
+        "TTL": 300,
+    }
+}
+```
+
+Mismo contrato que `RedisCache` — sync + async, `delete_pattern` para
+invalidación por señal. NO compartido entre procesos worker: cada
+gunicorn / uvicorn tiene su dict.
+
+## Row-cache: `Manager.cache_get(pk=…)` (2.6+)
+
+Lookup individual por PK que pasa por la cache antes de la DB.
+Usa la misma versión de invalidación por modelo que
+`QuerySet.cache(...)`, así que un `post_save` invalida ambos:
+
+```python
+user = User.objects.cache_get(pk=42, timeout=60)
+# Paridad async:
+user = await User.objects.acache_get(pk=42)
+```
+
+Misses caen silenciosamente a DB. Caída de cache también — la fila
+en DB es la fuente de verdad.

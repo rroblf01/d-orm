@@ -24,10 +24,15 @@ There is also a :class:`DormTestCase` mixin for unittest-style suites.
 
 from __future__ import annotations
 
-from typing import Any
+import contextvars
+import functools
+import threading
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 import pytest
 
+from . import signals
 from .transaction import atomic, aatomic
 
 
@@ -90,4 +95,119 @@ class DormTestCase:
         super().tearDown()  # type: ignore
 
 
-__all__ = ["transactional_db", "atransactional_db", "DormTestCase"]
+# ── assertNumQueries ─────────────────────────────────────────────────────────
+#
+# Django parity helper: assert exactly N queries fire inside a block.
+# Implementation mirrors ``dorm.contrib.querycount`` — a single
+# ``pre_query`` listener is connected on first use and increments a
+# per-task counter held in a ``ContextVar``, so async tests don't bleed
+# counters across tasks.
+
+_assert_count: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "dorm_test_assert_num_queries", default=None
+)
+
+_assert_listener_attached: bool = False
+_assert_listener_lock = threading.Lock()
+
+
+def _on_pre_query_assert(sender: Any, **kwargs: Any) -> None:
+    n = _assert_count.get()
+    if n is None:
+        return
+    _assert_count.set(n + 1)
+
+
+def _ensure_assert_listener() -> None:
+    global _assert_listener_attached
+    if _assert_listener_attached:
+        return
+    with _assert_listener_lock:
+        if _assert_listener_attached:
+            return
+        signals.pre_query.connect(_on_pre_query_assert, weak=False)
+        _assert_listener_attached = True
+
+
+class _NumQueriesContext:
+    """Returned by :func:`assertNumQueries` so tests can inspect the
+    actual count if they want a richer assertion than equality."""
+
+    __slots__ = ("count",)
+
+    def __init__(self) -> None:
+        self.count = 0
+
+
+@contextmanager
+def assertNumQueries(num: int) -> Iterator[_NumQueriesContext]:
+    """Assert that exactly *num* SQL statements fire inside the block.
+
+    Usage::
+
+        def test_list_view(transactional_db):
+            with assertNumQueries(3):
+                list(Article.objects.select_related("author")[:10])
+
+    The assertion runs on context exit; if the block raises, the
+    original exception propagates and the count assertion is skipped
+    (the failure is the more interesting signal). For a richer
+    handle, the context manager yields a small object whose ``count``
+    attribute holds the final count after exit::
+
+        with assertNumQueries(2) as ctx:
+            ...
+        # ctx.count == 2
+
+    Also usable as a decorator::
+
+        @assertNumQueries(1)
+        def test_loaded_with_one_query():
+            ...
+    """
+    _ensure_assert_listener()
+    state = _NumQueriesContext()
+    token = _assert_count.set(0)
+    try:
+        yield state
+    finally:
+        state.count = _assert_count.get() or 0
+        _assert_count.reset(token)
+    assert state.count == num, (
+        f"expected {num} query(ies), got {state.count}"
+    )
+
+
+# Allow ``@assertNumQueries(N)`` as a decorator on top of the
+# context-manager form. Wrapping ``contextmanager`` output is fiddly
+# because the generator-function it returns doesn't itself act as a
+# decorator factory, so we expose a tiny shim.
+def _decorate_with_num_queries(num: int):
+    def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(*a: Any, **kw: Any) -> Any:
+            with assertNumQueries(num):
+                return fn(*a, **kw)
+        return wrapper
+    return deco
+
+
+# Patch in the decorator behaviour without changing the public name.
+_assert_num_queries_cm = assertNumQueries
+
+
+def assertNumQueriesFactory(num: int):
+    """Decorator factory equivalent of :func:`assertNumQueries` —
+    use as ``@assertNumQueriesFactory(N)`` on a test function. The
+    context-manager form remains the primary API.
+    """
+    return _decorate_with_num_queries(num)
+
+
+__all__ = [
+    "transactional_db",
+    "atransactional_db",
+    "DormTestCase",
+    "assertNumQueries",
+    "assertNumQueriesFactory",
+]

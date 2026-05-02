@@ -114,9 +114,95 @@ def _invalidate_slow_query_cache() -> None:
 # transparently. Retrying *inside* a transaction is NOT safe — committed
 # state would be re-applied. Backends pass ``in_transaction=True`` to skip
 # retry when atomic_depth > 0.
+#
+# Resolution order for both ``RETRY_ATTEMPTS`` and ``RETRY_BACKOFF``:
+#   1. ``settings.RETRY_ATTEMPTS`` / ``settings.RETRY_BACKOFF`` (when the
+#      user passed it to ``configure``)
+#   2. env var ``DORM_RETRY_ATTEMPTS`` / ``DORM_RETRY_BACKOFF``
+#   3. built-in default (3 attempts / 0.1 s).
+#
+# Memoised the same way ``SLOW_QUERY_MS`` is — only settings-derived
+# values are cached; env / default branch re-reads each call so test
+# ``monkeypatch.setenv`` keeps working without manual invalidation.
 
-_TRANSIENT_RETRY_ATTEMPTS = int(os.environ.get("DORM_RETRY_ATTEMPTS", "3"))
-_TRANSIENT_RETRY_BACKOFF = float(os.environ.get("DORM_RETRY_BACKOFF", "0.1"))
+_RETRY_ATTEMPTS_CACHE: int | object = _SLOW_QUERY_UNSET
+_RETRY_BACKOFF_CACHE: float | object = _SLOW_QUERY_UNSET
+
+
+def _resolve_retry_attempts() -> tuple[int, bool]:
+    try:
+        from ..conf import settings
+
+        explicit = getattr(settings, "_explicit_settings", set())
+        if "RETRY_ATTEMPTS" in explicit:
+            try:
+                return int(settings.RETRY_ATTEMPTS), True
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+    raw = os.environ.get("DORM_RETRY_ATTEMPTS")
+    if raw is not None:
+        try:
+            return int(raw), False
+        except (TypeError, ValueError):
+            pass
+    return 3, False
+
+
+def _resolve_retry_backoff() -> tuple[float, bool]:
+    try:
+        from ..conf import settings
+
+        explicit = getattr(settings, "_explicit_settings", set())
+        if "RETRY_BACKOFF" in explicit:
+            try:
+                return float(settings.RETRY_BACKOFF), True
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+    raw = os.environ.get("DORM_RETRY_BACKOFF")
+    if raw is not None:
+        try:
+            return float(raw), False
+        except (TypeError, ValueError):
+            pass
+    return 0.1, False
+
+
+def _retry_attempts() -> int:
+    global _RETRY_ATTEMPTS_CACHE
+    cached = _RETRY_ATTEMPTS_CACHE
+    if cached is not _SLOW_QUERY_UNSET:
+        assert isinstance(cached, int)
+        return cached
+    val, cacheable = _resolve_retry_attempts()
+    if cacheable:
+        _RETRY_ATTEMPTS_CACHE = val
+    return val
+
+
+def _retry_backoff() -> float:
+    global _RETRY_BACKOFF_CACHE
+    cached = _RETRY_BACKOFF_CACHE
+    if cached is not _SLOW_QUERY_UNSET:
+        assert isinstance(cached, float)
+        return cached
+    val, cacheable = _resolve_retry_backoff()
+    if cacheable:
+        _RETRY_BACKOFF_CACHE = val
+    return val
+
+
+def _invalidate_retry_cache() -> None:
+    """Drop the memoised retry knobs. Called by ``conf.configure`` whenever
+    ``RETRY_ATTEMPTS`` / ``RETRY_BACKOFF`` are part of the kwargs."""
+    global _RETRY_ATTEMPTS_CACHE, _RETRY_BACKOFF_CACHE
+    _RETRY_ATTEMPTS_CACHE = _SLOW_QUERY_UNSET
+    _RETRY_BACKOFF_CACHE = _SLOW_QUERY_UNSET
+
+
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -150,8 +236,8 @@ def with_transient_retry(
     """Run ``func()`` with simple exponential-backoff retry on transient
     DB errors. Skips retries while inside a transaction (would re-apply
     already-committed work)."""
-    n = attempts if attempts is not None else _TRANSIENT_RETRY_ATTEMPTS
-    bo = backoff if backoff is not None else _TRANSIENT_RETRY_BACKOFF
+    n = attempts if attempts is not None else _retry_attempts()
+    bo = backoff if backoff is not None else _retry_backoff()
     if in_transaction or n <= 1:
         return func()
 
@@ -190,8 +276,8 @@ async def awith_transient_retry(
     coroutines can only be awaited once."""
     import asyncio
 
-    n = attempts if attempts is not None else _TRANSIENT_RETRY_ATTEMPTS
-    bo = backoff if backoff is not None else _TRANSIENT_RETRY_BACKOFF
+    n = attempts if attempts is not None else _retry_attempts()
+    bo = backoff if backoff is not None else _retry_backoff()
     if in_transaction or n <= 1:
         return await coro_factory()
 

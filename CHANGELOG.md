@@ -8,11 +8,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.6.0] - 2026-05-02
 
-Minor release. Single feature: the slow-query warning threshold
-is now configurable via ``settings.SLOW_QUERY_MS`` (previously
-env-var only). Zero performance impact — the timing it relies on
-was already happening unconditionally for the
-``pre_query`` / ``post_query`` signals.
+Minor release. Observability and dev-tooling pass — every
+addition is opt-in or zero-cost when unused, so existing apps
+upgrade with no behaviour change.
 
 ### Added — `settings.SLOW_QUERY_MS`
 
@@ -56,13 +54,116 @@ was already happening unconditionally for the
   ``tests/test_production_readiness.py`` keep working unchanged
   (env path is still active when no explicit setting is given).
 
+### Added — `settings.RETRY_ATTEMPTS` / `settings.RETRY_BACKOFF`
+
+- Same resolver shape as ``SLOW_QUERY_MS``: explicit setting >
+  env var (``DORM_RETRY_ATTEMPTS`` / ``DORM_RETRY_BACKOFF``) >
+  default (3 attempts / 0.1 s). The retry loop in
+  ``with_transient_retry`` / ``awith_transient_retry`` now
+  reads the resolved value on every call so a runtime
+  ``configure(...)`` swap takes effect without a restart.
+- Settings-derived values are memoised; env-var path re-reads
+  each call so test ``monkeypatch.setenv`` keeps working.
+
+### Added — query-count guard (`dorm.contrib.querycount`)
+
+- New ``query_count_guard(warn_above=…, label=…)`` context
+  manager. Counts queries inside the block via ``pre_query``
+  and emits a single ``WARNING`` when the count crosses the
+  threshold. ``warn_above`` falls back to
+  ``settings.QUERY_COUNT_WARN`` (default ``None``, inert).
+- Per-task isolation via ``ContextVar`` — concurrent ASGI
+  requests / asyncio tasks get independent counters.
+
+### Added — `dorm.test.assertNumQueries`
+
+- Django-parity helper. Context-manager form asserts an exact
+  query count on exit; decorator form
+  (``assertNumQueriesFactory(N)``) wraps a test function. Both
+  use the same ``ContextVar``-based listener as the query-count
+  guard so async tests don't bleed counters across tasks.
+
+### Added — sticky read-after-write window
+
+- ``settings.READ_AFTER_WRITE_WINDOW`` (default ``3.0``
+  seconds). After a write through ``router_db_for_write``, the
+  router pins reads of the same model on the same context to
+  the primary alias for the configured window — so a request
+  that writes and immediately re-reads sees its own change
+  instead of a stale replica row. ``0`` / ``None`` disables.
+- Sticky state lives in a ``ContextVar``, so concurrent ASGI
+  requests / asyncio tasks see independent windows.
+- New helper ``dorm.db.connection.clear_read_after_write_window``
+  for tests / middleware that want a clean window per request.
+- Pass ``sticky=False`` through the router hints (e.g.
+  ``Model.objects.using("replica", sticky=False)``) to opt out
+  of the pin for analytics queries that explicitly want the
+  replica.
+
+### Added — `dorm lint-migrations`
+
+- New CLI command + ``dorm.migrations.lint`` API. Walks every
+  migration in ``INSTALLED_APPS`` and emits findings for known
+  online-deploy footguns. Exits non-zero on findings — wire as
+  a CI gate.
+- Rules: ``DORM-M001`` AddField NOT NULL with default
+  (full-table backfill), ``DORM-M002`` AlterField type change
+  (table rewrite), ``DORM-M003`` AddIndex without
+  ``concurrently=True`` (PG ACCESS EXCLUSIVE lock),
+  ``DORM-M004`` RunPython without ``reverse_code``
+  (irreversible).
+- ``--format=json`` for machine-parseable output. Suppress
+  per-file with ``# noqa: DORM-M00X``.
+
+### Added — `dorm migrate --plan`
+
+- Alias for the existing ``--dry-run`` flag, mirroring
+  Django's command name. Prints the SQL that would be
+  executed without touching the database. The migration
+  recorder is NOT updated.
+
+### Added — request-scoped query collector (`dorm.contrib.querylog`)
+
+- ``QueryLog`` context manager captures every SQL statement
+  inside a block: ``sql`` / ``params`` / ``alias`` /
+  ``elapsed_ms`` / ``error``. ``summary()`` groups by SQL
+  template (placeholders normalised to ``?``) with count /
+  total / p50 / p95 timings.
+- ``QueryLogASGIMiddleware`` wraps any ASGI app; the per-request
+  log lands on ``scope["dorm_querylog"]`` for downstream
+  handlers / middlewares to inspect.
+
+### Added — `LocMemCache` cache backend (`dorm.cache.locmem`)
+
+- Thread-safe ``OrderedDict``-backed LRU. Same
+  :class:`BaseCache` contract as ``RedisCache`` — sync + async
+  helpers, ``delete_pattern`` for signal-driven invalidation,
+  ``OPTIONS["maxsize"]`` cap.
+- Useful for tests, single-process scripts, or as a layer in
+  front of Redis. NOT shared across worker processes.
+
+### Added — single-row cache (`Manager.cache_get`)
+
+- ``Model.objects.cache_get(pk=…, timeout=…, using=…)`` reads
+  through the configured cache before falling through to the
+  DB. Uses the per-model invalidation version so a
+  ``post_save`` on the model bumps both queryset-cache entries
+  and row-cache entries in lock-step.
+- Async parity via ``acache_get``. Cache miss / outage falls
+  through silently — same ``try / except`` policy as
+  ``RedisCache``.
+
 ### CLI
 
-- ``dorm init`` now scaffolds the new setting in the generated
-  ``settings.py`` (``SLOW_QUERY_MS = 500.0``) with an inline
-  comment block documenting the resolution order and the
-  ``None`` / ``0`` escape hatches. Existing files are left
-  untouched (idempotent ``init`` is unchanged).
+- ``dorm init`` template now scaffolds (commented-out by default
+  except for ``SLOW_QUERY_MS``) every new 2.6 knob:
+  ``RETRY_ATTEMPTS``, ``RETRY_BACKOFF``, ``QUERY_COUNT_WARN``,
+  ``READ_AFTER_WRITE_WINDOW``, ``DATABASE_ROUTERS`` example,
+  and a ``CACHES`` block with both Redis and LocMemCache
+  examples.
+- ``dorm lint-migrations`` registered as a top-level subcommand.
+- ``dorm migrate --plan`` accepted as an alias for
+  ``--dry-run``.
 
 ### Documentation
 

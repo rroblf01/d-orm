@@ -132,6 +132,132 @@ class BaseManager(Generic[_T]):
     def get_or_none(self, *args: Any, **kwargs: Any) -> _T | None:
         return self.get_queryset().get_or_none(*args, **kwargs)
 
+    def cache_get(
+        self,
+        *,
+        pk: Any,
+        timeout: int | None = None,
+        using: str = "default",
+    ) -> _T:
+        """Read a single row by primary key, going through the cache
+        layer first.
+
+        Lookup flow:
+
+        1. Build a cache key namespaced by the model's app/name and
+           the per-model invalidation version. A racing
+           ``Model.save()`` bumps the version, so the entry written
+           by an in-flight reader points at a key no later read will
+           ask for — same anti-stale-read invariant the queryset
+           cache uses.
+        2. ``get`` → unpickle → return when present (HMAC verified
+           inside :func:`dorm.cache.verify_payload`; tampered or
+           unsigned blobs are dropped silently and treated as a
+           miss).
+        3. On miss, fall through to ``Manager.get(pk=…)``, write the
+           pickle of the result back into the cache, return.
+
+        Cache miss is silent — the database read is the source of
+        truth. Cache outages also fall through; the queryset layer's
+        ``try / except`` policy applies here too.
+        """
+        from .cache import (
+            get_cache,
+            model_cache_namespace,
+            model_cache_version,
+            sign_payload,
+            verify_payload,
+        )
+        from .exceptions import ImproperlyConfigured
+        import pickle
+
+        assert self.model is not None
+        try:
+            cache = get_cache(using)
+        except ImproperlyConfigured:
+            return self.get(pk=pk)
+
+        version = model_cache_version(self.model)
+        key = f"dormrow:{model_cache_namespace(self.model)}:v{version}:{pk}"
+
+        try:
+            blob = cache.get(key)
+        except Exception:
+            blob = None
+        if blob is not None:
+            payload = verify_payload(blob)
+            if payload is not None:
+                try:
+                    return pickle.loads(payload)
+                except Exception:
+                    # Corrupt entry: drop and fall through to the DB.
+                    try:
+                        cache.delete(key)
+                    except Exception:
+                        pass
+
+        instance = self.get(pk=pk)
+        # Re-read the version after the DB hit so a write that landed
+        # mid-fetch lands its bytes under a key nobody will read.
+        version_after = model_cache_version(self.model)
+        store_key = f"dormrow:{model_cache_namespace(self.model)}:v{version_after}:{pk}"
+        try:
+            cache.set(store_key, sign_payload(pickle.dumps(instance)), timeout)
+        except Exception:
+            pass
+        return instance
+
+    async def acache_get(
+        self,
+        *,
+        pk: Any,
+        timeout: int | None = None,
+        using: str = "default",
+    ) -> _T:
+        """Async counterpart of :meth:`cache_get`."""
+        from .cache import (
+            get_cache,
+            model_cache_namespace,
+            model_cache_version,
+            sign_payload,
+            verify_payload,
+        )
+        from .exceptions import ImproperlyConfigured
+        import pickle
+
+        assert self.model is not None
+        try:
+            cache = get_cache(using)
+        except ImproperlyConfigured:
+            return await self.aget(pk=pk)
+
+        version = model_cache_version(self.model)
+        key = f"dormrow:{model_cache_namespace(self.model)}:v{version}:{pk}"
+
+        try:
+            blob = await cache.aget(key)
+        except Exception:
+            blob = None
+        if blob is not None:
+            payload = verify_payload(blob)
+            if payload is not None:
+                try:
+                    return pickle.loads(payload)
+                except Exception:
+                    try:
+                        await cache.adelete(key)
+                    except Exception:
+                        pass
+
+        instance = await self.aget(pk=pk)
+        version_after = model_cache_version(self.model)
+        store_key = f"dormrow:{model_cache_namespace(self.model)}:v{version_after}:{pk}"
+        try:
+            await cache.aset(store_key, sign_payload(pickle.dumps(instance)), timeout)
+        except Exception:
+            pass
+        return instance
+
     def only(self, *fields: str) -> QuerySet[_T]:
         return self.get_queryset().only(*fields)
 

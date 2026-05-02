@@ -308,3 +308,37 @@ When **not** to cache:
 - **Strongly-consistent counters** — auto-invalidation is
   coarse, so a fast-write counter would invalidate constantly
   and hammer the cache.
+
+## In-process LRU: `LocMemCache` (2.6+)
+
+For tests, single-process scripts, or as a layer in front of Redis,
+use the bundled in-process LRU instead of pulling in `redis-py`:
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "dorm.cache.locmem.LocMemCache",
+        "OPTIONS": {"maxsize": 1024},  # entries; LRU eviction beyond
+        "TTL": 300,
+    }
+}
+```
+
+Same contract as `RedisCache` — sync + async helpers, `delete_pattern`
+for signal-driven invalidation. NOT shared across worker processes:
+each gunicorn / uvicorn worker holds its own dict.
+
+## Row-cache: `Manager.cache_get(pk=…)` (2.6+)
+
+Single-row lookup that goes through the cache before hitting the DB.
+Uses the same per-model invalidation version as `QuerySet.cache(...)`,
+so a `post_save` from any path invalidates both:
+
+```python
+user = User.objects.cache_get(pk=42, timeout=60)
+# Async parity:
+user = await User.objects.acache_get(pk=42)
+```
+
+Cache misses fall through silently. Cache outages also fall
+through — the row from the database is the source of truth.

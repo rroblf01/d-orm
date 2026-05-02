@@ -445,6 +445,34 @@ def cmd_dbcheck(args):
     print("\nAll checked models match the database schema.")
 
 
+def cmd_lint_migrations(args):
+    """Walk every ``INSTALLED_APPS`` migration directory and emit lint
+    findings for known unsafe-online patterns.
+
+    Exits non-zero when any finding is produced (CI gate). Use the
+    ``--format=json`` flag to feed downstream tooling instead of human
+    output.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings as _settings_runtime
+    from .migrations.lint import LintResult, lint_directory
+
+    apps = list(_settings_runtime.INSTALLED_APPS)
+    aggregate = LintResult()
+    for app in apps:
+        mig_dir = _find_migrations_dir(app)
+        sub = lint_directory(mig_dir)
+        aggregate.findings.extend(sub.findings)
+
+    if args.format == "json":
+        print(aggregate.to_json())
+    else:
+        print(aggregate.to_text())
+    sys.exit(0 if aggregate.ok else 1)
+
+
 def cmd_dbshell(args):
     """Drop into the underlying database client (``psql`` for PostgreSQL,
     ``sqlite3`` for SQLite) with credentials and database name pre-filled
@@ -614,6 +642,70 @@ Uncomment the DATABASES block for the backend you want to use.
 # Set to ``None`` to disable the warning entirely. Set to ``0`` to log every
 # query as slow (handy in development without flipping the full DEBUG stream).
 SLOW_QUERY_MS = 500.0
+
+# Transient-error retry. When the DB connection drops (network blip, RDS
+# failover, server restart) dorm retries the operation outside an active
+# transaction. Same resolution shape as ``SLOW_QUERY_MS``: this setting >
+# env var > default. ``RETRY_ATTEMPTS=1`` disables retries.
+# RETRY_ATTEMPTS = 3
+# RETRY_BACKOFF = 0.1   # seconds; doubled per attempt (exp backoff)
+
+# Per-block query-count guard threshold. ``None`` (default) leaves the guard
+# inert. Used by ``dorm.contrib.querycount.query_count_guard`` as the
+# fallback ``warn_above`` when the caller doesn't pass one — pair with
+# ``nplusone`` for a fuller observability story.
+# QUERY_COUNT_WARN = 50
+
+# Sticky read-after-write window (seconds). After a write through the DB
+# router, reads of the same model on the same context are pinned to the
+# primary alias for this many seconds — so a request that writes and
+# immediately re-reads sees its own change instead of a stale replica
+# row. ``0`` or ``None`` disables.
+# READ_AFTER_WRITE_WINDOW = 3.0
+
+# ── DB router (read replicas) ─────────────────────────────────────────────────
+# Route reads to a replica alias declared in DATABASES. The ``settings.py``
+# example below is commented out by default; uncomment and replace with
+# your own router.
+#
+# class PrimaryReplicaRouter:
+#     def db_for_read(self, model, **hints):
+#         return "replica"
+#     def db_for_write(self, model, **hints):
+#         return "default"
+#
+# DATABASE_ROUTERS = [PrimaryReplicaRouter()]
+
+# ── Result cache ──────────────────────────────────────────────────────────────
+# Uncomment one of the blocks below to enable ``QuerySet.cache(...)`` and
+# ``Manager.cache_get(pk=…)``. Without CACHES configured both APIs become
+# no-ops (queryset cache returns the original queryset; cache_get falls
+# straight through to the DB).
+#
+# Redis (multi-worker, production):
+# CACHES = {
+#     "default": {
+#         "BACKEND": "dorm.cache.redis.RedisCache",
+#         "LOCATION": "redis://localhost:6379/0",
+#         "TTL": 300,
+#     }
+# }
+#
+# In-process LRU (tests, single-process scripts, or a layer in front of Redis):
+# CACHES = {
+#     "default": {
+#         "BACKEND": "dorm.cache.locmem.LocMemCache",
+#         "OPTIONS": {"maxsize": 1024},
+#         "TTL": 300,
+#     }
+# }
+#
+# Cache payloads are HMAC-signed before pickle to avoid RCE on a writable
+# Redis instance — set CACHE_SIGNING_KEY (recommended) or rely on
+# SECRET_KEY. Without either, dorm derives a per-process random key and
+# logs a one-time warning.
+# CACHE_SIGNING_KEY = ""
+# CACHE_REQUIRE_SIGNING_KEY = False  # raise instead of falling back, in prod
 
 # ── File storage (dorm.FileField) ─────────────────────────────────────────────
 # Uncomment one of the blocks below if you use ``dorm.FileField``. If left
@@ -1123,12 +1215,15 @@ def main():
     mg.add_argument("--verbosity", type=int, default=1)
     mg.add_argument(
         "--dry-run",
+        "--plan",
+        dest="dry_run",
         action="store_true",
         default=False,
         help="Print the SQL that would be executed without touching the "
         "database. The migration recorder is NOT updated, so the "
         "next run still sees the same set of pending migrations. "
-        "Recommended as a pre-deploy review step.",
+        "Recommended as a pre-deploy review step. ``--plan`` is an "
+        "alias kept for users coming from Django's migrate command.",
     )
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)
@@ -1240,6 +1335,24 @@ def main():
         help="DATABASES alias to connect to (default: 'default').",
     )
     dbsh.set_defaults(func=cmd_dbshell)
+
+    # lint-migrations
+    lm = sub.add_parser(
+        "lint-migrations",
+        help=(
+            "Audit every migration in INSTALLED_APPS for online-safe "
+            "deploy footguns (DORM-M001..M005). Exits non-zero on findings — "
+            "wire it into CI as a pre-merge gate."
+        ),
+    )
+    lm.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text).",
+    )
+    lm.add_argument("--settings", default=None)
+    lm.set_defaults(func=cmd_lint_migrations)
 
     # inspectdb
     isp = sub.add_parser(
