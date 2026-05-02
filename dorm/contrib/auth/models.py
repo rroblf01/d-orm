@@ -79,9 +79,16 @@ class UserManager(dorm.Manager):
             raise ValueError("create_user requires an email.")
         # ``self.model`` is set via ``contribute_to_class``; ty sees
         # the type as ``type[Any] | None`` because the attribute
-        # carries that union at the BaseManager level.
+        # carries that union at the BaseManager level. Use a real
+        # runtime check (not ``assert`` — strippable with
+        # ``python -O``) so a misconfigured Manager fails loudly
+        # instead of crashing on the next line.
         model_cls = self.model
-        assert model_cls is not None
+        if model_cls is None:
+            raise RuntimeError(
+                "UserManager.model is unset — was the manager attached "
+                "to a model via ``contribute_to_class``?"
+            )
         user: "User" = model_cls(
             email=email.lower().strip(),
             username=username or email.lower().strip(),

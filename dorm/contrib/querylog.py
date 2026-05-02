@@ -39,7 +39,13 @@ def _template(sql: str) -> str:
 class QueryRecord:
     sql: str
     params: Any
-    alias: str
+    # Vendor / engine name (``"sqlite"``, ``"postgresql"``, ``"libsql"``)
+    # — sourced from the ``sender`` of the ``post_query`` signal.
+    # We surface ``vendor`` rather than ``alias`` because the
+    # signal payload doesn't carry the alias today; if a future
+    # release threads ``alias`` through ``log_query`` we can add
+    # the field without breaking the existing one.
+    vendor: str
     elapsed_ms: float
     error: BaseException | None
 
@@ -50,7 +56,7 @@ class QueryRecord:
         return {
             "sql": self.sql,
             "params": list(self.params) if self.params else [],
-            "alias": self.alias,
+            "vendor": self.vendor,
             "elapsed_ms": round(self.elapsed_ms, 3),
             "error": (
                 f"{type(self.error).__name__}: {self.error}"
@@ -83,7 +89,7 @@ def _record(state: list[QueryRecord], kwargs: dict[str, Any]) -> None:
         QueryRecord(
             sql=str(kwargs.get("sql", "")),
             params=kwargs.get("params"),
-            alias=str(kwargs.get("sender", "")),
+            vendor=str(kwargs.get("sender", "")),
             elapsed_ms=float(kwargs.get("elapsed_ms", 0.0)),
             error=kwargs.get("error"),
         )

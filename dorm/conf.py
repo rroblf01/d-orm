@@ -229,8 +229,12 @@ class Settings:
     # Application-level field encryption (``dorm.contrib.encrypted``).
     # Single-key form for the simple case; switch to the list when
     # rotating. Both empty by default — opt in by setting one.
+    # ``FIELD_ENCRYPTION_KEYS`` is initialised in ``__init__`` so the
+    # mutable default isn't shared across hypothetical Settings
+    # instances (the singleton-style usage pattern wouldn't notice,
+    # but a future test fixture that creates a second ``Settings()``
+    # would).
     FIELD_ENCRYPTION_KEY: str = ""
-    FIELD_ENCRYPTION_KEYS: list = []
 
     _configured = False
 
@@ -241,6 +245,10 @@ class Settings:
         # so a hypothetical second ``Settings()`` doesn't share state
         # with the singleton.
         self._explicit_settings: set[str] = set()
+        # Mutable list defaults must live on the instance — class-level
+        # ``foo: list = []`` shares the same list across every
+        # instance.
+        self.FIELD_ENCRYPTION_KEYS: list = []
 
     def configure(self, **kwargs):
         self._explicit_settings.update(kwargs.keys())

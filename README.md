@@ -2,7 +2,24 @@
 
 A Django-inspired ORM for Python with full **synchronous and asynchronous** support. The same API you know from Django, without depending on the full framework.
 
-Works with **SQLite** and **PostgreSQL**, and ships with a migration system, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related`), aggregations, DB functions and much more — all with real static typing (`Field[T]`).
+Works with **SQLite**, **PostgreSQL** and **libsql / Turso**. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related`), aggregations, DB functions, async-native ORM path, queryset & row caching, and Pydantic interop — all with real static typing (`Field[T]`).
+
+## What's new in 3.0
+
+- **`dorm.contrib.auth`** — `User` / `Group` / `Permission` with stdlib PBKDF2 hashing. Same shape as Django, no `passlib` dependency.
+- **`dorm.contrib.encrypted`** — `EncryptedCharField` / `EncryptedTextField` (AES-GCM with key rotation; `pip install 'djanorm[encrypted]'`).
+- **`dorm.contrib.asyncguard`** — surfaces sync ORM calls inside an event loop as warnings or exceptions.
+- **`dorm.contrib.querylog`** + **`dorm.contrib.querycount`** — request-scoped collectors for SQL traffic and N+1 guards.
+- **`dorm.contrib.prometheus`** — stdlib-only metrics exposer for the `/metrics` endpoint.
+- **`dorm lint-migrations`** — pre-merge gate that flags online-deploy footguns (full-table backfills, missing `concurrently=True`, irreversible `RunPython`).
+- **`LocMemCache`** + **`Manager.cache_get(pk=…)`** / `cache_get_many(pks=[…])` — in-process LRU + single-row caching that piggy-backs on the same invalidation signal as queryset cache.
+- **Sticky read-after-write window** for the DB router — no stale replica reads after a write on the same request.
+- **`settings.SLOW_QUERY_MS`** — slow-query WARNING; `settings.RETRY_ATTEMPTS` / `RETRY_BACKOFF` — transient-error retry knobs (resolution: explicit setting > env var > default).
+- **`dorm.test.assertNumQueries`** + `assertMaxQueries` — context-manager and decorator forms (sync + async).
+- **Async-aware `dorm shell`** — top-level `await` works in the stdlib REPL fallback.
+- **Math / string DB functions** — `Power`, `Sqrt`, `Mod`, `Sign`, `Ceil`, `Floor`, `Log`, `Ln`, `Exp`, `Random`, `Trim`, `LTrim`, `RTrim`, `NullIf`.
+
+Full notes in [CHANGELOG.md](CHANGELOG.md). **Zero breaking changes vs 2.5** — every addition is opt-in or zero-cost when unused.
 
 ## Installation
 
@@ -12,6 +29,14 @@ pip install "djanorm[sqlite]"
 
 # PostgreSQL
 pip install "djanorm[postgresql]"
+
+# libsql / Turso (local, embedded replica or remote)
+pip install "djanorm[libsql]"
+
+# Optional extras
+pip install "djanorm[redis]"      # queryset + row cache backend
+pip install "djanorm[encrypted]"  # AES-GCM EncryptedCharField/TextField
+pip install "djanorm[pydantic]"   # FastAPI-friendly DormSchema
 ```
 
 ## Quick start

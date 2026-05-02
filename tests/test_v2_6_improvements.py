@@ -571,13 +571,13 @@ def test_dorm_test_module_exports_assertions_without_pytest_runtime():
 def test_query_record_has_slots_and_to_dict():
     from dorm.contrib.querylog import QueryRecord
 
-    r = QueryRecord(sql="SELECT 1", params=None, alias="default", elapsed_ms=1.5, error=None)
+    r = QueryRecord(sql="SELECT 1", params=None, vendor="sqlite", elapsed_ms=1.5, error=None)
     # ``slots=True`` means setting a new attribute raises.
     with pytest.raises(AttributeError):
         r.foo = "bar"  # type: ignore[attr-defined]
     d = r.to_dict()
     assert d["sql"] == "SELECT 1"
-    assert d["alias"] == "default"
+    assert d["vendor"] == "sqlite"
     assert d["error"] is None
 
 

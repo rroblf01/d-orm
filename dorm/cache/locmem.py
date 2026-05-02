@@ -55,16 +55,30 @@ class LocMemCache(BaseCache):
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _prefix_of(key: str) -> str:
-        # Last ``:`` carves off the variable suffix (pk, version, hash);
-        # everything before it is the model / queryset namespace.
+    def _prefix_of(key: str) -> str | None:
+        """Namespace prefix for the secondary index, or ``None`` when
+        the key has no ``:`` (and so isn't shaped like one of dorm's
+        cache keys).
+
+        Returning ``None`` keeps the bucket honest: a key like
+        ``"foo"`` would otherwise share bucket ``"foo"`` with keys
+        like ``"foo:bar"``, and ``delete_pattern("foo:*")`` would
+        evict the bare ``"foo"`` entry — wrong, since that key
+        does NOT match the glob.
+        """
+        if ":" not in key:
+            return None
         return key.rsplit(":", 1)[0]
 
     def _index_add(self, key: str) -> None:
-        self._by_prefix[self._prefix_of(key)].add(key)
+        prefix = self._prefix_of(key)
+        if prefix is not None:
+            self._by_prefix[prefix].add(key)
 
     def _index_remove(self, key: str) -> None:
         prefix = self._prefix_of(key)
+        if prefix is None:
+            return
         bucket = self._by_prefix.get(prefix)
         if bucket is None:
             return

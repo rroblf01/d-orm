@@ -46,12 +46,15 @@ _HISTOGRAM_BUCKETS_S: tuple[float, ...] = (
     1.0, 2.5, 5.0,
 )
 
-# State shared by all collectors. Buckets-per-(vendor, alias) for
-# histogram counts; counters by labels.
-_query_counter: dict[tuple[str, str, str], int] = {}
-_duration_buckets: dict[tuple[str, str], list[int]] = {}
-_duration_sum: dict[tuple[str, str], float] = {}
-_duration_count: dict[tuple[str, str], int] = {}
+# State shared by all collectors. Histograms and counters are
+# bucketed by (vendor, outcome) — the ``post_query`` signal carries
+# ``sender`` (vendor name) but not the DB alias, so an ``alias``
+# label would always be empty. If a future release threads ``alias``
+# through ``log_query``, plumb it back in here.
+_query_counter: dict[tuple[str, str], int] = {}
+_duration_buckets: dict[str, list[int]] = {}
+_duration_sum: dict[str, float] = {}
+_duration_count: dict[str, int] = {}
 
 _cache_hits: dict[str, int] = {}
 _cache_misses: dict[str, int] = {}
@@ -59,17 +62,16 @@ _cache_misses: dict[str, int] = {}
 _installed: bool = False
 
 
-def _bump_query(vendor: str, alias: str, outcome: str) -> None:
-    key = (vendor, alias, outcome)
+def _bump_query(vendor: str, outcome: str) -> None:
+    key = (vendor, outcome)
     with _lock:
         _query_counter[key] = _query_counter.get(key, 0) + 1
 
 
-def _observe_duration(vendor: str, alias: str, seconds: float) -> None:
-    key = (vendor, alias)
+def _observe_duration(vendor: str, seconds: float) -> None:
     with _lock:
         bucket_counts = _duration_buckets.setdefault(
-            key, [0] * len(_HISTOGRAM_BUCKETS_S)
+            vendor, [0] * len(_HISTOGRAM_BUCKETS_S)
         )
         # Each bucket is "<= upper bound": increment every bucket
         # whose upper bound is ≥ the observation. Standard Prometheus
@@ -77,21 +79,17 @@ def _observe_duration(vendor: str, alias: str, seconds: float) -> None:
         for i, bound in enumerate(_HISTOGRAM_BUCKETS_S):
             if seconds <= bound:
                 bucket_counts[i] += 1
-        _duration_sum[key] = _duration_sum.get(key, 0.0) + seconds
-        _duration_count[key] = _duration_count.get(key, 0) + 1
+        _duration_sum[vendor] = _duration_sum.get(vendor, 0.0) + seconds
+        _duration_count[vendor] = _duration_count.get(vendor, 0) + 1
 
 
 def _on_post_query(sender: Any, **kwargs: Any) -> None:
     vendor = str(sender)
-    # ``alias`` isn't currently passed through ``post_query`` — we
-    # bucket by the empty string for now and add the label as soon as
-    # the signal carries it. Better than dropping the metric.
-    alias = str(kwargs.get("alias", ""))
     error = kwargs.get("error")
     outcome = "error" if error is not None else "ok"
-    _bump_query(vendor, alias, outcome)
+    _bump_query(vendor, outcome)
     elapsed_ms = float(kwargs.get("elapsed_ms", 0.0))
-    _observe_duration(vendor, alias, elapsed_ms / 1000.0)
+    _observe_duration(vendor, elapsed_ms / 1000.0)
 
 
 def install() -> None:
@@ -193,29 +191,28 @@ def metrics_response() -> str:
         if _query_counter:
             out.append("# HELP dorm_queries_total Total executed SQL statements.")
             out.append("# TYPE dorm_queries_total counter")
-            for (vendor, alias, outcome), n in _query_counter.items():
-                labels = _label_pairs(vendor=vendor, alias=alias, outcome=outcome)
+            for (vendor, outcome), n in _query_counter.items():
+                labels = _label_pairs(vendor=vendor, outcome=outcome)
                 out.append(f"dorm_queries_total{labels} {n}")
 
         # Histogram: query duration
         if _duration_buckets:
             out.append("# HELP dorm_query_duration_seconds Query duration histogram.")
             out.append("# TYPE dorm_query_duration_seconds histogram")
-            for (vendor, alias), counts in _duration_buckets.items():
-                base_labels = {"vendor": vendor, "alias": alias}
+            for vendor, counts in _duration_buckets.items():
                 for i, bound in enumerate(_HISTOGRAM_BUCKETS_S):
-                    labels = _label_pairs(le=str(bound), **base_labels)
+                    labels = _label_pairs(le=str(bound), vendor=vendor)
                     out.append(
                         f"dorm_query_duration_seconds_bucket{labels} {counts[i]}"
                     )
                 # +Inf bucket equals the total count.
-                total = _duration_count.get((vendor, alias), 0)
-                labels = _label_pairs(le="+Inf", **base_labels)
+                total = _duration_count.get(vendor, 0)
+                labels = _label_pairs(le="+Inf", vendor=vendor)
                 out.append(f"dorm_query_duration_seconds_bucket{labels} {total}")
-                base = _label_pairs(**base_labels)
+                base = _label_pairs(vendor=vendor)
                 out.append(
                     f"dorm_query_duration_seconds_sum{base} "
-                    f"{_duration_sum.get((vendor, alias), 0.0)}"
+                    f"{_duration_sum.get(vendor, 0.0)}"
                 )
                 out.append(f"dorm_query_duration_seconds_count{base} {total}")
 

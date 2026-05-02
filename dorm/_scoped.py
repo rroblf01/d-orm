@@ -66,7 +66,14 @@ class ScopedCollector(Generic[S]):
                 state = self._var.get()
                 if state is None:
                     return
-                self._on_event(state, kwargs)
+                # ``Signal.send`` peels ``sender`` off as a positional
+                # arg before calling the receiver, so it never lands
+                # in ``kwargs``. Stitch it back in so ``on_event``
+                # consumers (querylog, prometheus, …) can read the
+                # vendor / model name without a separate parameter.
+                merged = dict(kwargs)
+                merged["sender"] = sender
+                self._on_event(state, merged)
 
             self._signal.connect(_receiver, weak=False)
             self._attached = True
