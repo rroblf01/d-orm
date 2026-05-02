@@ -64,8 +64,14 @@ def check_password(password: str, encoded: str) -> bool:
 
     Constant-time comparison via :func:`hmac.compare_digest` so a
     timing-side-channel can't leak the stored hash bytes.
-    Unusable hashes (``!``-prefix) always return False.
+    Unusable hashes (``!``-prefix) always return False. Non-string
+    inputs (``None``, ``int`` from a malformed JSON payload, …) are
+    rejected as a failed verification rather than crashing — this
+    is a security boundary, callers should never reach a
+    ``TypeError`` here.
     """
+    if not isinstance(password, str) or not isinstance(encoded, str):
+        return False
     if not encoded or encoded.startswith(_UNUSABLE_PREFIX):
         return False
     parts = encoded.split("$", 3)

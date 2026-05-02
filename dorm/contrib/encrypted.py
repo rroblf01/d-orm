@@ -136,7 +136,25 @@ def _decrypt(stored: str | None) -> str | None:
         # plaintext column). Pass through unchanged so existing rows
         # don't blow up the read path during a rolling migration.
         return stored
-    blob = base64.b64decode(stored[3:])
+    # ``b64decode`` raises ``binascii.Error`` on garbage input; wrap
+    # so the read path always sees a single ``ValueError`` and the
+    # caller doesn't have to know about the binascii module.
+    try:
+        blob = base64.b64decode(stored[3:])
+    except Exception as exc:
+        raise ValueError(
+            "EncryptedField could not decode the stored value: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if len(blob) < 12 + 16:
+        # 12-byte nonce + 16-byte AES-GCM tag is the minimum well-
+        # formed payload. A shorter blob would let AES-GCM raise
+        # ``InvalidTag`` later, but the message is misleading
+        # ("authentication failed" vs. "ciphertext truncated").
+        raise ValueError(
+            "EncryptedField stored value is too short to be a valid "
+            f"AES-GCM payload ({len(blob)} bytes < 28)."
+        )
     nonce, ct = blob[:12], blob[12:]
     AESGCM = _import_aesgcm()
     last_exc: Exception | None = None
