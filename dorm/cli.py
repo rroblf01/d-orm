@@ -449,9 +449,9 @@ def cmd_lint_migrations(args):
     """Walk every ``INSTALLED_APPS`` migration directory and emit lint
     findings for known unsafe-online patterns.
 
-    Exits non-zero when any finding is produced (CI gate). Use the
-    ``--format=json`` flag to feed downstream tooling instead of human
-    output.
+    Exits non-zero when any finding is produced unless ``--exit-zero``
+    is passed (treat findings as advisory). ``--rule DORM-M001`` (may
+    repeat) restricts the scan to specific codes.
     """
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
@@ -473,10 +473,21 @@ def cmd_lint_migrations(args):
         sub = lint_directory(mig_dir)
         aggregate.findings.extend(sub.findings)
 
+    rule_filter: set[str] = set()
+    raw_rules = getattr(args, "rule", None) or []
+    for r in raw_rules:
+        rule_filter.add(r.upper())
+    if rule_filter:
+        aggregate.findings = [
+            f for f in aggregate.findings if f.code.upper() in rule_filter
+        ]
+
     if args.format == "json":
         print(aggregate.to_json())
     else:
         print(aggregate.to_text())
+    if getattr(args, "exit_zero", False):
+        sys.exit(0)
     sys.exit(0 if aggregate.ok else 1)
 
 
@@ -1357,6 +1368,25 @@ def main():
         choices=["text", "json"],
         default="text",
         help="Output format (default: text).",
+    )
+    lm.add_argument(
+        "--rule",
+        action="append",
+        default=None,
+        metavar="CODE",
+        help=(
+            "Restrict to specific rule codes (may repeat). Example: "
+            "--rule DORM-M001 --rule DORM-M003."
+        ),
+    )
+    lm.add_argument(
+        "--exit-zero",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit 0 even when findings exist. Useful for advisory "
+            "runs that should NOT fail CI."
+        ),
     )
     lm.add_argument("--settings", default=None)
     lm.set_defaults(func=cmd_lint_migrations)

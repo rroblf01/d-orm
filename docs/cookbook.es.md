@@ -246,6 +246,39 @@ Para tests de integración con PostgreSQL, usa
 [`testcontainers`](https://testcontainers-python.readthedocs.io/)
 para levantar un Postgres efímero por sesión.
 
+### Asertar conteo de queries (`assertNumQueries`, `assertMaxQueries`) (2.6+)
+
+Fija el número exacto de queries de un code path — o el techo —
+para defenderte de regresiones N+1. Tanto la forma context manager
+como decorator funcionan en tests sync y ``async def``:
+
+```python
+from dorm.test import (
+    assertNumQueries,
+    assertMaxQueries,
+    assertNumQueriesFactory,
+    assertMaxQueriesFactory,
+)
+
+def test_list_view(transactional_db):
+    with assertNumQueries(2) as ctx:
+        list(Article.objects.select_related("author")[:10])
+    assert ctx.count == 2  # también expuesto para asserciones extra
+
+@assertMaxQueriesFactory(5)
+def test_dashboard(transactional_db):
+    # Sin N+1: dashboard tiene que emitir ≤ 5 queries.
+    render_dashboard()
+
+@assertNumQueriesFactory(1)
+async def test_async_una_query():
+    await Article.objects.acount()
+```
+
+Aislamiento per-task via ``ContextVar`` — tasks lanzadas con
+``asyncio.gather`` ven contadores independientes, así dos tests
+concurrentes bajo ``pytest-xdist`` no contaminan asserciones.
+
 ## Cambiar `FileField` entre disco local y S3 sin tocar código
 
 `FileField` lee el storage backend desde `settings.STORAGES` en

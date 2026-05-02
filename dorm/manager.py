@@ -207,6 +207,76 @@ class BaseManager(Generic[_T]):
             pass
         return instance
 
+    def cache_get_many(
+        self,
+        *,
+        pks: list[Any],
+        timeout: int | None = None,
+        using: str = "default",
+    ) -> dict[Any, _T]:
+        """Fetch many rows by primary key, going through the cache for
+        each. Misses are batched into a single ``IN (...)`` query
+        instead of N round-trips, then written back to the cache.
+
+        Returns a ``{pk: instance}`` dict — pks not found in the DB
+        are simply absent.
+        """
+        from .cache import (
+            get_cache,
+            model_cache_namespace,
+            model_cache_version,
+            sign_payload,
+            verify_payload,
+        )
+        from .exceptions import ImproperlyConfigured
+        import pickle
+
+        assert self.model is not None
+        if not pks:
+            return {}
+        try:
+            cache = get_cache(using)
+        except ImproperlyConfigured:
+            return {obj.pk: obj for obj in self.filter(pk__in=pks)}
+
+        version = model_cache_version(self.model)
+        ns = model_cache_namespace(self.model)
+        out: dict[Any, _T] = {}
+        misses: list[Any] = []
+        for pk in pks:
+            key = f"dormrow:{ns}:v{version}:{pk}"
+            try:
+                blob = cache.get(key)
+            except Exception:
+                blob = None
+            if blob is None:
+                misses.append(pk)
+                continue
+            payload = verify_payload(blob)
+            if payload is None:
+                misses.append(pk)
+                continue
+            try:
+                out[pk] = pickle.loads(payload)
+            except Exception:
+                try:
+                    cache.delete(key)
+                except Exception:
+                    pass
+                misses.append(pk)
+
+        if misses:
+            fetched = list(self.filter(pk__in=misses))
+            version_after = model_cache_version(self.model)
+            for obj in fetched:
+                out[obj.pk] = obj
+                store_key = f"dormrow:{ns}:v{version_after}:{obj.pk}"
+                try:
+                    cache.set(store_key, sign_payload(pickle.dumps(obj)), timeout)
+                except Exception:
+                    pass
+        return out
+
     async def acache_get(
         self,
         *,
@@ -257,6 +327,75 @@ class BaseManager(Generic[_T]):
         except Exception:
             pass
         return instance
+
+    async def acache_get_many(
+        self,
+        *,
+        pks: list[Any],
+        timeout: int | None = None,
+        using: str = "default",
+    ) -> dict[Any, _T]:
+        """Async counterpart of :meth:`cache_get_many`."""
+        from .cache import (
+            get_cache,
+            model_cache_namespace,
+            model_cache_version,
+            sign_payload,
+            verify_payload,
+        )
+        from .exceptions import ImproperlyConfigured
+        import pickle
+
+        assert self.model is not None
+        if not pks:
+            return {}
+        try:
+            cache = get_cache(using)
+        except ImproperlyConfigured:
+            return {
+                obj.pk: obj
+                async for obj in self.filter(pk__in=pks).aiterator()
+            }
+
+        version = model_cache_version(self.model)
+        ns = model_cache_namespace(self.model)
+        out: dict[Any, _T] = {}
+        misses: list[Any] = []
+        for pk in pks:
+            key = f"dormrow:{ns}:v{version}:{pk}"
+            try:
+                blob = await cache.aget(key)
+            except Exception:
+                blob = None
+            if blob is None:
+                misses.append(pk)
+                continue
+            payload = verify_payload(blob)
+            if payload is None:
+                misses.append(pk)
+                continue
+            try:
+                out[pk] = pickle.loads(payload)
+            except Exception:
+                try:
+                    await cache.adelete(key)
+                except Exception:
+                    pass
+                misses.append(pk)
+
+        if misses:
+            fetched = [
+                obj async for obj in self.filter(pk__in=misses).aiterator()
+            ]
+            version_after = model_cache_version(self.model)
+            for obj in fetched:
+                out[obj.pk] = obj
+                store_key = f"dormrow:{ns}:v{version_after}:{obj.pk}"
+                try:
+                    await cache.aset(store_key, sign_payload(pickle.dumps(obj)), timeout)
+                except Exception:
+                    pass
+        return out
 
     def only(self, *fields: str) -> QuerySet[_T]:
         return self.get_queryset().only(*fields)

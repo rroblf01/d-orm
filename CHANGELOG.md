@@ -168,9 +168,50 @@ upgrade with no behaviour change.
 ### Documentation
 
 - ``docs/production.en.md`` / ``docs/production.es.md`` — new
-  *Slow-query warning (`SLOW_QUERY_MS`)* subsection under
-  *Observability*, plus a row in the *Logging* table pointing at
-  ``dorm.db.backends.<vendor>``.
+  subsections under *Observability* covering ``SLOW_QUERY_MS``,
+  ``RETRY_ATTEMPTS`` / ``RETRY_BACKOFF``, ``QUERY_COUNT_WARN``,
+  ``READ_AFTER_WRITE_WINDOW`` and the request-scoped
+  ``QueryLog`` collector. New top-level *Migration safety* section
+  documenting ``dorm lint-migrations`` rules.
+- ``docs/cli.en.md`` / ``docs/cli.es.md`` — new
+  ``dorm lint-migrations`` section with ``--rule`` / ``--exit-zero`` /
+  ``--format`` flags. ``dorm migrate`` flag table now lists
+  ``--plan`` as the Django-style alias for ``--dry-run``.
+- ``docs/cache_redis.en.md`` / ``docs/cache_redis.es.md`` — new
+  ``LocMemCache`` configuration block and
+  ``Manager.cache_get(pk=…)`` / ``cache_get_many(pks=[…])`` row
+  cache subsection (sync + async).
+- ``docs/cookbook.en.md`` / ``docs/cookbook.es.md`` — testing
+  fixtures section grew an ``assertNumQueries`` /
+  ``assertMaxQueries`` cookbook entry covering the
+  context-manager and decorator forms (sync + async).
+
+### Internal
+
+- ``dorm._memoized_setting.MemoizedSetting`` — central registry
+  for the ``settings → env → default`` resolver pattern. New
+  per-call knobs register one instance and ``conf.configure``'s
+  invalidation pulse fans out automatically (no per-knob
+  ``if "X" in kwargs:`` block).
+- ``dorm._scoped.ScopedCollector`` — shared primitive for
+  ``ContextVar``-based per-task signal collectors. Used by
+  ``query_count_guard``, ``assertNumQueries`` and ``QueryLog``.
+- ``LocMemCache`` carries a secondary ``defaultdict[prefix, set]``
+  index — ``delete_pattern("ns:*")`` is now O(matches) instead of
+  O(n).
+- Sticky read-after-write window upgraded from copy-on-write to
+  lazy-copy-then-mutate: each task takes one private dict on
+  first write, then mutates in place for the rest of the request.
+- ``QueryRecord`` and ``TemplateStats`` are now ``@dataclass(slots=True)``.
+  ``QueryLog.summary()`` returns ``list[TemplateStats]``; pre-2.6
+  consumers that read dict keys should switch to attribute access
+  or call ``.to_dict()``.
+- ``Settings._explicit_settings`` moved from class-level mutable
+  default to an instance attribute set in ``__init__``.
+- Per-query counters in ``query_count_guard`` and
+  ``assertNumQueries`` mutate a single-element ``list[int]`` in
+  place instead of calling ``ContextVar.set`` per query — saves
+  one ``Token`` allocation per signal.
 
 ## [2.5.0] - 2026-05-02
 

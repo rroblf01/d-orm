@@ -342,3 +342,23 @@ user = await User.objects.acache_get(pk=42)
 
 Cache misses fall through silently. Cache outages also fall
 through — the row from the database is the source of truth.
+
+### Batch row-cache: `cache_get_many(pks=[...])` (2.6+)
+
+Fetch many rows by primary key in a single round-trip. Hits go
+through the cache; misses are batched into one ``WHERE pk IN (...)``
+query and written back to the cache afterwards:
+
+```python
+users = User.objects.cache_get_many(pks=[1, 2, 3, 4])
+# Returns {1: <User>, 2: <User>, 3: <User>}
+# (pk=4 absent if not in the DB)
+
+# Async parity:
+users = await User.objects.acache_get_many(pks=[1, 2, 3, 4])
+```
+
+PKs not found in the database are simply absent from the returned
+dict. Pair with `select_related` on a follow-up query if you need
+the FKs eager-loaded — the cache stores the row exactly as
+``Manager.get(pk=…)`` returned it.

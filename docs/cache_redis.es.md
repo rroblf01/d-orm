@@ -316,3 +316,23 @@ user = await User.objects.acache_get(pk=42)
 
 Misses caen silenciosamente a DB. Caída de cache también — la fila
 en DB es la fuente de verdad.
+
+### Batch row-cache: `cache_get_many(pks=[...])` (2.6+)
+
+Recupera múltiples filas por PK en un único round-trip. Hits van por
+cache; misses se agrupan en una sola query ``WHERE pk IN (...)`` y
+después se persisten en cache:
+
+```python
+users = User.objects.cache_get_many(pks=[1, 2, 3, 4])
+# Retorna {1: <User>, 2: <User>, 3: <User>}
+# (pk=4 ausente si no está en BD)
+
+# Paridad async:
+users = await User.objects.acache_get_many(pks=[1, 2, 3, 4])
+```
+
+PKs no encontrados en la BD simplemente no aparecen en el dict
+devuelto. Combina con `select_related` en query de seguimiento si
+necesitas FKs eager — la cache guarda la fila tal como
+``Manager.get(pk=…)`` la devolvió.

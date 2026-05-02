@@ -51,7 +51,7 @@ dorm migrate blog zero             # rollback every migration
 
 | Flag | Purpose |
 |---|---|
-| `--dry-run` | print SQL only; don't touch the DB or update the recorder |
+| `--dry-run` / `--plan` (2.6+) | print SQL only; don't touch the DB or update the recorder. ``--plan`` is an alias kept for users coming from Django |
 | `--verbosity N` | 0 = silent, 1 = default, 2 = verbose |
 | `--settings PATH` | settings module to load |
 
@@ -122,6 +122,32 @@ dorm shell
 If IPython is installed, you get IPython; otherwise the standard
 REPL. Settings are loaded and `INSTALLED_APPS` are imported, so you
 can `from blog.models import Post` and start querying right away.
+
+## `dorm lint-migrations` (2.6+)
+
+Walk every migration in `INSTALLED_APPS` and emit findings for known
+online-deploy footguns. Exits non-zero on findings — wire as a CI
+pre-merge gate.
+
+```bash
+dorm lint-migrations
+dorm lint-migrations --format json            # JSON for CI tools
+dorm lint-migrations --rule DORM-M001         # only this rule
+dorm lint-migrations --rule DORM-M001 --rule DORM-M003
+dorm lint-migrations --exit-zero              # advisory: never fail CI
+```
+
+| Flag | Purpose |
+|---|---|
+| `--format text\|json` | output shape (default: text) |
+| `--rule CODE` | restrict to a code; may repeat |
+| `--exit-zero` | exit 0 even when findings exist |
+| `--settings PATH` | settings module to load |
+
+Suppress a finding for a single file with a `# noqa: DORM-M00X`
+comment anywhere in the file. See the
+[Migration safety](production.en.md#migration-safety-dorm-lint-migrations)
+section in the production guide for the full rule table.
 
 ## `dorm dbshell`
 

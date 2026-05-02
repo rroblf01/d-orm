@@ -12,64 +12,33 @@ handlers, RPC entry points, or hot loops:
     with query_count_guard(warn_above=20, label="GET /articles"):
         return [article_dict(a) for a in Article.objects.all()]
 
-Implementation:
-
-- Per-block counter lives in a ``contextvars.ContextVar`` so async
-  code paths get isolated counters per task.
-- A single ``pre_query`` listener is connected on first use and
-  re-used by every guard — the listener is a no-op when no guard is
-  active so projects that never enter a guard pay only the per-signal
-  empty-receiver dispatch cost (already paid for any other receiver).
-
-The default ``warn_above`` is taken from
-``settings.QUERY_COUNT_WARN``. ``None`` (the default) leaves the
-guard inert — it counts but never warns. ``0`` warns on the first
-query.
+The default ``warn_above`` is taken from ``settings.QUERY_COUNT_WARN``.
+``None`` (default) leaves the guard inert — it counts but never warns.
 """
 
 from __future__ import annotations
 
-import contextvars
 import logging
-import threading
 from contextlib import contextmanager
 from typing import Any, Iterator
 
 from .. import signals
+from .._scoped import ScopedCollector
 from ..conf import settings
 
 _logger = logging.getLogger("dorm.querycount")
 
-# Per-task counter. ``None`` = no guard is active on this task; an
-# integer = the running count of queries since the most recent guard
-# was entered. Nested guards are supported via the saved-token return
-# of ``ContextVar.set``.
-_count: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "dorm_querycount", default=None
+
+def _bump(state: list[int], _kwargs: dict[str, Any]) -> None:
+    state[0] += 1
+
+
+# Listener attached on first guard. State is a single-element list so
+# the receiver mutates ``state[0]`` in place — avoids one
+# ``ContextVar.set`` (and the Token allocation it implies) per query.
+_collector: ScopedCollector[list[int]] = ScopedCollector(
+    signals.pre_query, "dorm_querycount", _bump
 )
-
-_listener_attached: bool = False
-_listener_lock = threading.Lock()
-
-
-def _on_pre_query(sender: Any, **kwargs: Any) -> None:
-    """Increment the active per-task counter, if any."""
-    n = _count.get()
-    if n is None:
-        return
-    _count.set(n + 1)
-
-
-def _ensure_listener() -> None:
-    """Attach the ``pre_query`` listener on first use. Idempotent."""
-    global _listener_attached
-    if _listener_attached:
-        return
-    with _listener_lock:
-        if _listener_attached:
-            return
-        signals.pre_query.connect(_on_pre_query, weak=False)
-        _listener_attached = True
 
 
 @contextmanager
@@ -85,40 +54,36 @@ def query_count_guard(
     given; ``None`` means "count but never warn".
 
     *label* — included in the warning to identify the call-site.
-    Useful when the guard wraps a request handler.
 
     Yields a :class:`QueryCount` whose ``count`` attribute holds the
-    running total — useful in tests to assert exact numbers without
-    relying on log capture.
+    final total after the block exits. Tests that need an exact-count
+    assertion can read it directly without grepping the log.
     """
-    _ensure_listener()
     if warn_above is None:
         warn_above = getattr(settings, "QUERY_COUNT_WARN", None)
 
-    state = QueryCount()
-    token = _count.set(0)
+    handle = QueryCount()
+    state: list[int] = [0]
+    token = _collector.open(state)
     try:
-        yield state
+        yield handle
     finally:
-        state.count = _count.get() or 0
-        _count.reset(token)
-        if warn_above is not None and state.count > warn_above:
+        handle.count = state[0]
+        _collector.close(token)
+        if warn_above is not None and handle.count > warn_above:
             tag = f" [{label}]" if label else ""
             _logger.warning(
                 "query count exceeded threshold%s: %d > %d",
                 tag,
-                state.count,
+                handle.count,
                 warn_above,
             )
 
 
 class QueryCount:
-    """Live handle returned by :func:`query_count_guard`.
-
-    The ``count`` attribute is updated when the guard exits — reading
-    it inside the ``with`` block returns 0 because the guard hasn't
-    finalised yet. Tests typically read it after the block.
-    """
+    """Live handle returned by :func:`query_count_guard`. ``count``
+    is finalised on context exit; reading it inside the ``with`` block
+    returns 0."""
 
     __slots__ = ("count",)
 

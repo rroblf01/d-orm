@@ -160,7 +160,7 @@ DORM-M001 myapp/migrations/0003_add_score.py: AddField with null=False and a def
 | Código | Trigger | Motivo |
 |--------|---------|--------|
 | `DORM-M001` | `AddField(null=False, default=…)` | backfill de toda la tabla |
-| `DORM-M002` | `AlterField` cambio de tipo | reescritura de tabla en PG / MySQL |
+| `DORM-M002` | `AlterField` (cualquiera) | avisa en todo alter — revisa si cambia el tipo (reescribe tabla en PG / MySQL) o solo toggle NOT NULL / default |
 | `DORM-M003` | `AddIndex` sin `concurrently=True` (PG) | lock ACCESS EXCLUSIVE |
 | `DORM-M004` | `RunPython` sin `reverse_code` | migración irreversible |
 
@@ -277,10 +277,20 @@ from dorm.contrib.querylog import QueryLog, QueryLogASGIMiddleware
 
 with QueryLog() as log:
     do_work()
-log.summary()
+
+# log.summary() devuelve list[TemplateStats] ordenado por total_ms desc.
+for stats in log.summary():
+    print(stats.template, stats.count, stats.p95_ms)
+# O serializa como dicts plain JSON-friendly:
+# [s.to_dict() for s in log.summary()]
 
 app = QueryLogASGIMiddleware(your_asgi_app)
 ```
+
+`TemplateStats` es un `@dataclass(slots=True)` con atributos
+`template`, `count`, `total_ms`, `p50_ms`, `p95_ms`. Igual para
+`QueryRecord` (uno por sentencia ejecutada) — ambos exponen
+`.to_dict()` para pipelines de serialización que prefieran dicts.
 
 ### Aviso de query lenta (`SLOW_QUERY_MS`)
 

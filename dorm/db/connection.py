@@ -13,14 +13,18 @@ _async_connections: dict[str, Any] = {}
 _sync_lock = threading.Lock()
 
 
-# Sticky read-after-write state. Maps ``(app_label, ModelName)`` to the
-# ``time.monotonic()`` timestamp at which the freshness window expires.
-# Held in a ``ContextVar`` so concurrent ASGI requests / asyncio tasks
-# see independent windows — a write in request A doesn't pin reads in
-# request B to the primary.
-_sticky_until: contextvars.ContextVar[dict[tuple[str, str], float]] = (
-    contextvars.ContextVar("dorm_sticky_until", default={})
-)
+# Sticky read-after-write state. The ContextVar holds a 2-tuple
+# ``(owner_id, dict)``; ``owner_id`` is the ``id()`` of the dict the
+# task first wrote, so we know whether the dict is private to this
+# task (mutate in place — the common path) or shared with a parent
+# context (copy-on-write once, then mutate for the rest of the
+# task's lifetime). The empty default sentinel ``(0, {})`` is shared
+# across every task that never wrote, so the first write upgrades
+# to a private dict.
+_EMPTY_STICKY: tuple[int, dict[tuple[str, str], float]] = (0, {})
+_sticky_until: contextvars.ContextVar[
+    tuple[int, dict[tuple[str, str], float]]
+] = contextvars.ContextVar("dorm_sticky_until", default=_EMPTY_STICKY)
 
 
 def _model_key(model: Any) -> tuple[str, str]:
@@ -52,6 +56,20 @@ def _read_after_write_window() -> float:
         return 0.0
 
 
+def _own_sticky_dict() -> dict[tuple[str, str], float]:
+    """Return the per-task dict, upgrading from the shared empty
+    sentinel on first write. After the upgrade every later mutation
+    on this task is in place — no per-write dict copy."""
+    owner, mapping = _sticky_until.get()
+    if owner != id(mapping):
+        # Either the empty sentinel or a dict inherited from a parent
+        # context that another task may still observe. Take a private
+        # copy and stamp ourselves as the owner.
+        mapping = dict(mapping)
+        _sticky_until.set((id(mapping), mapping))
+    return mapping
+
+
 def _mark_recent_write(model: Any) -> None:
     """Record a write through the router so subsequent reads of the
     same model in the same context return the primary alias for the
@@ -59,27 +77,21 @@ def _mark_recent_write(model: Any) -> None:
     window = _read_after_write_window()
     if window <= 0:
         return
-    key = _model_key(model)
-    current = _sticky_until.get()
-    # Copy-on-write so different tasks (sharing the same ContextVar
-    # default at start-of-task) end up with independent dicts.
-    nxt = dict(current)
-    nxt[key] = _stickytime.monotonic() + window
-    _sticky_until.set(nxt)
+    mapping = _own_sticky_dict()
+    mapping[_model_key(model)] = _stickytime.monotonic() + window
 
 
 def _is_sticky(model: Any) -> bool:
     key = _model_key(model)
-    current = _sticky_until.get()
-    expires = current.get(key)
+    _owner, mapping = _sticky_until.get()
+    expires = mapping.get(key)
     if expires is None:
         return False
     if expires <= _stickytime.monotonic():
-        # Expired — drop the entry so the dict doesn't grow unbounded
-        # across long-lived contexts. Copy-on-write again so we don't
-        # mutate the dict shared with sibling tasks.
-        nxt = {k: v for k, v in current.items() if k != key}
-        _sticky_until.set(nxt)
+        # Expired — drop the entry so the dict doesn't grow unbounded.
+        # Upgrade to a private dict before mutating so we don't touch
+        # one another task is reading.
+        _own_sticky_dict().pop(key, None)
         return False
     return True
 
@@ -87,7 +99,7 @@ def _is_sticky(model: Any) -> bool:
 def clear_read_after_write_window() -> None:
     """Drop every recorded sticky entry on the current context. Useful
     in tests or middleware that want a clean window per request."""
-    _sticky_until.set({})
+    _sticky_until.set(_EMPTY_STICKY)
 
 
 def router_db_for_read(model, *, default: str = "default", **hints) -> str:

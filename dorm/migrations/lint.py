@@ -34,15 +34,17 @@ from typing import Any, Iterable
 
 @dataclass
 class Finding:
-    code: str        # e.g. "DORM-M001"
-    file: str        # path to the migration file
-    operation: str   # repr-ish summary of the operation
-    message: str     # human-readable reason
+    code: str               # e.g. "DORM-M001"
+    file: Path | str        # path to the migration file
+    operation: str          # repr-ish summary of the operation
+    message: str            # human-readable reason
 
     def to_dict(self) -> dict[str, str]:
+        # Always serialise ``file`` as a string so the JSON output is
+        # consumable from any language / tool.
         return {
             "code": self.code,
-            "file": self.file,
+            "file": str(self.file),
             "operation": self.operation,
             "message": self.message,
         }
@@ -118,7 +120,7 @@ def _op_repr(op: Any) -> str:
     return cls
 
 
-def _check_add_field(op: Any, file: str, suppressed: set[str]) -> Iterable[Finding]:
+def _check_add_field(op: Any, file: "Path | str", suppressed: set[str]) -> Iterable[Finding]:
     if "DORM-M001" in suppressed:
         return ()
     field_obj = getattr(op, "field", None)
@@ -144,7 +146,7 @@ def _check_add_field(op: Any, file: str, suppressed: set[str]) -> Iterable[Findi
     return ()
 
 
-def _check_alter_field(op: Any, file: str, suppressed: set[str]) -> Iterable[Finding]:
+def _check_alter_field(op: Any, file: "Path | str", suppressed: set[str]) -> Iterable[Finding]:
     if "DORM-M002" in suppressed:
         return ()
     # ``AlterField`` in dorm only carries the *new* field instance —
@@ -172,7 +174,7 @@ def _check_alter_field(op: Any, file: str, suppressed: set[str]) -> Iterable[Fin
     ]
 
 
-def _check_add_index(op: Any, file: str, suppressed: set[str]) -> Iterable[Finding]:
+def _check_add_index(op: Any, file: "Path | str", suppressed: set[str]) -> Iterable[Finding]:
     if "DORM-M003" in suppressed:
         return ()
     concurrently = getattr(op, "concurrently", False)
@@ -193,7 +195,7 @@ def _check_add_index(op: Any, file: str, suppressed: set[str]) -> Iterable[Findi
     ]
 
 
-def _check_run_python(op: Any, file: str, suppressed: set[str]) -> Iterable[Finding]:
+def _check_run_python(op: Any, file: "Path | str", suppressed: set[str]) -> Iterable[Finding]:
     if "DORM-M004" in suppressed:
         return ()
     reverse = getattr(op, "reverse_code", None)
@@ -217,7 +219,7 @@ def _check_run_python(op: Any, file: str, suppressed: set[str]) -> Iterable[Find
 def lint_operations(
     operations: list[Any],
     *,
-    file: str = "<inline>",
+    file: Path | str = "<inline>",
     suppressed: set[str] | None = None,
 ) -> LintResult:
     """Lint a single migration's ``operations`` list. Programmatic
@@ -275,7 +277,7 @@ def lint_migration_file(path: Path) -> LintResult:
                 findings=[
                     Finding(
                         code="DORM-M000",
-                        file=str(path),
+                        file=path,
                         operation="<import error>",
                         message=f"Could not import migration: {exc!r}",
                     )
@@ -288,7 +290,7 @@ def lint_migration_file(path: Path) -> LintResult:
         operations = list(getattr(migration_cls, "operations", []) or [])
         return lint_operations(
             operations,
-            file=str(path),
+            file=path,
             suppressed=_suppressed_codes(path),
         )
     finally:

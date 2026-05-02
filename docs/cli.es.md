@@ -51,7 +51,7 @@ dorm migrate blog zero             # rollback de todas las migraciones
 
 | Flag | Para qué |
 |---|---|
-| `--dry-run` | imprime solo el SQL; no toca la BD ni actualiza el recorder |
+| `--dry-run` / `--plan` (2.6+) | imprime solo el SQL; no toca la BD ni actualiza el recorder. ``--plan`` es alias para usuarios que vienen de Django |
 | `--verbosity N` | 0 = silencioso, 1 = default, 2 = verbose |
 | `--settings PATH` | módulo de settings a cargar |
 
@@ -124,6 +124,32 @@ dorm shell
 Si tienes IPython instalado, lo usa; si no, cae al REPL estándar.
 Los settings se cargan y las `INSTALLED_APPS` se importan, así que
 puedes hacer `from blog.models import Post` y empezar a consultar.
+
+## `dorm lint-migrations` (2.6+)
+
+Recorre cada migración en `INSTALLED_APPS` y emite hallazgos para
+patrones peligrosos en deploy online. Sale con código != 0 ante
+hallazgos — engánchalo como gate de pre-merge en CI.
+
+```bash
+dorm lint-migrations
+dorm lint-migrations --format json            # JSON para herramientas CI
+dorm lint-migrations --rule DORM-M001         # solo esta regla
+dorm lint-migrations --rule DORM-M001 --rule DORM-M003
+dorm lint-migrations --exit-zero              # advisory: nunca falla CI
+```
+
+| Flag | Para qué |
+|---|---|
+| `--format text\|json` | shape de salida (default: text) |
+| `--rule CODE` | restringe a un código; puede repetirse |
+| `--exit-zero` | sale 0 aunque haya hallazgos |
+| `--settings PATH` | módulo de settings a cargar |
+
+Silencia un hallazgo en un archivo concreto con un comentario
+`# noqa: DORM-M00X` en cualquier sitio del fichero. Tabla completa
+de reglas en
+[Seguridad de migraciones](production.es.md#seguridad-de-migraciones-dorm-lint-migrations).
 
 ## `dorm dbshell`
 

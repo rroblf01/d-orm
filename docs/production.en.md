@@ -157,7 +157,7 @@ DORM-M001 myapp/migrations/0003_add_score.py: AddField with null=False and a def
 | Code | Trigger | Why |
 |------|---------|-----|
 | `DORM-M001` | `AddField(null=False, default=…)` | full-table backfill at migrate time |
-| `DORM-M002` | `AlterField` that changes type | table rewrite on PG / MySQL |
+| `DORM-M002` | `AlterField` (any) | warns on every alter — review whether it changes the column type (table rewrite on PG / MySQL) or just toggles NOT NULL / default |
 | `DORM-M003` | `AddIndex` without `concurrently=True` (PG) | ACCESS EXCLUSIVE lock |
 | `DORM-M004` | `RunPython` without `reverse_code` | irreversible migration |
 
@@ -274,11 +274,20 @@ from dorm.contrib.querylog import QueryLog, QueryLogASGIMiddleware
 
 with QueryLog() as log:
     do_work()
-log.summary()
-# [ {"template": "SELECT * FROM users WHERE id = ?", "count": 5, "p95_ms": 2.3}, ... ]
+
+# log.summary() returns a list[TemplateStats] sorted by total_ms desc.
+for stats in log.summary():
+    print(stats.template, stats.count, stats.p95_ms)
+# Or serialise as plain JSON-friendly dicts:
+# [s.to_dict() for s in log.summary()]
 
 app = QueryLogASGIMiddleware(your_asgi_app)
 ```
+
+`TemplateStats` is a `@dataclass(slots=True)` with attributes
+`template`, `count`, `total_ms`, `p50_ms`, `p95_ms`. Same for
+`QueryRecord` (one per executed statement) — both expose `.to_dict()`
+for serialisation pipelines that prefer dict shapes.
 
 ### Slow-query warning (`SLOW_QUERY_MS`)
 

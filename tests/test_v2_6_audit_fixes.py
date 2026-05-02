@@ -162,7 +162,7 @@ def test_slow_query_cache_recovers_from_corrupt_value():
     u._invalidate_slow_query_cache()
     # Simulate corruption by writing an unexpected type into the
     # memoised cache directly.
-    u._SLOW_QUERY_MS_CACHE = object()
+    u._SLOW_QUERY_MS_SETTING._cache = object()
     val = u._slow_query_ms()
     # Either a float threshold or None — never the corrupt object.
     assert val is None or isinstance(val, float)
@@ -172,8 +172,8 @@ def test_retry_cache_recovers_from_corrupt_value():
     import dorm.db.utils as u
 
     u._invalidate_retry_cache()
-    u._RETRY_ATTEMPTS_CACHE = "not-an-int"  # type: ignore[assignment]
-    u._RETRY_BACKOFF_CACHE = "not-a-float"  # type: ignore[assignment]
+    u._RETRY_ATTEMPTS_SETTING._cache = "not-an-int"
+    u._RETRY_BACKOFF_SETTING._cache = "not-a-float"
 
     a = u._retry_attempts()
     b = u._retry_backoff()

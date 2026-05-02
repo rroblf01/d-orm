@@ -1,63 +1,80 @@
-"""Test helpers — transactional fixtures that roll back instead of dropping
-and recreating tables for every test.
+"""Test helpers — transactional fixtures, query-count assertions and
+the unittest mixin.
 
-Speeds up suites by avoiding per-test ``DROP TABLE`` / ``CREATE TABLE``
-churn. Each test starts inside an :func:`atomic` block; on exit the block
-is rolled back unconditionally, so any data written during the test
-disappears without touching the schema.
+The pytest fixtures (``transactional_db`` / ``atransactional_db``) need
+``pytest`` at import time. Everything else (``assertNumQueries``,
+``assertMaxQueries``, ``DormTestCase``) works without pytest, so the
+import is guarded — projects using stdlib ``unittest`` only can still
+call ``from dorm.test import assertNumQueries`` without a pytest
+install.
 
-Use it in a pytest project by adding to ``conftest.py``::
+Use the fixtures in a pytest project by adding to ``conftest.py``::
 
     from dorm.test import transactional_db, atransactional_db  # noqa: F401
 
-…and then either rely on the autouse fixture (when imported by the
-star-import variant) or list it in your test signatures::
+Then list them in your test signatures::
 
     def test_something(transactional_db):
         Author.objects.create(name="Alice", age=30)
         # rolled back automatically when the test exits
 
 For pytest-asyncio tests, use ``atransactional_db``.
-
-There is also a :class:`DormTestCase` mixin for unittest-style suites.
 """
 
 from __future__ import annotations
 
-import contextvars
 import functools
 import inspect
-import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
-import pytest
-
 from . import signals
+from ._scoped import ScopedCollector
 from .transaction import atomic, aatomic
 
-
-@pytest.fixture
-def transactional_db():
-    """Open an :func:`atomic` block around the test, roll it back on exit.
-
-    Pending :func:`on_commit` callbacks scheduled inside the test are
-    discarded (rollback semantics) — the test never sees post-commit
-    side effects, which is exactly what most unit tests want.
-    """
-    with atomic() as tx:
-        yield
-        tx.set_rollback(True)
+try:
+    import pytest as _pytest_mod
+    pytest: Any = _pytest_mod
+except ImportError:  # pragma: no cover - pytest is a soft dep
+    pytest = None
 
 
-@pytest.fixture
-async def atransactional_db():
-    """Async counterpart of :func:`transactional_db` for ``pytest-asyncio``
-    tests. Wrap each test in an :func:`aatomic` block that always rolls
-    back."""
-    async with aatomic() as tx:
-        yield
-        tx.set_rollback(True)
+if pytest is not None:
+
+    @pytest.fixture
+    def transactional_db():
+        """Open an :func:`atomic` block around the test, roll it back on exit.
+
+        Pending :func:`on_commit` callbacks scheduled inside the test are
+        discarded (rollback semantics) — the test never sees post-commit
+        side effects, which is exactly what most unit tests want.
+        """
+        with atomic() as tx:
+            yield
+            tx.set_rollback(True)
+
+    @pytest.fixture
+    async def atransactional_db():
+        """Async counterpart of :func:`transactional_db` for ``pytest-asyncio``
+        tests. Wrap each test in an :func:`aatomic` block that always rolls
+        back."""
+        async with aatomic() as tx:
+            yield
+            tx.set_rollback(True)
+
+else:  # pragma: no cover - pytest absent
+
+    def transactional_db(*args: Any, **kwargs: Any):
+        raise RuntimeError(
+            "dorm.test.transactional_db requires pytest. Install it via "
+            "`pip install pytest`."
+        )
+
+    def atransactional_db(*args: Any, **kwargs: Any):
+        raise RuntimeError(
+            "dorm.test.atransactional_db requires pytest. Install it via "
+            "`pip install pytest pytest-asyncio`."
+        )
 
 
 class DormTestCase:
@@ -77,10 +94,6 @@ class DormTestCase:
     _dorm_atomic_cm: Any = None
 
     def setUp(self):
-        # ``super()`` reaches the ``unittest.TestCase`` further up the
-        # MRO; ty can't see that without a fake parent, so we silence
-        # the static check (the runtime contract is "use this with
-        # TestCase or another mixin that calls setUp/tearDown").
         super().setUp()  # type: ignore
         self._dorm_atomic_cm = atomic()
         self._dorm_atomic_cm.__enter__()
@@ -96,43 +109,26 @@ class DormTestCase:
         super().tearDown()  # type: ignore
 
 
-# ── assertNumQueries ─────────────────────────────────────────────────────────
+# ── Query-count assertions ───────────────────────────────────────────────────
 #
-# Django parity helper: assert exactly N queries fire inside a block.
-# Implementation mirrors ``dorm.contrib.querycount`` — a single
-# ``pre_query`` listener is connected on first use and increments a
-# per-task counter held in a ``ContextVar``, so async tests don't bleed
-# counters across tasks.
+# Per-task isolation via ``ScopedCollector`` over the ``pre_query``
+# signal. State is a single-element list so the receiver mutates
+# ``state[0]`` in place — one ``ContextVar.set`` per assertion block
+# instead of per query.
 
-_assert_count: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "dorm_test_assert_num_queries", default=None
+def _bump(state: list[int], _kwargs: dict[str, Any]) -> None:
+    state[0] += 1
+
+
+_collector: ScopedCollector[list[int]] = ScopedCollector(
+    signals.pre_query, "dorm_test_assert_num_queries", _bump
 )
-
-_assert_listener_attached: bool = False
-_assert_listener_lock = threading.Lock()
-
-
-def _on_pre_query_assert(sender: Any, **kwargs: Any) -> None:
-    n = _assert_count.get()
-    if n is None:
-        return
-    _assert_count.set(n + 1)
-
-
-def _ensure_assert_listener() -> None:
-    global _assert_listener_attached
-    if _assert_listener_attached:
-        return
-    with _assert_listener_lock:
-        if _assert_listener_attached:
-            return
-        signals.pre_query.connect(_on_pre_query_assert, weak=False)
-        _assert_listener_attached = True
 
 
 class _NumQueriesContext:
-    """Returned by :func:`assertNumQueries` so tests can inspect the
-    actual count if they want a richer assertion than equality."""
+    """Yielded by :func:`assertNumQueries` / :func:`assertMaxQueries` so
+    callers can read the actual count after the block exits — useful when
+    the assertion is just one of several checks the test wants to make."""
 
     __slots__ = ("count",)
 
@@ -152,56 +148,61 @@ def assertNumQueries(num: int) -> Iterator[_NumQueriesContext]:
 
     The assertion runs on context exit; if the block raises, the
     original exception propagates and the count assertion is skipped
-    (the failure is the more interesting signal). For a richer
-    handle, the context manager yields a small object whose ``count``
-    attribute holds the final count after exit::
-
-        with assertNumQueries(2) as ctx:
-            ...
-        # ctx.count == 2
-
-    Also usable as a decorator::
-
-        @assertNumQueries(1)
-        def test_loaded_with_one_query():
-            ...
+    (the failure is the more interesting signal).
     """
-    _ensure_assert_listener()
-    state = _NumQueriesContext()
-    token = _assert_count.set(0)
+    handle = _NumQueriesContext()
+    state: list[int] = [0]
+    token = _collector.open(state)
     try:
-        yield state
+        yield handle
     finally:
-        state.count = _assert_count.get() or 0
-        _assert_count.reset(token)
-    assert state.count == num, (
-        f"expected {num} query(ies), got {state.count}"
+        handle.count = state[0]
+        _collector.close(token)
+    assert handle.count == num, (
+        f"expected {num} query(ies), got {handle.count}"
     )
 
 
-# Allow ``@assertNumQueries(N)`` as a decorator on top of the
-# context-manager form. Wrapping ``contextmanager`` output is fiddly
-# because the generator-function it returns doesn't itself act as a
-# decorator factory, so we expose a tiny shim.
-#
-# The decorator inspects the wrapped function: ``async def`` test
-# functions get an async wrapper that ``await``s the coroutine inside
-# the context manager — without this the sync wrapper would call the
-# ``async def`` (returning a coroutine) and exit the context manager
-# *before* the coroutine ran, so every query landed outside the count
-# window and the assertion always failed with count 0.
-def _decorate_with_num_queries(num: int):
+@contextmanager
+def assertMaxQueries(num: int) -> Iterator[_NumQueriesContext]:
+    """Assert that *at most* ``num`` SQL statements fire inside the
+    block. Fewer is fine — useful when the upper bound is what
+    matters (defending against an N+1 regression) without pinning the
+    exact count."""
+    handle = _NumQueriesContext()
+    state: list[int] = [0]
+    token = _collector.open(state)
+    try:
+        yield handle
+    finally:
+        handle.count = state[0]
+        _collector.close(token)
+    assert handle.count <= num, (
+        f"expected at most {num} query(ies), got {handle.count}"
+    )
+
+
+def _decorate(num: int, *, max_only: bool):
+    """Build a decorator that wraps the function in the appropriate
+    assertion context manager. ``async def`` functions get an async
+    wrapper so the coroutine actually runs INSIDE the count window
+    — the previous version returned a sync wrapper that exited the
+    context manager before the coroutine awaited any query, so every
+    async test failed with count 0.
+    """
+    cm = assertMaxQueries if max_only else assertNumQueries
+
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
             async def awrapper(*a: Any, **kw: Any) -> Any:
-                with assertNumQueries(num):
+                with cm(num):
                     return await fn(*a, **kw)
             return awrapper
 
         @functools.wraps(fn)
         def wrapper(*a: Any, **kw: Any) -> Any:
-            with assertNumQueries(num):
+            with cm(num):
                 return fn(*a, **kw)
         return wrapper
     return deco
@@ -209,11 +210,14 @@ def _decorate_with_num_queries(num: int):
 
 def assertNumQueriesFactory(num: int):
     """Decorator factory equivalent of :func:`assertNumQueries` —
-    use as ``@assertNumQueriesFactory(N)`` on a test function (sync
-    or ``async def``). The context-manager form remains the primary
-    API for inline use.
-    """
-    return _decorate_with_num_queries(num)
+    use as ``@assertNumQueriesFactory(N)`` on a test function (sync or
+    ``async def``)."""
+    return _decorate(num, max_only=False)
+
+
+def assertMaxQueriesFactory(num: int):
+    """Decorator factory equivalent of :func:`assertMaxQueries`."""
+    return _decorate(num, max_only=True)
 
 
 __all__ = [
@@ -222,4 +226,6 @@ __all__ = [
     "DormTestCase",
     "assertNumQueries",
     "assertNumQueriesFactory",
+    "assertMaxQueries",
+    "assertMaxQueriesFactory",
 ]

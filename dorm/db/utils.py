@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextvars
 import logging
-import os
 import re
 import time
 from contextlib import contextmanager
@@ -26,92 +25,75 @@ ASYNC_ATOMIC_STATE: contextvars.ContextVar = contextvars.ContextVar(
 
 # ── Query logging ─────────────────────────────────────────────────────────────
 # Enable with `logging.getLogger("dorm.db").setLevel(logging.DEBUG)`.
-# Slow-query threshold (ms) resolved from ``settings.SLOW_QUERY_MS`` first,
-# then env var ``DORM_SLOW_QUERY_MS``, then the 500 ms default. ``None``
-# disables the warning entirely (the comparison itself is skipped).
+# All per-call knobs route through the shared ``MemoizedSetting`` resolver
+# (``dorm._memoized_setting``). Resolution order: explicit
+# ``configure(NAME=…)`` > env var > built-in default. Settings-derived
+# values are memoised; env-var / default values re-read each call so
+# test ``monkeypatch.setenv`` workflows keep observing the current
+# value without an explicit cache flush.
 
 _slow_log = logging.getLogger("dorm.db")
 
+from .._memoized_setting import MemoizedSetting  # noqa: E402
 
-# Sentinel for the unresolved-cache state. ``None`` is a valid resolved
-# value (it disables the slow-query warning), so we can't use ``None``
-# as the sentinel for "not yet computed". A unique object instance is
-# unambiguous and survives ``configure(SLOW_QUERY_MS=None)``.
-_SLOW_QUERY_UNSET: object = object()
-_SLOW_QUERY_MS_CACHE: float | None | object = _SLOW_QUERY_UNSET
-
-
-def _resolve_slow_query_ms() -> tuple[float | None, bool]:
-    """Read the threshold from settings → env → default.
-
-    Returns ``(value, cacheable)``. ``cacheable`` is True only when the
-    value came from an explicit ``configure(SLOW_QUERY_MS=…)`` call —
-    in that case ``configure`` invalidates the cache when the setting
-    changes again. The env-var / default branch is NOT cached so a
-    process that reads ``DORM_SLOW_QUERY_MS`` from a mutable
-    environment (test monkeypatch, runtime tweak) keeps observing the
-    current value without an explicit invalidation.
-    """
-    try:
-        from ..conf import settings
-
-        explicit = getattr(settings, "_explicit_settings", set())
-        if "SLOW_QUERY_MS" in explicit:
-            val = settings.SLOW_QUERY_MS
-            if val is None:
-                return None, True
-            try:
-                return float(val), True
-            except (TypeError, ValueError):
-                pass
-    except Exception:
-        pass
-
-    raw = os.environ.get("DORM_SLOW_QUERY_MS")
-    if raw is not None:
-        try:
-            return float(raw), False
-        except (TypeError, ValueError):
-            pass
-
-    return 500.0, False
+_SLOW_QUERY_MS_SETTING: MemoizedSetting[float] = MemoizedSetting(
+    "SLOW_QUERY_MS",
+    env_var="DORM_SLOW_QUERY_MS",
+    default=500.0,
+    parser=float,
+    allow_none=True,
+)
+_RETRY_ATTEMPTS_SETTING: MemoizedSetting[int] = MemoizedSetting(
+    "RETRY_ATTEMPTS",
+    env_var="DORM_RETRY_ATTEMPTS",
+    default=3,
+    parser=int,
+)
+_RETRY_BACKOFF_SETTING: MemoizedSetting[float] = MemoizedSetting(
+    "RETRY_BACKOFF",
+    env_var="DORM_RETRY_BACKOFF",
+    default=0.1,
+    parser=float,
+)
 
 
 def _slow_query_ms() -> float | None:
-    """Slow-query threshold (ms). Returns ``None`` to disable warnings.
-
-    Hot-path read on every executed statement. Settings-derived values
-    are memoised; env-var / default values fall through to a fresh
-    resolution each call (same cost as before — a single
-    ``os.environ.get``). ``configure(SLOW_QUERY_MS=…)`` invalidates the
-    cache so a runtime swap takes effect on the next query.
-    """
-    global _SLOW_QUERY_MS_CACHE
-    cached = _SLOW_QUERY_MS_CACHE
-    if cached is not _SLOW_QUERY_UNSET:
-        # Runtime narrow: only the sentinel sits in the ``object`` arm
-        # of the union. Anything else must be the float / None we
-        # wrote ourselves. ``isinstance`` is a real check (not an
-        # ``assert``) so ``python -O`` can't strip it.
-        if cached is None or isinstance(cached, float):
-            return cached
-        # Defensive: if some external code mutated the cache to a
-        # bogus type, drop the entry and re-resolve cleanly instead
-        # of returning an opaque object to the slow-query
-        # comparison.
-        _SLOW_QUERY_MS_CACHE = _SLOW_QUERY_UNSET
-    val, cacheable = _resolve_slow_query_ms()
-    if cacheable:
-        _SLOW_QUERY_MS_CACHE = val
-    return val
+    return _SLOW_QUERY_MS_SETTING.get()
 
 
+def _retry_attempts() -> int:
+    val = _RETRY_ATTEMPTS_SETTING.get()
+    return val if val is not None else 3
+
+
+def _retry_backoff() -> float:
+    val = _RETRY_BACKOFF_SETTING.get()
+    return val if val is not None else 0.1
+
+
+# Backwards-compat shims kept for tests / external callers that
+# import the previous helper names directly.
 def _invalidate_slow_query_cache() -> None:
-    """Drop the memoised threshold. Called by ``conf.configure`` whenever
-    ``SLOW_QUERY_MS`` is part of the kwargs so the next query reads the
-    fresh value."""
-    global _SLOW_QUERY_MS_CACHE
-    _SLOW_QUERY_MS_CACHE = _SLOW_QUERY_UNSET
+    _SLOW_QUERY_MS_SETTING.invalidate()
+
+
+def _invalidate_retry_cache() -> None:
+    _RETRY_ATTEMPTS_SETTING.invalidate()
+    _RETRY_BACKOFF_SETTING.invalidate()
+
+
+def _resolve_slow_query_ms() -> tuple[float | None, bool]:
+    return _SLOW_QUERY_MS_SETTING._resolve()
+
+
+def _resolve_retry_attempts() -> tuple[int, bool]:
+    val, cacheable = _RETRY_ATTEMPTS_SETTING._resolve()
+    return (val if val is not None else 3), cacheable
+
+
+def _resolve_retry_backoff() -> tuple[float, bool]:
+    val, cacheable = _RETRY_BACKOFF_SETTING._resolve()
+    return (val if val is not None else 0.1), cacheable
 
 
 # ── Transient-error retry ─────────────────────────────────────────────────────
@@ -120,98 +102,6 @@ def _invalidate_slow_query_cache() -> None:
 # transparently. Retrying *inside* a transaction is NOT safe — committed
 # state would be re-applied. Backends pass ``in_transaction=True`` to skip
 # retry when atomic_depth > 0.
-#
-# Resolution order for both ``RETRY_ATTEMPTS`` and ``RETRY_BACKOFF``:
-#   1. ``settings.RETRY_ATTEMPTS`` / ``settings.RETRY_BACKOFF`` (when the
-#      user passed it to ``configure``)
-#   2. env var ``DORM_RETRY_ATTEMPTS`` / ``DORM_RETRY_BACKOFF``
-#   3. built-in default (3 attempts / 0.1 s).
-#
-# Memoised the same way ``SLOW_QUERY_MS`` is — only settings-derived
-# values are cached; env / default branch re-reads each call so test
-# ``monkeypatch.setenv`` keeps working without manual invalidation.
-
-_RETRY_ATTEMPTS_CACHE: int | object = _SLOW_QUERY_UNSET
-_RETRY_BACKOFF_CACHE: float | object = _SLOW_QUERY_UNSET
-
-
-def _resolve_retry_attempts() -> tuple[int, bool]:
-    try:
-        from ..conf import settings
-
-        explicit = getattr(settings, "_explicit_settings", set())
-        if "RETRY_ATTEMPTS" in explicit:
-            try:
-                return int(settings.RETRY_ATTEMPTS), True
-            except (TypeError, ValueError):
-                pass
-    except Exception:
-        pass
-    raw = os.environ.get("DORM_RETRY_ATTEMPTS")
-    if raw is not None:
-        try:
-            return int(raw), False
-        except (TypeError, ValueError):
-            pass
-    return 3, False
-
-
-def _resolve_retry_backoff() -> tuple[float, bool]:
-    try:
-        from ..conf import settings
-
-        explicit = getattr(settings, "_explicit_settings", set())
-        if "RETRY_BACKOFF" in explicit:
-            try:
-                return float(settings.RETRY_BACKOFF), True
-            except (TypeError, ValueError):
-                pass
-    except Exception:
-        pass
-    raw = os.environ.get("DORM_RETRY_BACKOFF")
-    if raw is not None:
-        try:
-            return float(raw), False
-        except (TypeError, ValueError):
-            pass
-    return 0.1, False
-
-
-def _retry_attempts() -> int:
-    global _RETRY_ATTEMPTS_CACHE
-    cached = _RETRY_ATTEMPTS_CACHE
-    if cached is not _SLOW_QUERY_UNSET:
-        if isinstance(cached, int):
-            return cached
-        # Defensive: external mutation to a bogus type — drop and
-        # re-resolve. ``isinstance`` is a real runtime check so
-        # ``python -O`` (which strips ``assert``) doesn't disarm it.
-        _RETRY_ATTEMPTS_CACHE = _SLOW_QUERY_UNSET
-    val, cacheable = _resolve_retry_attempts()
-    if cacheable:
-        _RETRY_ATTEMPTS_CACHE = val
-    return val
-
-
-def _retry_backoff() -> float:
-    global _RETRY_BACKOFF_CACHE
-    cached = _RETRY_BACKOFF_CACHE
-    if cached is not _SLOW_QUERY_UNSET:
-        if isinstance(cached, float):
-            return cached
-        _RETRY_BACKOFF_CACHE = _SLOW_QUERY_UNSET
-    val, cacheable = _resolve_retry_backoff()
-    if cacheable:
-        _RETRY_BACKOFF_CACHE = val
-    return val
-
-
-def _invalidate_retry_cache() -> None:
-    """Drop the memoised retry knobs. Called by ``conf.configure`` whenever
-    ``RETRY_ATTEMPTS`` / ``RETRY_BACKOFF`` are part of the kwargs."""
-    global _RETRY_ATTEMPTS_CACHE, _RETRY_BACKOFF_CACHE
-    _RETRY_ATTEMPTS_CACHE = _SLOW_QUERY_UNSET
-    _RETRY_BACKOFF_CACHE = _SLOW_QUERY_UNSET
 
 
 

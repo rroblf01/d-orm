@@ -337,7 +337,7 @@ def test_querylog_summary_groups_by_template():
     assert summary, "summary should not be empty"
     # All three calls share one SQL template, so one entry should
     # account for at least three records.
-    counts = [s["count"] for s in summary]
+    counts = [s.count for s in summary]
     assert max(counts) >= 3
 
 

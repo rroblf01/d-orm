@@ -228,12 +228,14 @@ class Settings:
     READ_AFTER_WRITE_WINDOW: float | None = 3.0
 
     _configured = False
-    # Names of settings the user passed to ``configure(...)`` at least
-    # once. Lets resolvers distinguish a class-level default (apply
-    # env-var or built-in fallback first) from an explicit user choice
-    # (always wins). Shared across the global ``settings`` singleton —
-    # there is exactly one instance, so the mutable default is safe.
-    _explicit_settings: set[str] = set()
+
+    def __init__(self) -> None:
+        # Per-instance set of setting names the user passed to
+        # ``configure(...)``. Lets resolvers distinguish a class-level
+        # default from an explicit user choice. Lives on the instance
+        # so a hypothetical second ``Settings()`` doesn't share state
+        # with the singleton.
+        self._explicit_settings: set[str] = set()
 
     def configure(self, **kwargs):
         self._explicit_settings.update(kwargs.keys())
@@ -469,22 +471,18 @@ def configure(**kwargs):
     # ``configure(SLOW_QUERY_MS=...)`` is picked up by the next
     # query without each ``log_query`` call paying the
     # settings / env lookup itself.
-    if "SLOW_QUERY_MS" in kwargs:
-        try:
-            from .db.utils import _invalidate_slow_query_cache
-            _invalidate_slow_query_cache()
-        except Exception:
-            pass
-    if "RETRY_ATTEMPTS" in kwargs or "RETRY_BACKOFF" in kwargs:
-        try:
-            from .db.utils import _invalidate_retry_cache
-            _invalidate_retry_cache()
-        except Exception:
-            pass
-    # Sticky read-after-write window state lives in a ContextVar so
-    # the router knows which (model, alias) pairs are still inside
-    # the freshness window. The settings change itself doesn't need
-    # to drop the ContextVar; future reads will see the new window.
+    # Fan an invalidation pulse across every memoised setting whose
+    # name appears in ``kwargs``. Each ``MemoizedSetting`` instance
+    # registered itself at import time, so this single call replaces
+    # the per-knob ``if "X" in kwargs: invalidate_X()`` blocks that
+    # used to grow without bound. Sticky read-after-write window
+    # state lives in a ContextVar that re-reads the threshold on
+    # every check, so it doesn't need an explicit invalidation hook.
+    try:
+        from ._memoized_setting import invalidate_all_for
+        invalidate_all_for(kwargs)
+    except Exception:
+        pass
 
 
 def _autodiscover_settings() -> bool:
