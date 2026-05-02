@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import inspect
 import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
@@ -182,8 +183,22 @@ def assertNumQueries(num: int) -> Iterator[_NumQueriesContext]:
 # context-manager form. Wrapping ``contextmanager`` output is fiddly
 # because the generator-function it returns doesn't itself act as a
 # decorator factory, so we expose a tiny shim.
+#
+# The decorator inspects the wrapped function: ``async def`` test
+# functions get an async wrapper that ``await``s the coroutine inside
+# the context manager — without this the sync wrapper would call the
+# ``async def`` (returning a coroutine) and exit the context manager
+# *before* the coroutine ran, so every query landed outside the count
+# window and the assertion always failed with count 0.
 def _decorate_with_num_queries(num: int):
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*a: Any, **kw: Any) -> Any:
+                with assertNumQueries(num):
+                    return await fn(*a, **kw)
+            return awrapper
+
         @functools.wraps(fn)
         def wrapper(*a: Any, **kw: Any) -> Any:
             with assertNumQueries(num):
@@ -192,14 +207,11 @@ def _decorate_with_num_queries(num: int):
     return deco
 
 
-# Patch in the decorator behaviour without changing the public name.
-_assert_num_queries_cm = assertNumQueries
-
-
 def assertNumQueriesFactory(num: int):
     """Decorator factory equivalent of :func:`assertNumQueries` —
-    use as ``@assertNumQueriesFactory(N)`` on a test function. The
-    context-manager form remains the primary API.
+    use as ``@assertNumQueriesFactory(N)`` on a test function (sync
+    or ``async def``). The context-manager form remains the primary
+    API for inline use.
     """
     return _decorate_with_num_queries(num)
 

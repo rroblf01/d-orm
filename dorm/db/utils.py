@@ -89,11 +89,17 @@ def _slow_query_ms() -> float | None:
     global _SLOW_QUERY_MS_CACHE
     cached = _SLOW_QUERY_MS_CACHE
     if cached is not _SLOW_QUERY_UNSET:
-        # Narrow the union back down: only ``_SLOW_QUERY_UNSET`` lands
-        # in the ``object`` arm. Once we've ruled it out, the value is
-        # the cached float / None we wrote earlier.
-        assert cached is None or isinstance(cached, float)
-        return cached
+        # Runtime narrow: only the sentinel sits in the ``object`` arm
+        # of the union. Anything else must be the float / None we
+        # wrote ourselves. ``isinstance`` is a real check (not an
+        # ``assert``) so ``python -O`` can't strip it.
+        if cached is None or isinstance(cached, float):
+            return cached
+        # Defensive: if some external code mutated the cache to a
+        # bogus type, drop the entry and re-resolve cleanly instead
+        # of returning an opaque object to the slow-query
+        # comparison.
+        _SLOW_QUERY_MS_CACHE = _SLOW_QUERY_UNSET
     val, cacheable = _resolve_slow_query_ms()
     if cacheable:
         _SLOW_QUERY_MS_CACHE = val
@@ -175,8 +181,12 @@ def _retry_attempts() -> int:
     global _RETRY_ATTEMPTS_CACHE
     cached = _RETRY_ATTEMPTS_CACHE
     if cached is not _SLOW_QUERY_UNSET:
-        assert isinstance(cached, int)
-        return cached
+        if isinstance(cached, int):
+            return cached
+        # Defensive: external mutation to a bogus type — drop and
+        # re-resolve. ``isinstance`` is a real runtime check so
+        # ``python -O`` (which strips ``assert``) doesn't disarm it.
+        _RETRY_ATTEMPTS_CACHE = _SLOW_QUERY_UNSET
     val, cacheable = _resolve_retry_attempts()
     if cacheable:
         _RETRY_ATTEMPTS_CACHE = val
@@ -187,8 +197,9 @@ def _retry_backoff() -> float:
     global _RETRY_BACKOFF_CACHE
     cached = _RETRY_BACKOFF_CACHE
     if cached is not _SLOW_QUERY_UNSET:
-        assert isinstance(cached, float)
-        return cached
+        if isinstance(cached, float):
+            return cached
+        _RETRY_BACKOFF_CACHE = _SLOW_QUERY_UNSET
     val, cacheable = _resolve_retry_backoff()
     if cacheable:
         _RETRY_BACKOFF_CACHE = val

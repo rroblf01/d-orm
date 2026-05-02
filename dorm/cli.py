@@ -460,6 +460,13 @@ def cmd_lint_migrations(args):
     from .migrations.lint import LintResult, lint_directory
 
     apps = list(_settings_runtime.INSTALLED_APPS)
+    # Migration files frequently import from ``<app>.models`` (for
+    # callable defaults, ``RunPython`` helpers, etc.). Loading the
+    # apps up-front means ``importlib.exec_module`` on each migration
+    # file finds those imports satisfied — without this, the linter
+    # would fail with a useless ``ModuleNotFoundError`` on real
+    # projects.
+    _load_apps(apps)
     aggregate = LintResult()
     for app in apps:
         mig_dir = _find_migrations_dir(app)

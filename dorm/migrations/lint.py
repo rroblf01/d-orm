@@ -147,28 +147,29 @@ def _check_add_field(op: Any, file: str, suppressed: set[str]) -> Iterable[Findi
 def _check_alter_field(op: Any, file: str, suppressed: set[str]) -> Iterable[Finding]:
     if "DORM-M002" in suppressed:
         return ()
-    # Heuristic: if the operation carries an ``old_field`` and the
-    # field class differs from ``field``, it's a type change. When the
-    # operation only carries ``field``, we can't tell — flag at INFO.
+    # ``AlterField`` in dorm only carries the *new* field instance —
+    # there is no ``old_field`` attribute we can compare against to
+    # detect a type change vs. a flag flip. So we warn on EVERY
+    # ``AlterField`` and let the developer decide whether it's a safe
+    # NULL toggle or a destructive type rewrite. Suppress with the
+    # standard ``noqa`` comment carrying the DORM-M002 code once the
+    # change has been reviewed.
     new = getattr(op, "field", None)
-    old = getattr(op, "old_field", None)
     if new is None:
         return ()
-    if old is not None and type(new).__name__ != type(old).__name__:
-        return [
-            Finding(
-                code="DORM-M002",
-                file=file,
-                operation=_op_repr(op),
-                message=(
-                    f"AlterField changes type "
-                    f"{type(old).__name__} → {type(new).__name__}. On PG and "
-                    "MySQL this rewrites the whole table — review the size "
-                    "and lock impact before deploying."
-                ),
-            )
-        ]
-    return ()
+    return [
+        Finding(
+            code="DORM-M002",
+            file=file,
+            operation=_op_repr(op),
+            message=(
+                f"AlterField on {type(new).__name__} — review whether this "
+                "changes the column type (PG / MySQL rewrite the whole "
+                "table) or just toggles NOT NULL / default. Add "
+                "`# noqa: DORM-M002` once you've confirmed it's safe."
+            ),
+        )
+    ]
 
 
 def _check_add_index(op: Any, file: str, suppressed: set[str]) -> Iterable[Finding]:
@@ -243,7 +244,13 @@ def lint_operations(
 
 def lint_migration_file(path: Path) -> LintResult:
     """Load *path*, instantiate its ``Migration`` class, and lint its
-    operations. Returns a :class:`LintResult`."""
+    operations. Returns a :class:`LintResult`.
+
+    The temporary module entry is registered in ``sys.modules`` (so
+    relative imports inside the migration resolve), then dropped on
+    exit so a long-running linter run on hundreds of migrations
+    doesn't grow ``sys.modules`` without bound.
+    """
     import importlib.util
     import sys
 
@@ -259,30 +266,37 @@ def lint_migration_file(path: Path) -> LintResult:
     # ours. We do require ``dorm`` to be importable.
     sys.modules[spec.name] = module
     try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        # A migration file that fails to import is itself a finding —
-        # surface it loud so the CI gate fails.
-        return LintResult(
-            findings=[
-                Finding(
-                    code="DORM-M000",
-                    file=str(path),
-                    operation="<import error>",
-                    message=f"Could not import migration: {exc!r}",
-                )
-            ]
-        )
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            # A migration file that fails to import is itself a
+            # finding — surface it loud so the CI gate fails.
+            return LintResult(
+                findings=[
+                    Finding(
+                        code="DORM-M000",
+                        file=str(path),
+                        operation="<import error>",
+                        message=f"Could not import migration: {exc!r}",
+                    )
+                ]
+            )
 
-    migration_cls = getattr(module, "Migration", None)
-    if migration_cls is None:
-        return LintResult()
-    operations = list(getattr(migration_cls, "operations", []) or [])
-    return lint_operations(
-        operations,
-        file=str(path),
-        suppressed=_suppressed_codes(path),
-    )
+        migration_cls = getattr(module, "Migration", None)
+        if migration_cls is None:
+            return LintResult()
+        operations = list(getattr(migration_cls, "operations", []) or [])
+        return lint_operations(
+            operations,
+            file=str(path),
+            suppressed=_suppressed_codes(path),
+        )
+    finally:
+        # Drop the temporary module entry so a linter run over many
+        # migrations doesn't accumulate ``_dorm_lint_*`` keys in
+        # ``sys.modules``. ``pop(..., None)`` is no-op if exec_module
+        # itself raised before the entry was visible.
+        sys.modules.pop(spec.name, None)
 
 
 def lint_directory(directory: Path) -> LintResult:
