@@ -192,16 +192,30 @@ forgot to commit a migration: it exits non-zero on schema drift.
 ```python
 from dorm.signals import pre_query, post_query
 
-def trace(sender, sql, params, alias, duration_ms=None, **kwargs):
-    log.info("query", sql=sql, params=params, alias=alias, ms=duration_ms)
+def trace(sender, sql, params, **kwargs):
+    # ``sender`` is the vendor string ("postgresql", "sqlite",
+    # "libsql"). ``post_query`` adds ``elapsed_ms`` (float) and
+    # ``error`` (None on success).
+    log.info(
+        "query",
+        sql=sql,
+        params=params,
+        vendor=sender,
+        ms=kwargs.get("elapsed_ms"),
+        error=kwargs.get("error"),
+    )
 
 pre_query.connect(trace)
 post_query.connect(trace)
 ```
 
 Connect these to OpenTelemetry, structlog, or whatever you use. The
-`post_query` signal includes `duration_ms`, which is what you want
-to feed your APM.
+`post_query` signal includes `elapsed_ms`, which is what you want
+to feed your APM. The signal does NOT carry the database alias
+today — receivers that need it should consult
+``dorm.db.connection.get_connection().alias`` from the calling
+context. Subscribe to [the issue](https://github.com/rroblf01/d-orm/issues)
+if you need ``alias`` plumbed through the signal payload.
 
 ### Pool stats
 
@@ -285,9 +299,11 @@ app = QueryLogASGIMiddleware(your_asgi_app)
 ```
 
 `TemplateStats` is a `@dataclass(slots=True)` with attributes
-`template`, `count`, `total_ms`, `p50_ms`, `p95_ms`. Same for
-`QueryRecord` (one per executed statement) — both expose `.to_dict()`
-for serialisation pipelines that prefer dict shapes.
+`template`, `count`, `total_ms`, `p50_ms`, `p95_ms`. `QueryRecord`
+(one per executed statement) carries `sql`, `params`, `vendor`
+(``"postgresql"`` / ``"sqlite"`` / ``"libsql"`` — sourced from the
+signal's ``sender``), `elapsed_ms` and `error`. Both expose
+`.to_dict()` for serialisation pipelines that prefer dict shapes.
 
 ### Slow-query warning (`SLOW_QUERY_MS`)
 

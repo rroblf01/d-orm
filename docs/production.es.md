@@ -196,16 +196,28 @@ commitear una migración: sale non-zero ante drift.
 ```python
 from dorm.signals import pre_query, post_query
 
-def trace(sender, sql, params, alias, duration_ms=None, **kwargs):
-    log.info("query", sql=sql, params=params, alias=alias, ms=duration_ms)
+def trace(sender, sql, params, **kwargs):
+    # ``sender`` es el string del vendor ("postgresql", "sqlite",
+    # "libsql"). ``post_query`` añade ``elapsed_ms`` (float) y
+    # ``error`` (None si fue OK).
+    log.info(
+        "query",
+        sql=sql,
+        params=params,
+        vendor=sender,
+        ms=kwargs.get("elapsed_ms"),
+        error=kwargs.get("error"),
+    )
 
 pre_query.connect(trace)
 post_query.connect(trace)
 ```
 
 Conéctalos a OpenTelemetry, structlog, o lo que uses. La señal
-`post_query` incluye `duration_ms`, que es lo que querrás meter en
-tu APM.
+`post_query` incluye `elapsed_ms`, que es lo que querrás meter en
+tu APM. La señal NO carga el alias de DB hoy — receivers que lo
+necesiten deben mirar ``dorm.db.connection.get_connection().alias``
+desde el contexto de llamada.
 
 ### Stats del pool
 
@@ -288,8 +300,10 @@ app = QueryLogASGIMiddleware(your_asgi_app)
 ```
 
 `TemplateStats` es un `@dataclass(slots=True)` con atributos
-`template`, `count`, `total_ms`, `p50_ms`, `p95_ms`. Igual para
-`QueryRecord` (uno por sentencia ejecutada) — ambos exponen
+`template`, `count`, `total_ms`, `p50_ms`, `p95_ms`. `QueryRecord`
+(uno por sentencia ejecutada) carga `sql`, `params`, `vendor`
+(``"postgresql"`` / ``"sqlite"`` / ``"libsql"`` — del ``sender`` de
+la señal), `elapsed_ms` y `error`. Ambos exponen
 `.to_dict()` para pipelines de serialización que prefieran dicts.
 
 ### Aviso de query lenta (`SLOW_QUERY_MS`)

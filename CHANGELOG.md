@@ -346,6 +346,40 @@ The release groups into three themes:
   place instead of calling ``ContextVar.set`` per query — saves
   one ``Token`` allocation per signal.
 
+### Audit fixes (pre-publish)
+
+- **`QueryRecord.alias` → `QueryRecord.vendor`.** The ``post_query``
+  signal carries ``sender=vendor``, never an ``alias`` key, so the
+  field had been silently storing the vendor name under a misleading
+  label. ``QueryRecord.to_dict()`` likewise emits ``vendor`` now.
+- **Prometheus exposition no longer emits an empty ``alias=""``
+  label** — counters group by ``(vendor, outcome)``, histograms by
+  ``vendor``. If a future release threads the alias through
+  ``log_query`` the label will come back; until then it isn't
+  there to confuse scrapers.
+- **`ScopedCollector` forwards `sender` to `on_event`.** The
+  dispatcher peels ``sender`` off as a positional arg before
+  ``**kwargs``, so receivers built on ``ScopedCollector``
+  (querylog, querycount, ``assertNumQueries``) were getting an
+  empty kwargs payload for the vendor name. The collector now
+  merges ``sender`` back into the kwargs dict it passes to
+  ``on_event``.
+- **`LocMemCache` prefix index ignores keys without ``:``.** A
+  ``delete_pattern("foo:*")`` would previously evict a bare
+  ``"foo"`` key because both shared the same prefix bucket. Keys
+  without a namespace separator now sit outside the index and
+  only get reached by the slow-path ``fnmatch`` scan when a glob
+  actually matches them.
+- **`UserManager.create_user`** raises ``RuntimeError`` (not a
+  bare ``assert``) when the manager isn't attached to a model.
+  ``python -O`` strips ``assert``, so the previous shape would
+  have crashed with a confusing ``AttributeError`` under
+  optimised builds.
+- **`Settings.FIELD_ENCRYPTION_KEYS`** lives on the instance (set
+  in ``__init__``) instead of as a class-level mutable default.
+  Singleton-style usage isn't affected; a future test that builds
+  a second ``Settings()`` won't inherit a shared list.
+
 ### Tests
 
 - ``tests/test_slow_query_setting_v2_6.py`` — ``SLOW_QUERY_MS``
@@ -374,6 +408,12 @@ The release groups into three themes:
   path. Skipped when ``cryptography`` isn't installed.
 - ``tests/test_v2_8_prometheus.py`` — install idempotence, query
   recording, exposition shape, label escaping, uninstall reset.
+- ``tests/test_v3_audit_fixes.py`` — pins the audit-fix list above:
+  ``QueryRecord.vendor`` rename, Prometheus exposition without
+  ``alias=""``, ``ScopedCollector`` sender forwarding,
+  ``LocMemCache`` prefix-index correctness for keys without
+  ``:``, ``UserManager`` unbound-manager error path, per-instance
+  ``FIELD_ENCRYPTION_KEYS``.
 
 ## [2.5.0] - 2026-05-02
 
