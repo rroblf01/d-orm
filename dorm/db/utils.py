@@ -26,17 +26,86 @@ ASYNC_ATOMIC_STATE: contextvars.ContextVar = contextvars.ContextVar(
 
 # ── Query logging ─────────────────────────────────────────────────────────────
 # Enable with `logging.getLogger("dorm.db").setLevel(logging.DEBUG)`.
-# Slow-query threshold (ms) controlled by env var DORM_SLOW_QUERY_MS (default 500).
+# Slow-query threshold (ms) resolved from ``settings.SLOW_QUERY_MS`` first,
+# then env var ``DORM_SLOW_QUERY_MS``, then the 500 ms default. ``None``
+# disables the warning entirely (the comparison itself is skipped).
 
 _slow_log = logging.getLogger("dorm.db")
 
 
-def _slow_query_ms() -> float:
-    """Read the slow-query threshold dynamically so tests / runtime tweaks work."""
+# Sentinel for the unresolved-cache state. ``None`` is a valid resolved
+# value (it disables the slow-query warning), so we can't use ``None``
+# as the sentinel for "not yet computed". A unique object instance is
+# unambiguous and survives ``configure(SLOW_QUERY_MS=None)``.
+_SLOW_QUERY_UNSET: object = object()
+_SLOW_QUERY_MS_CACHE: float | None | object = _SLOW_QUERY_UNSET
+
+
+def _resolve_slow_query_ms() -> tuple[float | None, bool]:
+    """Read the threshold from settings → env → default.
+
+    Returns ``(value, cacheable)``. ``cacheable`` is True only when the
+    value came from an explicit ``configure(SLOW_QUERY_MS=…)`` call —
+    in that case ``configure`` invalidates the cache when the setting
+    changes again. The env-var / default branch is NOT cached so a
+    process that reads ``DORM_SLOW_QUERY_MS`` from a mutable
+    environment (test monkeypatch, runtime tweak) keeps observing the
+    current value without an explicit invalidation.
+    """
     try:
-        return float(os.environ.get("DORM_SLOW_QUERY_MS", "500"))
-    except (TypeError, ValueError):
-        return 500.0
+        from ..conf import settings
+
+        explicit = getattr(settings, "_explicit_settings", set())
+        if "SLOW_QUERY_MS" in explicit:
+            val = settings.SLOW_QUERY_MS
+            if val is None:
+                return None, True
+            try:
+                return float(val), True
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+
+    raw = os.environ.get("DORM_SLOW_QUERY_MS")
+    if raw is not None:
+        try:
+            return float(raw), False
+        except (TypeError, ValueError):
+            pass
+
+    return 500.0, False
+
+
+def _slow_query_ms() -> float | None:
+    """Slow-query threshold (ms). Returns ``None`` to disable warnings.
+
+    Hot-path read on every executed statement. Settings-derived values
+    are memoised; env-var / default values fall through to a fresh
+    resolution each call (same cost as before — a single
+    ``os.environ.get``). ``configure(SLOW_QUERY_MS=…)`` invalidates the
+    cache so a runtime swap takes effect on the next query.
+    """
+    global _SLOW_QUERY_MS_CACHE
+    cached = _SLOW_QUERY_MS_CACHE
+    if cached is not _SLOW_QUERY_UNSET:
+        # Narrow the union back down: only ``_SLOW_QUERY_UNSET`` lands
+        # in the ``object`` arm. Once we've ruled it out, the value is
+        # the cached float / None we wrote earlier.
+        assert cached is None or isinstance(cached, float)
+        return cached
+    val, cacheable = _resolve_slow_query_ms()
+    if cacheable:
+        _SLOW_QUERY_MS_CACHE = val
+    return val
+
+
+def _invalidate_slow_query_cache() -> None:
+    """Drop the memoised threshold. Called by ``conf.configure`` whenever
+    ``SLOW_QUERY_MS`` is part of the kwargs so the next query reads the
+    fresh value."""
+    global _SLOW_QUERY_MS_CACHE
+    _SLOW_QUERY_MS_CACHE = _SLOW_QUERY_UNSET
 
 
 # ── Transient-error retry ─────────────────────────────────────────────────────
@@ -318,11 +387,13 @@ def _mask_params(sql: str, params):
 def log_query(vendor: str, sql: str, params=None):
     """Time a SQL statement and dispatch query observability signals.
 
-    Emits DEBUG for every query, WARNING above ``DORM_SLOW_QUERY_MS``,
-    and fires ``dorm.signals.pre_query`` / ``post_query`` so user code can
-    wire metrics or tracing. Values bound to columns whose name suggests
-    a credential (``password``, ``token``, ``api_key`` …) are redacted
-    in DEBUG / slow-query log lines — see :func:`_mask_params`. Signal
+    Emits DEBUG for every query, WARNING above the slow-query threshold
+    (``settings.SLOW_QUERY_MS`` → env var ``DORM_SLOW_QUERY_MS`` → 500 ms
+    default; ``None`` disables the warning entirely), and fires
+    ``dorm.signals.pre_query`` / ``post_query`` so user code can wire
+    metrics or tracing. Values bound to columns whose name suggests a
+    credential (``password``, ``token``, ``api_key`` …) are redacted in
+    DEBUG / slow-query log lines — see :func:`_mask_params`. Signal
     receivers still get the raw params; if you ship them to external
     sinks, you're responsible for additional sanitisation there.
     """
@@ -344,7 +415,7 @@ def log_query(vendor: str, sql: str, params=None):
             safe_params = _mask_params(sql, params)
             log.debug("(%.2fms) %s; params=%r", elapsed_ms, sql, safe_params)
         threshold = _slow_query_ms()
-        if elapsed_ms >= threshold:
+        if threshold is not None and elapsed_ms >= threshold:
             log.warning(
                 "slow query (%.2fms ≥ %.0fms): %s", elapsed_ms, threshold, sql
             )

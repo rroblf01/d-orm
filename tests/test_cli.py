@@ -436,6 +436,19 @@ def test_init_template_includes_pool_settings(tmp_path: Path):
         "OPTIONS examples for psycopg keys should appear in the template"
 
 
+def test_init_template_includes_slow_query_ms(tmp_path: Path):
+    """`dorm init` should scaffold the v2.6 ``SLOW_QUERY_MS`` knob."""
+    result = _run([sys.executable, "-m", "dorm", "init"], cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    body = (tmp_path / "settings.py").read_text()
+    assert "SLOW_QUERY_MS = 500.0" in body
+    # The comment block above the setting documents the resolution order
+    # and the ``None`` / ``0`` escape hatches; assert one anchor from each
+    # so a future template tweak that drops them is caught.
+    assert "DORM_SLOW_QUERY_MS" in body
+    assert "None" in body and "disable" in body.lower()
+
+
 def test_init_with_app_creates_files(tmp_path: Path):
     """`dorm init --app NAME` should create NAME/__init__.py and models.py."""
     result = _run([sys.executable, "-m", "dorm", "init", "--app", "users"], cwd=tmp_path)

@@ -191,10 +191,33 @@ class Settings:
     # without ceremony; set ``True`` in production deployments
     # to surface the misconfiguration loudly.
     CACHE_REQUIRE_SIGNING_KEY: bool = False
+    # Slow-query threshold in milliseconds. Every executed
+    # statement is timed (cost already paid for the
+    # ``pre_query`` / ``post_query`` signals) and the
+    # ``dorm.db.backends.<vendor>`` logger emits a WARNING when
+    # the elapsed time crosses this threshold.
+    #
+    # Resolution order (first non-None wins):
+    #   1. ``settings.SLOW_QUERY_MS``
+    #   2. env var ``DORM_SLOW_QUERY_MS``
+    #   3. default ``500.0``
+    #
+    # Set to ``None`` to disable the warning entirely (the
+    # comparison itself is skipped, so there is no per-query
+    # cost beyond the timing already collected). Set to ``0``
+    # to log every query as slow (useful in development).
+    SLOW_QUERY_MS: float | None = 500.0
 
     _configured = False
+    # Names of settings the user passed to ``configure(...)`` at least
+    # once. Lets resolvers distinguish a class-level default (apply
+    # env-var or built-in fallback first) from an explicit user choice
+    # (always wins). Shared across the global ``settings`` singleton —
+    # there is exactly one instance, so the mutable default is safe.
+    _explicit_settings: set[str] = set()
 
     def configure(self, **kwargs):
+        self._explicit_settings.update(kwargs.keys())
         for key, value in kwargs.items():
             setattr(self, key, value)
         self._configured = True
@@ -421,6 +444,16 @@ def configure(**kwargs):
         try:
             from .cache import reset_signing_key as _reset_signing_key
             _reset_signing_key()
+        except Exception:
+            pass
+    # Invalidate the memoised slow-query threshold so a mid-run
+    # ``configure(SLOW_QUERY_MS=...)`` is picked up by the next
+    # query without each ``log_query`` call paying the
+    # settings / env lookup itself.
+    if "SLOW_QUERY_MS" in kwargs:
+        try:
+            from .db.utils import _invalidate_slow_query_cache
+            _invalidate_slow_query_cache()
         except Exception:
             pass
 

@@ -197,6 +197,51 @@ indicator of a connection-bound app.
 For one-off debugging, `qs.explain(analyze=True)` returns the planner
 output. Wire it into a dev-only endpoint or use it in `dorm shell`.
 
+### Slow-query warning (`SLOW_QUERY_MS`)
+
+Every executed statement is timed regardless of configuration —
+the `pre_query` / `post_query` signals already need the elapsed
+time, so no extra cost is paid for the slow-query warning. When the
+elapsed time crosses the configured threshold, the
+`dorm.db.backends.<vendor>` logger emits a `WARNING` line with the
+SQL text:
+
+```
+WARNING dorm.db.backends.postgresql: slow query (812.43ms ≥ 500ms): SELECT ...
+```
+
+Configuration (first non-`None` source wins):
+
+| Source | Example | Notes |
+|---|---|---|
+| `settings.SLOW_QUERY_MS` (2.6+) | `dorm.configure(SLOW_QUERY_MS=200)` | always wins; recommended for production |
+| Env var `DORM_SLOW_QUERY_MS` | `export DORM_SLOW_QUERY_MS=300` | fallback when no explicit setting |
+| Default | `500.0` | applied if neither is configured |
+
+Setting `SLOW_QUERY_MS=None` disables the warning entirely (the
+threshold comparison itself is skipped). Setting `0` makes every
+query log as slow — useful in development to surface every SQL
+statement at WARNING level without flipping the whole DEBUG log
+stream on.
+
+The threshold is memoised once after `configure(...)` so the hot
+path doesn't redo the lookup per query. A subsequent
+`configure(SLOW_QUERY_MS=...)` invalidates the memoised value.
+
+```python
+import dorm, logging
+
+# Production: warn on anything slower than 200 ms.
+dorm.configure(SLOW_QUERY_MS=200, DATABASES={...})
+
+# Pipe the warning to your alerting handler.
+logging.getLogger("dorm.db").addHandler(your_alert_handler)
+```
+
+To suppress per-vendor: silence the lower-level logger
+(`dorm.db.backends.postgresql`) instead — the whole `dorm.db`
+namespace is hierarchical.
+
 ## Async event-loop sharing
 
 If you run async code (FastAPI, asyncio scripts), make sure all your
@@ -225,6 +270,7 @@ Useful loggers:
 | `dorm.db.lifecycle.postgresql` | INFO on PG pool open/close (size/timeout); DB name + host at DEBUG only, so per-tenant metadata never reaches an INFO sink unless you explicitly enable it |
 | `dorm.migrations` | INFO per applied migration |
 | `dorm.queries` | DEBUG per executed SQL (off by default) |
+| `dorm.db.backends.<vendor>` | WARNING per query slower than `SLOW_QUERY_MS` (see [Slow-query warning](#slow-query-warning-slow_query_ms)) |
 | `dorm.signals` | ERROR per receiver exception (with full traceback) — wire this to Sentry / your alert pipeline so a broken `post_save` hook is observable |
 | `dorm.conf` | INFO when a `settings.py` is autodiscovered (audit trail for which file shaped the config) |
 

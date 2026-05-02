@@ -444,7 +444,7 @@ toml = [
 
 [[package]]
 name = "djanorm"
-version = "2.5.0"
+version = "2.6.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

@@ -6,6 +6,71 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-05-02
+
+Minor release. Single feature: the slow-query warning threshold
+is now configurable via ``settings.SLOW_QUERY_MS`` (previously
+env-var only). Zero performance impact — the timing it relies on
+was already happening unconditionally for the
+``pre_query`` / ``post_query`` signals.
+
+### Added — `settings.SLOW_QUERY_MS`
+
+- New setting (default ``500.0`` ms). When an executed statement
+  takes longer than this threshold, the
+  ``dorm.db.backends.<vendor>`` logger emits a ``WARNING`` line
+  with the SQL text and elapsed time. Resolution order: explicit
+  ``configure(SLOW_QUERY_MS=…)`` > env var
+  ``DORM_SLOW_QUERY_MS`` > default ``500.0``.
+- ``SLOW_QUERY_MS=None`` disables the warning entirely — the
+  threshold comparison itself is skipped, so on-path cost
+  collapses to the timing already collected for the query
+  signals.
+- ``SLOW_QUERY_MS=0`` logs every query as slow — useful in
+  development to surface every SQL statement at WARNING level
+  without flipping the ``dorm.queries`` DEBUG stream on.
+- The threshold is memoised once after ``configure(...)``;
+  subsequent ``configure(SLOW_QUERY_MS=…)`` calls invalidate
+  the memo so a runtime swap takes effect on the next query.
+  The env-var / default branch is intentionally not memoised so
+  test ``monkeypatch.setenv`` workflows keep observing the
+  current value without an explicit cache flush.
+
+### Changed — `Settings` tracks explicit overrides
+
+- New private attribute ``Settings._explicit_settings`` records
+  the names of settings the user passed to ``configure(...)``.
+  Resolvers can now distinguish a class-level default (apply
+  env-var or built-in fallback first) from an explicit user
+  choice (always wins). Currently consumed by the
+  slow-query-threshold resolver only; future resolvers (cache
+  TTLs, retry knobs, …) can hook in the same way.
+
+### Tests
+
+- ``tests/test_slow_query_setting_v2_6.py`` — covers the new
+  resolution order, ``None``-disables behaviour,
+  ``configure``-driven cache invalidation, and the
+  ``cacheable`` flag returned by ``_resolve_slow_query_ms``.
+- Pre-existing env-var-only tests in
+  ``tests/test_production_readiness.py`` keep working unchanged
+  (env path is still active when no explicit setting is given).
+
+### CLI
+
+- ``dorm init`` now scaffolds the new setting in the generated
+  ``settings.py`` (``SLOW_QUERY_MS = 500.0``) with an inline
+  comment block documenting the resolution order and the
+  ``None`` / ``0`` escape hatches. Existing files are left
+  untouched (idempotent ``init`` is unchanged).
+
+### Documentation
+
+- ``docs/production.en.md`` / ``docs/production.es.md`` — new
+  *Slow-query warning (`SLOW_QUERY_MS`)* subsection under
+  *Observability*, plus a row in the *Logging* table pointing at
+  ``dorm.db.backends.<vendor>``.
+
 ## [2.5.0] - 2026-05-02
 
 Minor release. Two opt-in features land alongside the v2.4.1

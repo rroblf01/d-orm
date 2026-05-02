@@ -600,6 +600,21 @@ Uncomment the DATABASES block for the backend you want to use.
 # both __init__.py and models.py. Set INSTALLED_APPS explicitly to override.
 # INSTALLED_APPS = []
 
+# ── Observability ─────────────────────────────────────────────────────────────
+# Slow-query warning threshold in milliseconds. Every executed statement is
+# already timed for the ``pre_query`` / ``post_query`` signals, so this
+# warning is free at runtime — only the comparison is added.
+#
+# When a statement crosses the threshold, the
+# ``dorm.db.backends.<vendor>`` logger emits a WARNING with the SQL text and
+# elapsed time. Pipe the ``dorm.db`` logger to your alerting handler in
+# production.
+#
+# Resolution order: this setting > env var ``DORM_SLOW_QUERY_MS`` > default 500.
+# Set to ``None`` to disable the warning entirely. Set to ``0`` to log every
+# query as slow (handy in development without flipping the full DEBUG stream).
+SLOW_QUERY_MS = 500.0
+
 # ── File storage (dorm.FileField) ─────────────────────────────────────────────
 # Uncomment one of the blocks below if you use ``dorm.FileField``. If left
 # unset, dorm falls back to a default ``FileSystemStorage`` rooted at
