@@ -257,10 +257,19 @@ class Settings:
         self._configured = True
 
     def __getattr__(self, name):
-        raise ImproperlyConfigured(
-            f"Requested setting '{name}' but dorm is not configured. "
-            "Call dorm.configure(...) first."
-        )
+        # Distinguish "dorm not configured" from "configured but the
+        # caller asked for an unknown setting". The first should
+        # surface ``ImproperlyConfigured`` so the missing-bootstrap
+        # error is loud; the second should be a plain
+        # ``AttributeError`` so ``getattr(settings, name, default)``
+        # works (the encrypted / cache / token modules all rely on
+        # the default-fallback shape).
+        if not self.__dict__.get("_configured", False):
+            raise ImproperlyConfigured(
+                f"Requested setting '{name}' but dorm is not configured. "
+                "Call dorm.configure(...) first."
+            )
+        raise AttributeError(name)
 
 
 settings = Settings()

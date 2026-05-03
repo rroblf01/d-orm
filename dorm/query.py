@@ -1121,6 +1121,9 @@ class SQLQuery:
             try:
                 field = model._meta.get_field(fname)
             except FieldDoesNotExist:
+                # Stash for the post-loop diagnostic — `parts` already
+                # popped *fname*, so reinsert for the error message.
+                parts.insert(0, fname)
                 break
             if hasattr(field, "remote_field_to"):
                 rel_model = field._resolve_related_model()
@@ -1151,7 +1154,23 @@ class SQLQuery:
                 model = rel_model
                 current_alias = join_alias
             else:
-                break
+                # Trying to traverse INTO a scalar field (e.g.
+                # ``filter(jsonfield__sub_key="x")``). dorm doesn't
+                # implement JSON-path traversal yet — silently
+                # falling through used to emit
+                # ``WHERE "sub_key" = ?`` referencing a non-existent
+                # column; on SQLite that produced 0 rows with no
+                # error, masking the typo / unsupported feature.
+                # Raise instead so users get a clear signal.
+                raise FieldDoesNotExist(
+                    f"Cannot resolve lookup path "
+                    f"{'__'.join(field_parts)!r} on model "
+                    f"{model.__name__!r}: field {fname!r} is not a "
+                    f"relation, and traversal into scalar / JSON "
+                    f"fields is not supported. Remove the "
+                    f"sub-lookup, or use a built-in lookup suffix "
+                    f"(``__exact``, ``__icontains``, ...)."
+                )
 
         fname = parts[0]
         try:

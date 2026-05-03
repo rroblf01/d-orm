@@ -203,6 +203,22 @@ class EncryptedFieldMixin:
         # always returns ``str``; the user's parsing is on them.
         return _encrypt(str(value), deterministic=self.deterministic)
 
+    def get_db_prep_value(self, value: Any) -> Any:
+        # dorm's INSERT / UPDATE / filter binding code calls
+        # ``get_db_prep_value``; the mixin used to only override the
+        # Django-convention ``get_prep_value`` and the encryption hook
+        # was silently bypassed — plaintext was written to disk. Route
+        # through the encryption hook here so the on-disk column
+        # actually carries ciphertext.
+        if value is None:
+            return None
+        # Avoid double-encrypting an already-encrypted token (callers
+        # that re-save a row whose attribute was loaded from the DB
+        # via ``from_db_value`` already see plaintext, but defensive).
+        if isinstance(value, str) and value.startswith("v1:"):
+            return value
+        return self.get_prep_value(value)
+
     def from_db_value(self, value: Any, *_args: Any) -> Any:
         if value is None:
             return None
