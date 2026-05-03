@@ -425,7 +425,7 @@ def parse_database_url(url: str) -> dict:
     if scheme in {"mysql", "mariadb", "mysql+pymysql", "mysql+asyncmy"}:
         # Scaffold support — recognises the URL form so projects can
         # pin on a forward-compatible config string today. The actual
-        # connection raises ``ImproperlyConfigured`` until the v3.2
+        # connection raises ``ImproperlyConfigured`` until the v3.1
         # backend implementation lands. Using the same scheme set
         # SQLAlchemy uses keeps copy-pasted DATABASE_URLs portable.
         from typing import Any as _Any

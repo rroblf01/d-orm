@@ -60,7 +60,7 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "json_has_key": ("{col} ? %s", lambda v: v),       # JSONB
     "json_has_any": ("{col} ?| %s", lambda v: v),      # JSONB, list of keys
     "json_has_all": ("{col} ?& %s", lambda v: v),      # JSONB, list of keys
-    # ── Django-name aliases (3.1+) ────────────────────────────────────────
+    # ── Django-name aliases (3.0+) ────────────────────────────────────────
     # Django's contrib.postgres uses these spellings on
     # ``JSONField`` / ``ArrayField``. The ``contains`` lookup is
     # field-type ambiguous — for strings the LIKE version above is

@@ -95,7 +95,7 @@ behave like their Django siblings. New in dorm:
 - `dorm dbcheck` — diff each model against the live schema.
 - `dorm sql users.User` — print the `CREATE TABLE` for a model.
 
-``dorm migrate --fake`` and ``dorm migrate --fake-initial`` (3.1+)
+``dorm migrate --fake`` and ``dorm migrate --fake-initial`` (3.0+)
 record migrations as applied without running their operations —
 useful when adopting dorm against a hand-managed legacy database.
 
@@ -142,32 +142,32 @@ async calls stay silent.
 
 - **No admin site.** dorm is an ORM, not a CMS framework.
 - **No request/response middleware.** dorm has no HTTP layer.
-- **Timezone-aware datetimes** ship in 3.1+: set
+- **Timezone-aware datetimes** ship in 3.0+: set
   `settings.USE_TZ = True` to enable Django ≥4-compatible behaviour
   (naive→aware conversion, UTC normalisation on insert,
   ``TIMESTAMP WITH TIME ZONE`` on PG). Default ``False`` keeps
-  pre-3.1 behaviour.
+  pre-3.0+ behaviour.
 - **Optional `dorm.contrib.auth`** (3.0+). User / Group / Permission
   models with stdlib PBKDF2 hashing. Stateless reset tokens land
-  in 3.1 (``dorm.contrib.auth.tokens.PasswordResetTokenGenerator``)
+  in 3.0+ (``dorm.contrib.auth.tokens.PasswordResetTokenGenerator``)
   for the password-reset / email-verification flow.
-- **`Meta.permissions = [...]`** (3.1+) — declare custom
+- **`Meta.permissions = [...]`** (3.0+) — declare custom
   permissions on a model and surface them in the ``auth_permission``
   table via ``dorm.contrib.auth.management.sync_permissions()``.
-- **`Meta.proxy = True`** (3.1+) — proxy models share the parent's
+- **`Meta.proxy = True`** (3.0+) — proxy models share the parent's
   table; the autodetector skips them so ``makemigrations`` doesn't
   emit a phantom ``CreateModel``.
-- **`Model.from_db(db, field_names, values)`** (3.1+) — Django-parity
+- **`Model.from_db(db, field_names, values)`** (3.0+) — Django-parity
   hook for custom hydration. Stamps the resulting instance's
   ``_state.db`` with the alias the row came from.
-- **`QuerySet.dates(field, kind)` / `datetimes(field, kind)`** (3.1+) —
+- **`QuerySet.dates(field, kind)` / `datetimes(field, kind)`** (3.0+) —
   return ``list[date]`` / ``list[datetime]`` of distinct truncated
   values, suitable for archive listings.
 - **`dorm.transaction.savepoint()` / `savepoint_commit()` /
-  `savepoint_rollback()`** (3.1+) — manual savepoints inside an
+  `savepoint_rollback()`** (3.0+) — manual savepoints inside an
   ``atomic()`` block. Mirror Django's
   ``django.db.transaction.savepoint`` family.
-- **JSONField PG operators** (3.1+): ``__contained_by``,
+- **JSONField PG operators** (3.0+): ``__contained_by``,
   ``__has_key``, ``__has_keys``, ``__has_any_keys``, ``__overlap``,
   ``__len``. Same spelling as Django's ``contrib.postgres``.
 - **`GenericForeignKey`** lives in `dorm.contrib.contenttypes`,
@@ -179,13 +179,13 @@ async calls stay silent.
 - **Optional Prometheus exporter** (3.0+) via
   ``dorm.contrib.prometheus`` — counters + histograms in plain
   text-exposition format, no third-party scraper SDK.
-- **Multi-tenant `dorm.contrib.tenants`** (3.1+) — PostgreSQL
+- **Multi-tenant `dorm.contrib.tenants`** (3.0+) — PostgreSQL
   ``search_path`` switching via ``TenantContext`` /
   ``aTenantContext`` context managers; per-tenant migration
-  runner lands with v3.2.
-- **MySQL / MariaDB scaffold** (3.1+). ``ENGINE = "mysql"`` parses
+  runner lands with v3.1.
+- **MySQL / MariaDB scaffold** (3.0+). ``ENGINE = "mysql"`` parses
   through ``parse_database_url`` and the connection wrapper
-  raises ``ImproperlyConfigured`` pointing at the v3.2
+  raises ``ImproperlyConfigured`` pointing at the v3.1
   implementation milestone. Lets users pin on a forward-compatible
   config string today.
 

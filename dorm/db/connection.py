@@ -187,14 +187,14 @@ def _create_sync_connection(alias: str, db_settings: dict):
         from .backends.postgresql import PostgreSQLDatabaseWrapper
         return PostgreSQLDatabaseWrapper(db_settings)
     if "mysql" in engine or "mariadb" in engine:
-        # Scaffold backend (3.1+); raises ``ImproperlyConfigured``
-        # at construction time pointing at the v3.2 milestone.
+        # Scaffold backend (3.0+); raises ``ImproperlyConfigured``
+        # at construction time pointing at the v3.1 milestone.
         from .backends.mysql import MySQLDatabaseWrapper
         return MySQLDatabaseWrapper(db_settings, alias)
 
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql', 'libsql' (mysql scaffold ships in 3.1+)."
+        "Supported: 'sqlite', 'postgresql', 'libsql' (mysql scaffold ships in 3.0+)."
     )
 
 
@@ -216,7 +216,7 @@ def _create_async_connection(alias: str, db_settings: dict):
 
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql', 'libsql' (mysql scaffold ships in 3.1+)."
+        "Supported: 'sqlite', 'postgresql', 'libsql' (mysql scaffold ships in 3.0+)."
     )
 
 

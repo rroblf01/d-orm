@@ -10,7 +10,7 @@ según el vendor de la conexión activa:
 | PostgreSQL (pgvector)    | `vector(N)`   | operadores `<->` / `<=>` / `<#>`             |
 | SQLite (sqlite-vec)      | `BLOB`        | `vec_distance_L2` / `vec_distance_cosine`    |
 | libsql / Turso (nativo)  | `F32_BLOB(N)` | `vector_distance_l2` / `vector_distance_cos` |
-| MariaDB 11.7+ / MySQL 9.0+ (3.1+) | `VECTOR(N)` | `VEC_DISTANCE_EUCLIDEAN` / `VEC_DISTANCE_COSINE` |
+| MariaDB 11.7+ / MySQL 9.0+ (3.0+) | `VECTOR(N)` | `VEC_DISTANCE_EUCLIDEAN` / `VEC_DISTANCE_COSINE` |
 
 El módulo expone:
 
@@ -30,9 +30,9 @@ El módulo expone:
 > `CosineDistance` sobre embeddings L2-normalizados (equivalente
 > matemáticamente módulo una constante).
 >
-> **Nota sobre el backend MySQL (3.1+)** — el wrapper Python del
+> **Nota sobre el backend MySQL (3.0+)** — el wrapper Python del
 > motor MySQL / MariaDB es scaffold hoy (raisea
-> `ImproperlyConfigured` hasta que v3.2 traiga la implementación
+> `ImproperlyConfigured` hasta que v3.1 traiga la implementación
 > completa). ``VectorField`` y las distancias emiten ya el SQL
 > correcto, así que cuando el wrapper aterrice el código vectorial
 > seguirá funcionando sin cambios. La fila ``VECTOR`` en la tabla

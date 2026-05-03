@@ -1,6 +1,6 @@
 """MySQL / MariaDB backend — scaffold only.
 
-The full implementation lands in v3.2. This module ships the
+The full implementation lands in v3.1. This module ships the
 ``ENGINE = "mysql"`` route + URL parser entry so projects can pin
 on a future-compatible config string today, and surface a clear
 error pointing at the roadmap if they try to actually connect.
@@ -27,7 +27,7 @@ from ...exceptions import ImproperlyConfigured
 
 _NOT_IMPLEMENTED_MESSAGE = (
     "The MySQL / MariaDB backend is not implemented yet (slated for "
-    "v3.2). Track progress on the project tracker, or use the "
+    "v3.1). Track progress on the project tracker, or use the "
     "PostgreSQL / SQLite / libsql backends in the meantime."
 )
 

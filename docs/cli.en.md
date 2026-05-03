@@ -52,8 +52,8 @@ dorm migrate blog zero             # rollback every migration
 | Flag | Purpose |
 |---|---|
 | `--dry-run` / `--plan` (3.0+) | print SQL only; don't touch the DB or update the recorder. ``--plan`` is an alias kept for users coming from Django |
-| `--fake` (3.1+) | record every pending migration as applied without running its operations. Use when adopting dorm against a hand-managed legacy schema |
-| `--fake-initial` (3.1+) | only fake the *initial* migration of each app, and only when its ``CreateModel`` target tables already exist |
+| `--fake` (3.0+) | record every pending migration as applied without running its operations. Use when adopting dorm against a hand-managed legacy schema |
+| `--fake-initial` (3.0+) | only fake the *initial* migration of each app, and only when its ``CreateModel`` target tables already exist |
 | `--verbosity N` | 0 = silent, 1 = default, 2 = verbose |
 | `--settings PATH` | settings module to load |
 

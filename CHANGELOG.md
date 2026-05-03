@@ -8,27 +8,38 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Roadmap (not yet shipped)
 
-- **MySQL / MariaDB backend full implementation** (slated v3.2).
-  Scaffold ships in 3.1 (recognises ``ENGINE = "mysql"`` so
+- **MySQL / MariaDB backend full implementation** (slated v3.1).
+  Scaffold ships in 3.0 (recognises ``ENGINE = "mysql"`` so
   configs parse) but the wire-up raises ``ImproperlyConfigured``
-  pointing at the v3.2 milestone.
-- **Per-tenant migration runner** (slated v3.2). The runtime
-  ``TenantContext`` ships in 3.1; the auto-CREATE-SCHEMA + per-
+  pointing at the v3.1 milestone.
+- **Per-tenant migration runner** (slated v3.1). The runtime
+  ``TenantContext`` ships in 3.0; the auto-CREATE-SCHEMA + per-
   tenant migrate command lands with the second cut.
-- **History / audit trail** ``HistoricalModel`` mixin (slated v3.2).
-- **Connection-pool autoscaling** (slated v3.2). Risky — needs
+- **History / audit trail** ``HistoricalModel`` mixin (slated v3.1).
+- **Connection-pool autoscaling** (slated v3.1). Risky — needs
   careful rollout.
-- **`dorm migrate-from-django` converter** (slated v3.2). Parses
+- **`dorm migrate-from-django` converter** (slated v3.1). Parses
   Django ``models.py``, emits dorm-shaped equivalents.
 - **`FilteredRelation`** — JOIN with condition (slated v4.0).
   Significant queryset-compiler lift; defer until the compiler
   refactor lands.
 
-## [3.1.0] - 2026-05-02
+## [3.0.0] - 2026-05-02
 
-Django-parity sprint. Closes the last 7 🔴 gaps in the audit
-matrix plus 5 🟠 power-user items. **No breaking changes** versus
-3.0; every addition is opt-in or covered by a default-off setting.
+Major release. Combines three originally-planned minors (2.6 / 2.7 / 2.8)
+plus the Django-parity sprint that was going to ship as 3.1. **No
+breaking changes vs 2.5**: every addition is opt-in or zero-cost
+when unused.
+
+The Django-parity additions close the last 🔴 gaps that would have
+blocked a Django→dorm migration: timezone-aware datetimes,
+proxy models, ``dates()`` / ``datetimes()``, ``migrate --fake``,
+JSONField PG operators, ``Field.deconstruct()``, ``Model.from_db()``,
+manual savepoint API, ``Meta.permissions``, password-reset tokens,
+multi-tenant context manager, and the MySQL / MariaDB scaffold +
+vector support.
+
+### Django-parity additions (was going to ship as 3.1)
 
 ### Added — `settings.USE_TZ` actually wired up
 
@@ -179,29 +190,6 @@ matrix plus 5 🟠 power-user items. **No breaking changes** versus
   round-trip, invalid id rejection.
 - ``tests/test_v3_1_tenants.py`` — schema validation, context
   state restoration, non-PG backend rejection.
-
-## [3.0.0] - 2026-05-02
-
-Major release. Three originally-planned minors (2.6 / 2.7 / 2.8)
-land together — the breadth of additions warrants the version
-jump but **NO breaking changes versus 2.5.0**. Every new feature
-is opt-in or zero-cost when unused; existing apps upgrade with
-no behaviour change.
-
-The release groups into three themes:
-
-1. **Observability + dev tooling** (was 2.6) — slow-query
-   warning, retry knobs, query-count guard, sticky
-   read-after-write window, `dorm lint-migrations`,
-   request-scoped `QueryLog`, `LocMemCache`,
-   `Manager.cache_get` row cache.
-2. **Auth + parity + DX** (was 2.7) — `dorm.contrib.auth`,
-   `dorm.contrib.asyncguard`, expanded DB function corpus,
-   `Meta.managed = False`, async-aware `dorm shell`,
-   benchmark suite skeleton, "no-asgiref" migration docs.
-3. **Encryption + metrics** (was 2.8) — `EncryptedCharField` /
-   `EncryptedTextField` (AES-GCM, key rotation),
-   `dorm.contrib.prometheus` exporter.
 
 ### Added — `settings.SLOW_QUERY_MS`
 

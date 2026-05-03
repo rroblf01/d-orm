@@ -17,7 +17,7 @@ Works with **SQLite**, **PostgreSQL** and **libsql / Turso**. Ships with migrati
 - **`dorm.contrib.auth.tokens`** — stateless HMAC-signed reset tokens for password-reset / email-verification flows.
 - **`Meta.permissions = [...]`** + **`sync_permissions()`** — declare custom permissions, materialise into `auth_permission`.
 - **`dorm.contrib.tenants`** — `TenantContext` / `aTenantContext` for PostgreSQL `search_path` switching.
-- **MySQL / MariaDB scaffold** — `ENGINE = "mysql"` parses through `parse_database_url`; the connection wrapper raises `ImproperlyConfigured` pointing at v3.2 for the full implementation.
+- **MySQL / MariaDB scaffold** — `ENGINE = "mysql"` parses through `parse_database_url`; the connection wrapper raises `ImproperlyConfigured` pointing at v3.1 for the full implementation.
 - **MySQL / MariaDB vector support** — `VectorField` returns `VECTOR(N)` and distance expressions compile to `VEC_DISTANCE_EUCLIDEAN` / `VEC_DISTANCE_COSINE`.
 
 ## What's new in 3.0

@@ -1,10 +1,10 @@
-"""Schema-per-tenant routing — scaffold for v3.1.
+"""Schema-per-tenant routing — scaffold for v3.0 (full impl v3.1).
 
 Switches PostgreSQL ``search_path`` per request / context so the
 same model classes route to a tenant-specific schema. The shape
 below is the public API; the full implementation (per-tenant
 migration runner, schema bootstrap helpers, signal-driven
-schema-create-on-tenant-add) lands in v3.2.
+schema-create-on-tenant-add) lands in v3.1.
 
 Today this module ships:
 
@@ -70,7 +70,7 @@ def current_tenant() -> str | None:
 
 def register_tenant(name: str) -> None:
     """Add *name* to the in-process tenant registry. The migration
-    runner (v3.2) reads this list to know which schemas to migrate.
+    runner (v3.1) reads this list to know which schemas to migrate.
     Idempotent."""
     _validate_schema_name(name)
     _registered_tenants.add(name)
