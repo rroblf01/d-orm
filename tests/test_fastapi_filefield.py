@@ -7,12 +7,19 @@ in the docs or a regression in the multipart bridge between
 ``UploadFile``, :class:`dorm.File` and the storage layer would slip
 through CI silently.
 
-Each test here mounts a live FastAPI app via ``TestClient`` (real
-multipart parser, real Pydantic validation, real status codes) and
-verifies that the full POST → save → DB → URL → DELETE cycle works
-against ``FileSystemStorage``. The same code paths run unchanged
-against ``S3Storage`` — that switch is exercised in
-``test_s3_storage_minio.py``.
+Each test here mounts a live FastAPI app via ``httpx.AsyncClient`` +
+``ASGITransport`` (real multipart parser, real Pydantic validation,
+real status codes) and verifies that the full POST → save → DB → URL
+→ DELETE cycle works against ``FileSystemStorage``. The same code
+paths run unchanged against ``S3Storage`` — that switch is exercised
+in ``test_s3_storage_minio.py``.
+
+We avoid Starlette's sync ``TestClient`` on purpose: it spawns an
+anyio portal thread per request, which under ``pytest -n N`` on
+Python 3.14 + psycopg async pool was triggering one-off worker
+SIGSEGVs (the portal thread's interpreter shutdown raced the
+session-loop pool finalisation). ``AsyncClient`` keeps everything on
+the test's own event loop, removing the threading interaction.
 
 Skipped automatically when FastAPI / httpx aren't installed (the
 recipe is opt-in, the test suite shouldn't refuse to run for users
@@ -34,19 +41,10 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 pytest.importorskip("multipart")  # python-multipart, used by UploadFile
 
-# Pin every test in this file to the same xdist worker. ``TestClient``
-# spawns a lifespan thread per app + drives the async ORM under that
-# thread; under ``-n N`` parallel workers we'd been seeing one-off
-# ``worker 'gw0' crashed`` failures in CI when psycopg's async pool
-# got finalised mid-flight by a sibling worker's interpreter shutdown.
-# Same-worker scheduling keeps the pool lifecycle linear within the
-# file (and lets faulthandler dump a useful stack on the next hang
-# instead of a bare worker death).
-pytestmark = pytest.mark.xdist_group("fastapi_filefield")
-
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+import httpx  # noqa: E402
+from httpx import ASGITransport  # noqa: E402
 
 import dorm  # noqa: E402
 from dorm.contrib.pydantic import DormSchema  # noqa: E402
@@ -218,29 +216,27 @@ def _build_app() -> FastAPI:
 
 
 @pytest.fixture
-def client(media_root, documents_table):
-    """Return a FastAPI ``TestClient`` bound to a fresh app for each
-    test.
-
-    Skip the ``with TestClient(...) as c`` form on purpose: that
-    triggers the app's lifespan, which spawns an anyio portal
-    thread. The portal interacts poorly with psycopg's async pool
-    under ``pytest -n N`` — CI was seeing one-off worker crashes
-    when a sibling worker's interpreter shutdown raced the portal
-    thread's finaliser. The app declares no lifespan handlers, so
-    the bare-instance form is functionally identical and avoids
-    the thread.
+async def client(media_root, documents_table):
+    """Async ``httpx.AsyncClient`` driving the FastAPI app via
+    ``ASGITransport`` — keeps every request on the test's event loop
+    so the psycopg async pool sees a single, coherent loop. The sync
+    ``starlette.testclient.TestClient`` we used earlier spawned an
+    anyio portal thread per request and was the source of one-off
+    ``worker 'gw0' crashed`` failures under ``pytest -n N`` on
+    Python 3.14.
     """
     app = _build_app()
-    yield TestClient(app)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
 
 
 # ── Upload pipeline ──────────────────────────────────────────────────────────
 
 
 class TestUpload:
-    def test_upload_persists_file_and_returns_url(self, client, media_root):
-        response = client.post(
+    async def test_upload_persists_file_and_returns_url(self, client, media_root):
+        response = await client.post(
             "/documents",
             data={"name": "Q1 Report"},
             files={"file": ("q1.pdf", b"PDF body bytes", "application/pdf")},
@@ -256,8 +252,8 @@ class TestUpload:
         assert on_disk.exists()
         assert on_disk.read_bytes() == b"PDF body bytes"
 
-    def test_upload_persists_via_dorm_orm(self, client, media_root):
-        response = client.post(
+    async def test_upload_persists_via_dorm_orm(self, client, media_root):
+        response = await client.post(
             "/documents",
             data={"name": "OrmCheck"},
             files={"file": ("x.bin", b"row-roundtrip", "application/octet-stream")},
@@ -267,17 +263,17 @@ class TestUpload:
 
         # Read back via the ORM (no HTTP) — the column is the
         # storage name, not the public URL.
-        loaded = FastApiDoc.objects.get(pk=pk)
+        loaded = await FastApiDoc.objects.aget(pk=pk)
         assert loaded.attachment.name == "docs/x.bin"
         assert loaded.attachment.size == len(b"row-roundtrip")
 
-    def test_upload_streams_large_payload(self, client, media_root):
+    async def test_upload_streams_large_payload(self, client, media_root):
         # Pick a payload bigger than the default ``UploadFile`` spool
         # threshold (1 MB) so the bridge from ``SpooledTemporaryFile``
         # to dorm's ``File.chunks`` actually exercises disk IO, not
         # the in-memory fast path.
         big = b"a" * (3 * 1024 * 1024)  # 3 MiB
-        response = client.post(
+        response = await client.post(
             "/documents",
             data={"name": "Big"},
             files={"file": ("big.bin", big, "application/octet-stream")},
@@ -286,28 +282,28 @@ class TestUpload:
         on_disk = media_root / "docs" / "big.bin"
         assert on_disk.read_bytes() == big
 
-    def test_upload_rejects_missing_filename(self, client):
+    async def test_upload_rejects_missing_filename(self, client):
         # An empty filename in the multipart envelope is rejected at
         # FastAPI's parser (422) before our handler's defensive 400
         # branch fires. Either way, the contract is "no row, no file
         # written" — assert on that behaviour instead of pinning the
         # exact status code, since whether the rejection happens at
         # the validator or the handler depends on the FastAPI version.
-        response = client.post(
+        response = await client.post(
             "/documents",
             data={"name": "no-name"},
             files={"file": ("", b"bytes", "application/octet-stream")},
         )
         assert response.status_code in (400, 422), response.text
-        assert not FastApiDoc.objects.filter(name="no-name").exists()
+        assert not await FastApiDoc.objects.filter(name="no-name").aexists()
 
-    def test_filename_collisions_get_unique_names(self, client, media_root):
-        first = client.post(
+    async def test_filename_collisions_get_unique_names(self, client, media_root):
+        first = await client.post(
             "/documents",
             data={"name": "first"},
             files={"file": ("same.txt", b"first", "text/plain")},
         )
-        second = client.post(
+        second = await client.post(
             "/documents",
             data={"name": "second"},
             files={"file": ("same.txt", b"second", "text/plain")},
@@ -327,56 +323,56 @@ class TestUpload:
 
 
 class TestRetrieve:
-    def test_list_returns_url_for_each_doc(self, client, media_root):
+    async def test_list_returns_url_for_each_doc(self, client, media_root):
         # Seed two uploads.
-        client.post(
+        await client.post(
             "/documents",
             data={"name": "A"},
             files={"file": ("a.txt", b"A", "text/plain")},
         )
-        client.post(
+        await client.post(
             "/documents",
             data={"name": "B"},
             files={"file": ("b.txt", b"B", "text/plain")},
         )
 
-        listing = client.get("/documents").json()
+        listing = (await client.get("/documents")).json()
         assert {d["name"] for d in listing} == {"A", "B"}
         urls = sorted(d["url"] for d in listing)
         assert urls == ["/media/docs/a.txt", "/media/docs/b.txt"]
 
-    def test_get_individual_doc(self, client):
-        upload = client.post(
+    async def test_get_individual_doc(self, client):
+        upload = await client.post(
             "/documents",
             data={"name": "single"},
             files={"file": ("s.txt", b"single", "text/plain")},
         )
         pk = upload.json()["id"]
 
-        got = client.get(f"/documents/{pk}").json()
+        got = (await client.get(f"/documents/{pk}")).json()
         assert got["name"] == "single"
         assert got["url"] == "/media/docs/s.txt"
 
-    def test_get_missing_doc_404s(self, client):
-        assert client.get("/documents/999999").status_code == 404
+    async def test_get_missing_doc_404s(self, client):
+        assert (await client.get("/documents/999999")).status_code == 404
 
 
 # ── Streaming download ───────────────────────────────────────────────────────
 
 
 class TestDownload:
-    def test_download_returns_file_bytes(self, client):
+    async def test_download_returns_file_bytes(self, client):
         # Use a payload that doesn't fit in one default chunk so the
         # streaming response actually concatenates multiple frames.
         body = b"chunked-body" * 10_000   # ~120 KB
-        upload = client.post(
+        upload = await client.post(
             "/documents",
             data={"name": "down"},
             files={"file": ("d.bin", body, "application/octet-stream")},
         )
         pk = upload.json()["id"]
 
-        resp = client.get(f"/documents/{pk}/download")
+        resp = await client.get(f"/documents/{pk}/download")
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/octet-stream"
         assert "attachment" in resp.headers["content-disposition"]
@@ -384,23 +380,23 @@ class TestDownload:
         # Concatenate the streamed chunks back into the original payload.
         assert resp.content == body
 
-    def test_download_404_when_no_attachment(self, client):
+    async def test_download_404_when_no_attachment(self, client):
         # Create a row without any attachment via the ORM directly,
         # then ask for its download endpoint.
-        doc = FastApiDoc.objects.create(name="empty")
-        resp = client.get(f"/documents/{doc.pk}/download")
+        doc = await FastApiDoc.objects.acreate(name="empty")
+        resp = await client.get(f"/documents/{doc.pk}/download")
         assert resp.status_code == 404
 
-    def test_download_404_on_missing_doc(self, client):
-        assert client.get("/documents/999999/download").status_code == 404
+    async def test_download_404_on_missing_doc(self, client):
+        assert (await client.get("/documents/999999/download")).status_code == 404
 
 
 # ── Deletion ────────────────────────────────────────────────────────────────
 
 
 class TestDelete:
-    def test_delete_removes_row_and_file(self, client, media_root):
-        upload = client.post(
+    async def test_delete_removes_row_and_file(self, client, media_root):
+        upload = await client.post(
             "/documents",
             data={"name": "del"},
             files={"file": ("d.txt", b"d", "text/plain")},
@@ -409,11 +405,11 @@ class TestDelete:
         on_disk = media_root / "docs" / "d.txt"
         assert on_disk.exists()
 
-        resp = client.delete(f"/documents/{pk}")
+        resp = await client.delete(f"/documents/{pk}")
         assert resp.status_code == 204
         # File gone, row gone.
         assert not on_disk.exists()
-        assert not FastApiDoc.objects.filter(pk=pk).exists()
+        assert not await FastApiDoc.objects.filter(pk=pk).aexists()
 
 
 # ── Pydantic round-trip ─────────────────────────────────────────────────────
@@ -426,8 +422,8 @@ class TestPydanticSerialisation:
     the serialised JSON must show the storage name as a plain string,
     not the FieldFile's ``__repr__`` or any other surprise."""
 
-    def test_response_model_serialises_field_file_as_string(self, client):
-        upload = client.post(
+    async def test_response_model_serialises_field_file_as_string(self, client):
+        upload = await client.post(
             "/documents",
             data={"name": "json-shape"},
             files={"file": ("j.txt", b"j", "text/plain")},
@@ -438,10 +434,10 @@ class TestPydanticSerialisation:
         assert isinstance(body["attachment"], str)
         assert body["attachment"] == "docs/j.txt"
 
-    def test_response_model_handles_unset_attachment(self, client):
+    async def test_response_model_handles_unset_attachment(self, client):
         # Create via the ORM with no attachment.
-        doc = FastApiDoc.objects.create(name="bare")
-        body = client.get(f"/documents/{doc.pk}").json()
+        doc = await FastApiDoc.objects.acreate(name="bare")
+        body = (await client.get(f"/documents/{doc.pk}")).json()
         # An unset FileField surfaces as the empty string (the
         # FieldFile's ``.name`` when no file is attached). We don't
         # collapse to ``None`` because the Pydantic union shape
@@ -458,15 +454,12 @@ class TestPydanticSerialisation:
 
 
 class TestAsyncLifecycle:
-    @pytest.mark.asyncio
     async def test_full_cycle_via_async_client(self, media_root, documents_table):
-        """Drive the same routes through ``httpx.AsyncClient``. The
-        ``TestClient`` runs the app in a thread; ``AsyncClient`` keeps
-        everything on one event loop, exercising the fully-async code
-        path the production deployment will hit."""
-        import httpx
-        from httpx import ASGITransport
-
+        """Drive the same routes through ``httpx.AsyncClient`` end-to-end.
+        Other tests already use ``AsyncClient`` via the fixture, but
+        this one stays self-contained on purpose: it builds its own
+        app + transport so a regression in the shared fixture wiring
+        can't mask a real lifecycle break."""
         app = _build_app()
         transport = ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -490,7 +483,7 @@ class TestAsyncLifecycle:
 
         # File and row are gone.
         assert not (media_root / "docs" / "a.txt").exists()
-        assert not FastApiDoc.objects.filter(pk=pk).exists()
+        assert not await FastApiDoc.objects.filter(pk=pk).aexists()
 
 
 # ── ContentFile round-trip without going through HTTP ───────────────────────
