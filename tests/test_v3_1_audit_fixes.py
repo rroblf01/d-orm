@@ -264,7 +264,7 @@ def test_vectorfield_get_db_prep_value_mysql_uses_packed_float32():
     class _MySQLStub:
         vendor = "mysql"
 
-    conn_mod.get_connection = lambda *a, **k: _MySQLStub()
+    conn_mod.get_connection = lambda *a, **k: _MySQLStub()  # ty:ignore[invalid-assignment]
     try:
         out = field.get_db_prep_value([0.1, 0.2, 0.3])
     finally:

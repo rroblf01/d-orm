@@ -179,20 +179,20 @@ def test_functions_coalesce_concat_upper_length():
     rows = list(
         Author.objects.annotate(eml=Coalesce(F("email"), F("name"))).order_by("name")
     )
-    by_name = {r.name: r.eml for r in rows}
+    by_name = {r.name: r.eml for r in rows}  # ty:ignore[unresolved-attribute]
     assert by_name["alice"] == "a@e.com"
     assert by_name["bob"] == "bob"
 
     upper = list(Author.objects.annotate(u=Upper(F("name"))).order_by("name"))
-    assert upper[0].u == "ALICE"
+    assert upper[0].u == "ALICE"  # ty:ignore[unresolved-attribute]
 
     lengths = list(Author.objects.annotate(n=Length(F("name"))).order_by("name"))
-    assert lengths[0].n == 5
+    assert lengths[0].n == 5  # ty:ignore[unresolved-attribute]
 
     concat = list(
         Author.objects.annotate(both=Concat(F("name"), F("name"))).order_by("name")
     )
-    assert concat[0].both == "alicealice"
+    assert concat[0].both == "alicealice"  # ty:ignore[unresolved-attribute]
 
 
 def test_functions_greatest_least():
@@ -207,7 +207,7 @@ def test_functions_greatest_least():
             m=Least(F("age"), F("id")),
         )
     )
-    assert rows[0].g >= rows[0].m
+    assert rows[0].g >= rows[0].m  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ def test_case_when_conditional():
             )
         ).order_by("name")
     )
-    by_name = {r.name: r.bucket for r in rows}
+    by_name = {r.name: r.bucket for r in rows}  # ty:ignore[unresolved-attribute]
     assert by_name["young"] == "junior"
     assert by_name["old"] == "senior"
 
@@ -258,7 +258,7 @@ def test_window_row_number():
         )
     except Exception as exc:
         pytest.skip(f"Window not supported here: {exc}")
-    rns = [r.rn for r in rows]
+    rns = [r.rn for r in rows]  # ty:ignore[unresolved-attribute]
     assert rns == [1, 2, 3]
 
 
@@ -320,7 +320,7 @@ def test_lazy_string_fk_resolves():
     )
     root = Cat.objects.create(name="root")
     child = Cat.objects.create(name="child", parent=root)
-    fresh = Cat.objects.select_related("parent").get(id=child.id)
+    fresh = Cat.objects.select_related("parent").get(id=child.id)  # ty:ignore[unresolved-attribute]
     assert fresh.parent.name == "root"
 
 
@@ -360,7 +360,7 @@ def test_abstract_base_inherits_fields():
         '"name" VARCHAR(20) NOT NULL, "extra" INT NOT NULL DEFAULT 0)'
     )
     c = Concrete.objects.create(name="x", extra=42)
-    fresh = Concrete.objects.get(id=c.id)
+    fresh = Concrete.objects.get(id=c.id)  # ty:ignore[unresolved-attribute]
     assert fresh.name == "x" and fresh.extra == 42
 
 
@@ -597,7 +597,7 @@ def test_encrypted_field_key_rotation_reads_old_ciphertext():
         settings.FIELD_ENCRYPTION_KEYS if "FIELD_ENCRYPTION_KEYS" in prev_keys else None
     )
 
-    settings.FIELD_ENCRYPTION_KEY = key_a
+    settings.FIELD_ENCRYPTION_KEY = key_a  # ty:ignore[invalid-assignment]
     if "FIELD_ENCRYPTION_KEYS" in settings._explicit_settings:
         delattr(settings, "FIELD_ENCRYPTION_KEYS")
         settings._explicit_settings.discard("FIELD_ENCRYPTION_KEYS")
@@ -618,7 +618,7 @@ def test_encrypted_field_key_rotation_reads_old_ciphertext():
         if hasattr(enc_mod, "_reset_cipher_cache"):
             enc_mod._reset_cipher_cache()  # type: ignore[attr-defined]
 
-        fresh = Sec.objects.get(id=s.id)
+        fresh = Sec.objects.get(id=s.id)  # ty:ignore[unresolved-attribute]
         try:
             body = fresh.body
         except Exception as exc:
@@ -712,7 +712,7 @@ def test_has_perm_via_direct_user_permissions(_auth_tables_reuse):
     u.user_permissions.add(p)
     assert u.has_perm("acts.do")
     u.user_permissions.remove(p)
-    assert not User.objects.get(id=u.id).has_perm("acts.do")
+    assert not User.objects.get(id=u.id).has_perm("acts.do")  # ty:ignore[unresolved-attribute]
 
 
 def test_superuser_short_circuits_perms(_auth_tables_reuse):
@@ -724,7 +724,7 @@ def test_superuser_short_circuits_perms(_auth_tables_reuse):
     assert u.has_perm("anything.you.want")
     u.is_active = False
     u.save()
-    fresh = User.objects.get(id=u.id)
+    fresh = User.objects.get(id=u.id)  # ty:ignore[unresolved-attribute]
     assert not fresh.has_perm("anything")
 
 
@@ -862,7 +862,7 @@ def test_contenttype_get_for_model():
     assert ct.app_label == "tests"
     assert ct.model.lower() == "author"
     ct2 = ContentType.objects.get_for_model(Author)
-    assert ct.id == ct2.id  # cached / idempotent
+    assert ct.id == ct2.id  # cached / idempotent  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

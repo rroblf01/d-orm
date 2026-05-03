@@ -35,11 +35,6 @@ def metrics():
 
 ## API
 
-::: dorm.contrib.prometheus.install
-::: dorm.contrib.prometheus.uninstall
-::: dorm.contrib.prometheus.metrics_response
-::: dorm.contrib.prometheus.record_cache_hit
-::: dorm.contrib.prometheus.record_cache_miss
 
 ## Buckets del histograma
 

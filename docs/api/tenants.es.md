@@ -55,11 +55,6 @@ PGOPTIONS='-c search_path=acme,public' dorm migrate
 
 ## API
 
-::: dorm.contrib.tenants.TenantContext
-::: dorm.contrib.tenants.aTenantContext
-::: dorm.contrib.tenants.current_tenant
-::: dorm.contrib.tenants.register_tenant
-::: dorm.contrib.tenants.registered_tenants
 
 ## Backends soportados
 

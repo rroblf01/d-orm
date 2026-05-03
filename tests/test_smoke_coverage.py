@@ -102,14 +102,14 @@ def test_crud_roundtrip():
     from tests.models import Author
 
     a = Author.objects.create(name="Alice", age=40, email="a@e.com")
-    assert a.id is not None
-    a2 = Author.objects.get(id=a.id)
+    assert a.id is not None  # ty:ignore[unresolved-attribute]
+    a2 = Author.objects.get(id=a.id)  # ty:ignore[unresolved-attribute]
     assert a2.name == "Alice"
     a2.name = "Alicia"
     a2.save()
-    assert Author.objects.get(id=a.id).name == "Alicia"
+    assert Author.objects.get(id=a.id).name == "Alicia"  # ty:ignore[unresolved-attribute]
     a2.delete()
-    assert not Author.objects.filter(id=a.id).exists()
+    assert not Author.objects.filter(id=a.id).exists()  # ty:ignore[unresolved-attribute]
 
 
 def test_get_or_create_and_update_or_create():
@@ -123,7 +123,7 @@ def test_get_or_create_and_update_or_create():
         email="goc@e.com", defaults={"name": "Other", "age": 99}
     )
     assert not created2
-    assert a2.id == a.id
+    assert a2.id == a.id  # ty:ignore[unresolved-attribute]
 
     a3, created3 = Author.objects.update_or_create(
         email="goc@e.com",
@@ -232,7 +232,7 @@ def test_subquery_outerref_exists():
             has=Exists(Book.objects.filter(author_id=OuterRef("pk")))
         ).order_by("name")
     )
-    by_name = {r.name: bool(r.has) for r in rows}
+    by_name = {r.name: bool(r.has) for r in rows}  # ty:ignore[unresolved-attribute]
     assert by_name["SubA"] is True
     assert by_name["SubB"] is False
 
@@ -247,7 +247,7 @@ def test_annotate_f_arithmetic_executes():
 
     Author.objects.create(name="AF", age=30, email="af@e.com")
     rows = list(Author.objects.annotate(plus=F("age") + 5))
-    assert rows[0].plus == 35
+    assert rows[0].plus == 35  # ty:ignore[unresolved-attribute]
 
 
 def test_update_with_f_expression():
@@ -281,7 +281,7 @@ def test_prefetch_related():
         Book.objects.create(title=f"P{i}", author=a, pages=100)
     rows = list(Author.objects.prefetch_related("book_set"))
     target = [r for r in rows if r.name == "P"][0]
-    assert len(list(target.book_set.all())) == 3
+    assert len(list(target.book_set.all())) == 3  # ty:ignore[unresolved-attribute]
 
 
 def test_cascade_delete():
@@ -291,7 +291,7 @@ def test_cascade_delete():
     Book.objects.create(title="cb", author=a, pages=1)
     assert Book.objects.filter(author=a).count() == 1
     a.delete()
-    assert Book.objects.filter(author_id=a.id).count() == 0
+    assert Book.objects.filter(author_id=a.id).count() == 0  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -380,7 +380,7 @@ def test_async_crud_roundtrip():
         a = await Author.objects.acreate(name="ASY", age=2, email="async@e.com")
         a.name = "ASY2"
         await a.asave()
-        got = await Author.objects.aget(id=a.id)
+        got = await Author.objects.aget(id=a.id)  # ty:ignore[unresolved-attribute]
         assert got.name == "ASY2"
         rows: list[Author] = []
         async for r in Author.objects.filter(email="async@e.com").aiterator():
@@ -532,7 +532,7 @@ def test_pydantic_schema_for_constructs_validator():
 
     Schema = schema_for(Author)
     sample = Schema(id=1, name="P", age=30, email="p@e.com", is_active=True, publisher_id=None)
-    assert sample.email == "p@e.com"
+    assert sample.email == "p@e.com"  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -563,7 +563,7 @@ def test_bulk_update_in_bulk_iterator_only_defer():
     Author.objects.bulk_update(fetched, fields=["age"])
     assert Author.objects.filter(age__gte=100).count() == 5
 
-    by_id = Author.objects.in_bulk([fetched[0].id, fetched[1].id])
+    by_id = Author.objects.in_bulk([fetched[0].id, fetched[1].id])  # ty:ignore[unresolved-attribute]
     assert len(by_id) == 2
 
     only_qs = list(Author.objects.only("name").order_by("name")[:3])
@@ -580,7 +580,7 @@ def test_refresh_from_db_picks_up_external_update():
     from tests.models import Author
 
     a = Author.objects.create(name="R", age=10, email="r@e.com")
-    Author.objects.filter(id=a.id).update(name="Renamed")
+    Author.objects.filter(id=a.id).update(name="Renamed")  # ty:ignore[unresolved-attribute]
     a.refresh_from_db()
     assert a.name == "Renamed"
 
@@ -599,11 +599,11 @@ def test_save_update_fields_restricts_columns():
     from tests.models import Author
 
     a = Author.objects.create(name="UF1", age=10, email="uf1@e.com", is_active=True)
-    Author.objects.filter(id=a.id).update(age=99)
+    Author.objects.filter(id=a.id).update(age=99)  # ty:ignore[unresolved-attribute]
     a.name = "UF1-renamed"
     a.age = 7  # in-memory only
     a.save(update_fields=["name"])
-    fresh = Author.objects.get(id=a.id)
+    fresh = Author.objects.get(id=a.id)  # ty:ignore[unresolved-attribute]
     assert fresh.name == "UF1-renamed"
     # ``age`` should still be the DB-side 99 — not the in-memory 7.
     assert fresh.age == 99
@@ -682,7 +682,7 @@ def test_jsonfield_value_roundtrip():
     )
     JSDoc.objects.create(payload={"a": 1, "nested": {"b": [1, 2, 3]}})
     fetched = JSDoc.objects.first()
-    assert fetched.payload == {"a": 1, "nested": {"b": [1, 2, 3]}}
+    assert fetched.payload == {"a": 1, "nested": {"b": [1, 2, 3]}}  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -775,8 +775,8 @@ def test_one_to_one_forward_and_reverse():
     p = Profile.objects.create(nickname="ace")
     a = Acct.objects.create(profile=p, email="ace@e.com")
     assert a.profile.nickname == "ace"
-    p_fresh = Profile.objects.get(id=p.id)
-    assert p_fresh.acct.email == "ace@e.com"
+    p_fresh = Profile.objects.get(id=p.id)  # ty:ignore[unresolved-attribute]
+    assert p_fresh.acct.email == "ace@e.com"  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -815,9 +815,9 @@ def test_date_time_duration_roundtrip():
     span = datetime.timedelta(hours=2, minutes=30)
     Tracker.objects.create(d=today, t=now, dur=span)
     fresh = Tracker.objects.first()
-    assert fresh.d == today
-    assert fresh.t == now
-    assert fresh.dur == span
+    assert fresh.d == today  # ty:ignore[unresolved-attribute]
+    assert fresh.t == now  # ty:ignore[unresolved-attribute]
+    assert fresh.dur == span  # ty:ignore[unresolved-attribute]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -918,7 +918,7 @@ def test_encrypted_field_writes_ciphertext_not_plaintext():
     from dorm.contrib.encrypted import EncryptedCharField
     from dorm.db.connection import get_connection
 
-    settings.FIELD_ENCRYPTION_KEY = b"0" * 32
+    settings.FIELD_ENCRYPTION_KEY = b"0" * 32  # ty:ignore[invalid-assignment]
 
     class Secret(dorm.Model):
         body = EncryptedCharField(max_length=200)
@@ -940,14 +940,14 @@ def test_encrypted_field_writes_ciphertext_not_plaintext():
         f'CREATE TABLE "smoke_secret" ({pk_decl}, "body" VARCHAR(200) NOT NULL)'
     )
     s = Secret.objects.create(body="top-secret-data")
-    fresh = Secret.objects.get(id=s.id)
+    fresh = Secret.objects.get(id=s.id)  # ty:ignore[unresolved-attribute]
     assert fresh.body == "top-secret-data"
 
     # Inspect on-disk representation directly. Round-tripping via the
     # ORM would re-decrypt; we want the raw column bytes.
     placeholder = "%s" if vendor == "postgresql" else "?"
     rows = conn.execute(
-        f'SELECT "body" FROM "smoke_secret" WHERE "id" = {placeholder}', [s.id]
+        f'SELECT "body" FROM "smoke_secret" WHERE "id" = {placeholder}', [s.id]  # ty:ignore[unresolved-attribute]
     )
     ct = rows[0]["body"]
     raw = ct if isinstance(ct, bytes) else ct.encode("utf-8")

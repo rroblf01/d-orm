@@ -51,7 +51,7 @@ from ..fields import CharField, TextField
 
 def _import_aesgcm():
     try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:  # pragma: no cover - import-time guard
         raise ImproperlyConfigured(
             "Encrypted fields require the ``cryptography`` package. "

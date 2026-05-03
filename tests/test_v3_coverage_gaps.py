@@ -94,16 +94,16 @@ def test_check_password_rejects_non_string_password_input():
     from dorm.contrib.auth.password import check_password, make_password
 
     h = make_password("real")
-    assert check_password(None, h) is False  # type: ignore[arg-type]
-    assert check_password(123, h) is False  # type: ignore[arg-type]
-    assert check_password(b"bytes", h) is False  # type: ignore[arg-type]
+    assert check_password(None, h) is False  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert check_password(123, h) is False  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert check_password(b"bytes", h) is False  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_check_password_rejects_non_string_encoded_input():
     from dorm.contrib.auth.password import check_password
 
-    assert check_password("anything", None) is False  # type: ignore[arg-type]
-    assert check_password("anything", 12345) is False  # type: ignore[arg-type]
+    assert check_password("anything", None) is False  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert check_password("anything", 12345) is False  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -445,7 +445,7 @@ def test_async_guard_warn_dedup_resets_after_disable_enable():
     # stay quiet if the dedup set survived the disable cycle.
     caplog_records: list[logging.LogRecord] = []
     handler = logging.Handler()
-    handler.emit = caplog_records.append  # type: ignore[assignment]
+    handler.emit = caplog_records.append  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
     logger = logging.getLogger("dorm.asyncguard")
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING)

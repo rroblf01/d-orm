@@ -26,11 +26,6 @@ for stats in log.summary():
 app = QueryLogASGIMiddleware(your_asgi_app)
 ```
 
-::: dorm.contrib.querylog.QueryLog
-::: dorm.contrib.querylog.QueryRecord
-::: dorm.contrib.querylog.TemplateStats
-::: dorm.contrib.querylog.QueryLogASGIMiddleware
-::: dorm.contrib.querylog.query_log
 
 ## `dorm.contrib.querycount`
 
@@ -48,8 +43,6 @@ with query_count_guard(warn_above=20, label="GET /articles"):
 `warn_above` cae a `settings.QUERY_COUNT_WARN` si no se pasa;
 `None` (default) deja el guard inerte (cuenta sin avisar).
 
-::: dorm.contrib.querycount.query_count_guard
-::: dorm.contrib.querycount.QueryCount
 
 ## `dorm.test.assertNumQueries` / `assertMaxQueries`
 
@@ -71,7 +64,3 @@ def test_dashboard(transactional_db):
     render_dashboard()
 ```
 
-::: dorm.test.assertNumQueries
-::: dorm.test.assertMaxQueries
-::: dorm.test.assertNumQueriesFactory
-::: dorm.test.assertMaxQueriesFactory

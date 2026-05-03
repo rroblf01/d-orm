@@ -29,11 +29,6 @@ if not result.ok:
         print(f.code, f.file, f.message)
 ```
 
-::: dorm.migrations.lint.lint_directory
-::: dorm.migrations.lint.lint_migration_file
-::: dorm.migrations.lint.lint_operations
-::: dorm.migrations.lint.Finding
-::: dorm.migrations.lint.LintResult
 
 ## Reglas
 

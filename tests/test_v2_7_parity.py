@@ -65,7 +65,7 @@ def test_prefetch_to_attr_lands_on_named_attribute():
     # ``to_attr`` lands the prefetched list on the named attribute,
     # leaving the original related descriptor untouched.
     assert hasattr(fetched, "cached_books")
-    assert {b.title for b in fetched.cached_books} == {"T1", "T2"}
+    assert {b.title for b in fetched.cached_books} == {"T1", "T2"}  # ty:ignore[not-iterable]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

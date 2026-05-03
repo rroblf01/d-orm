@@ -69,7 +69,7 @@ def test_nullif_requires_two_args():
     """The two-arg constructor signature catches the common bug of
     calling ``NullIf(x)`` (which the SQL would reject at parse time)."""
     with pytest.raises(TypeError):
-        dorm.NullIf(dorm.F("amount"))  # type: ignore[call-arg]
+        dorm.NullIf(dorm.F("amount"))  # type: ignore[call-arg]  # ty:ignore[missing-argument]
 
 
 def test_trim_family_compile():

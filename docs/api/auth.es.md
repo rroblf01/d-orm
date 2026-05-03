@@ -28,10 +28,6 @@ user.has_perm("articles.publish")  # True
 
 ## Modelos
 
-::: dorm.contrib.auth.models.User
-::: dorm.contrib.auth.models.Group
-::: dorm.contrib.auth.models.Permission
-::: dorm.contrib.auth.models.UserManager
 
 ## Hash de password
 
@@ -39,9 +35,6 @@ PBKDF2-SHA256 stdlib, formato
 ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` — misma forma que
 emite Django, así los passwords migran limpio entre ambos ORMs.
 
-::: dorm.contrib.auth.password.make_password
-::: dorm.contrib.auth.password.check_password
-::: dorm.contrib.auth.password.is_password_usable
 
 ## Tokens de reset / verificación
 
@@ -61,9 +54,6 @@ if default_token_generator.check_token(user, posted_token):
     user.save()  # Salt rota — token se invalida automáticamente.
 ```
 
-::: dorm.contrib.auth.tokens.PasswordResetTokenGenerator
-::: dorm.contrib.auth.tokens.default_token_generator
-::: dorm.contrib.auth.tokens.generate_short_lived_token
 
 ## Sync de `Meta.permissions`
 
@@ -86,4 +76,3 @@ from dorm.contrib.auth.management import sync_permissions
 sync_permissions()  # → int, cuenta de filas nuevas creadas
 ```
 
-::: dorm.contrib.auth.management.sync_permissions

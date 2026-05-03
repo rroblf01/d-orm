@@ -384,7 +384,7 @@ def test_locmem_cache_ttl_expiry():
     from dorm.cache.locmem import LocMemCache
 
     c = LocMemCache({"TTL": 60})
-    c.set("k", b"v", timeout=0.05)
+    c.set("k", b"v", timeout=0.05)  # ty:ignore[invalid-argument-type]
     assert c.get("k") == b"v"
     time.sleep(0.1)
     assert c.get("k") is None

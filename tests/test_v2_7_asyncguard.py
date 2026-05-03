@@ -104,4 +104,4 @@ def test_invalid_mode_rejected():
     from dorm.contrib.asyncguard import enable_async_guard
 
     with pytest.raises(ValueError, match="Unknown async-guard mode"):
-        enable_async_guard(mode="bogus")  # type: ignore[arg-type]
+        enable_async_guard(mode="bogus")  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]

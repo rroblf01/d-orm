@@ -80,7 +80,7 @@ def test_decrypt_rejects_tampered_ciphertext(_key):
 
     enc = _encrypt("hello", deterministic=True)
     # Flip a byte in the ciphertext payload (after the ``v1:`` prefix).
-    blob = bytearray(base64.b64decode(enc[3:]))
+    blob = bytearray(base64.b64decode(enc[3:]))  # ty:ignore[not-subscriptable]
     blob[20] ^= 0x01
     tampered = "v1:" + base64.b64encode(bytes(blob)).decode("ascii")
     with pytest.raises(ValueError, match="could not decrypt"):

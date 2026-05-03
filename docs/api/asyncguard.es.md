@@ -40,6 +40,3 @@ por encima del `except Exception` de `Signal.send` y aflora como un
 
 ## API
 
-::: dorm.contrib.asyncguard.enable_async_guard
-::: dorm.contrib.asyncguard.disable_async_guard
-::: dorm.contrib.asyncguard.SyncCallInAsyncContext

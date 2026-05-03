@@ -7,9 +7,6 @@ cierra la race clásica read-then-write.
 
 ## Backends
 
-::: dorm.cache.BaseCache
-::: dorm.cache.redis.RedisCache
-::: dorm.cache.locmem.LocMemCache
 
 `RedisCache` es el default producción (multi-worker, multi-host).
 `LocMemCache` es el LRU en proceso — útil para tests, scripts
@@ -17,13 +14,6 @@ single-process o capa barata frente a Redis.
 
 ## Helpers
 
-::: dorm.cache.get_cache
-::: dorm.cache.reset_caches
-::: dorm.cache.model_cache_namespace
-::: dorm.cache.model_cache_version
-::: dorm.cache.bump_model_cache_version
-::: dorm.cache.sign_payload
-::: dorm.cache.verify_payload
 
 ## Integración QuerySet
 

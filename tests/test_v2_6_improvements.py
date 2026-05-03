@@ -54,11 +54,11 @@ def test_memoized_setting_registers_and_invalidates_via_configure():
         # Configure: explicit + value. Default branch wasn't cached,
         # so next get() picks the new value up immediately.
         settings._explicit_settings.add("_TEST_REG_KNOB")
-        settings._TEST_REG_KNOB = 99  # type: ignore[attr-defined]
+        settings._TEST_REG_KNOB = 99  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert ms.get() == 99
         # Explicit branch IS cached → bypassing the registry leaves
         # the memoised value stale.
-        settings._TEST_REG_KNOB = 7  # type: ignore[attr-defined]
+        settings._TEST_REG_KNOB = 7  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert ms.get() == 99, "explicit-branch value should be memoised"
         invalidate_all_for({"_TEST_REG_KNOB": 7})
         assert ms.get() == 7
@@ -483,14 +483,14 @@ def test_lint_cli_rule_filter(tmp_path, capsys):
     prev_apps = conf_settings.INSTALLED_APPS
 
     try:
-        cli_mod._load_settings = lambda *_a, **_k: None
-        cli_mod._load_apps = lambda *_a, **_k: None
+        cli_mod._load_settings = lambda *_a, **_k: None  # ty:ignore[invalid-assignment]
+        cli_mod._load_apps = lambda *_a, **_k: None  # ty:ignore[invalid-assignment]
         conf_settings.INSTALLED_APPS = ["fake_app"]
         fake_findings = [
             Finding("DORM-M001", "f.py", "op", "m1"),
             Finding("DORM-M003", "f.py", "op", "m3"),
         ]
-        lint_mod.lint_directory = lambda _p: LintResult(findings=list(fake_findings))
+        lint_mod.lint_directory = lambda _p: LintResult(findings=list(fake_findings))  # ty:ignore[invalid-assignment]
 
         args = argparse.Namespace(
             settings=None,
@@ -525,10 +525,10 @@ def test_lint_cli_exit_zero_flag(tmp_path, capsys):
     prev_apps = conf_settings.INSTALLED_APPS
 
     try:
-        cli_mod._load_settings = lambda *_a, **_k: None
-        cli_mod._load_apps = lambda *_a, **_k: None
+        cli_mod._load_settings = lambda *_a, **_k: None  # ty:ignore[invalid-assignment]
+        cli_mod._load_apps = lambda *_a, **_k: None  # ty:ignore[invalid-assignment]
         conf_settings.INSTALLED_APPS = ["fake_app"]
-        lint_mod.lint_directory = lambda _p: LintResult(
+        lint_mod.lint_directory = lambda _p: LintResult(  # ty:ignore[invalid-assignment]
             findings=[Finding("DORM-M001", "f.py", "op", "m")]
         )
 
@@ -574,7 +574,7 @@ def test_query_record_has_slots_and_to_dict():
     r = QueryRecord(sql="SELECT 1", params=None, vendor="sqlite", elapsed_ms=1.5, error=None)
     # ``slots=True`` means setting a new attribute raises.
     with pytest.raises(AttributeError):
-        r.foo = "bar"  # type: ignore[attr-defined]
+        r.foo = "bar"  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     d = r.to_dict()
     assert d["sql"] == "SELECT 1"
     assert d["vendor"] == "sqlite"

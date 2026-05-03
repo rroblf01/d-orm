@@ -54,9 +54,6 @@ dorm.configure(FIELD_ENCRYPTION_KEYS=[
 
 ## Tipos de field
 
-::: dorm.contrib.encrypted.EncryptedCharField
-::: dorm.contrib.encrypted.EncryptedTextField
-::: dorm.contrib.encrypted.EncryptedFieldMixin
 
 ## Qué modo elegir
 

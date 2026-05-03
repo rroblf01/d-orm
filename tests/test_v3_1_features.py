@@ -388,7 +388,7 @@ def test_token_rejects_malformed_input():
     with _signing_key_set():
         u = _FakeUser()
         for bad in (None, "", "no-dash", "abc-not-base64!@#", 12345, "-only-second"):
-            assert gen.check_token(u, bad) is False
+            assert gen.check_token(u, bad) is False  # ty:ignore[invalid-argument-type]
 
 
 def test_token_namespace_separation():
@@ -457,8 +457,8 @@ def test_model_from_db_stamps_alias_on_state():
     from tests.models import Author
 
     inst = Author.from_db("replica", ["id", "name", "age"], [1, "Alice", 30])
-    assert inst._state.adding is False
-    assert inst._state.db == "replica"
+    assert inst._state.adding is False  # ty:ignore[unresolved-attribute]
+    assert inst._state.db == "replica"  # ty:ignore[unresolved-attribute]
     assert inst.name == "Alice"
     assert inst.age == 30
 
@@ -537,7 +537,7 @@ def test_tenant_schema_validation_rejects_injection():
 
     for bad in ("foo; DROP", "1bad", "", "with space", None, 123):
         with pytest.raises((ValueError, TypeError)):
-            _validate_schema_name(bad)  # type: ignore[arg-type]
+            _validate_schema_name(bad)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_tenant_register_and_lookup():

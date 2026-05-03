@@ -257,9 +257,9 @@ def test_generic_foreign_key_resolves_target():
     c = Comment.objects.create(
         body="hello",
         content_type=ct,
-        object_id=a.id,
+        object_id=a.id,  # ty:ignore[unresolved-attribute]
     )
-    fresh = Comment.objects.get(id=c.id)
+    fresh = Comment.objects.get(id=c.id)  # ty:ignore[unresolved-attribute]
     target = fresh.target
     assert target is not None
     assert target.name == "GFK"
