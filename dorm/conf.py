@@ -422,9 +422,32 @@ def parse_database_url(url: str) -> dict:
             cfg_libsql.setdefault("OPTIONS", {})[k] = vlist[0]
         return cfg_libsql
 
+    if scheme in {"mysql", "mariadb", "mysql+pymysql", "mysql+asyncmy"}:
+        # Scaffold support — recognises the URL form so projects can
+        # pin on a forward-compatible config string today. The actual
+        # connection raises ``ImproperlyConfigured`` until the v3.2
+        # backend implementation lands. Using the same scheme set
+        # SQLAlchemy uses keeps copy-pasted DATABASE_URLs portable.
+        from typing import Any as _Any
+
+        cfg_mysql: dict[str, _Any] = {
+            "ENGINE": "mariadb" if scheme == "mariadb" else "mysql",
+            "NAME": (parsed.path[1:] if parsed.path.startswith("/") else parsed.path),
+            "USER": unquote(parsed.username) if parsed.username else "",
+            "PASSWORD": unquote(parsed.password) if parsed.password else "",
+            "HOST": parsed.hostname or "",
+            "PORT": parsed.port or 3306,
+        }
+        options: dict = {}
+        for k, vlist in parse_qs(parsed.query).items():
+            options[k] = vlist[0]
+        if options:
+            cfg_mysql["OPTIONS"] = options
+        return cfg_mysql
+
     raise ImproperlyConfigured(
         f"Unrecognised database URL scheme {scheme!r}. Supported: "
-        "'postgres', 'postgresql', 'sqlite', 'libsql'."
+        "'postgres', 'postgresql', 'sqlite', 'libsql', 'mysql' / 'mariadb'."
     )
 
 

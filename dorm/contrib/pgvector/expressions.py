@@ -72,6 +72,12 @@ class _VectorDistance:
     # ``F32_BLOB(N)`` columns. Subclasses set the function name
     # (or ``None`` to mark the distance as unsupported there).
     libsql_function: str | None = None
+    # MariaDB 11.7+ / MySQL 9.0+ ship ``VEC_DISTANCE_EUCLIDEAN`` /
+    # ``VEC_DISTANCE_COSINE`` over the ``VECTOR(N)`` column type.
+    # The packed-float32 wire format is wrapped in ``VEC_FromBinary``
+    # at SQL emit time so the column compares against the same
+    # bytes the binder produced.
+    mysql_function: str | None = None
 
     def __init__(self, column: str, vector: Iterable[float]) -> None:
         # Column names go through identifier validation so a
@@ -117,6 +123,22 @@ class _VectorDistance:
             return f"{self.sqlite_function}({col}, %s)", [
                 _pack_sqlite_vec(self.vector)
             ]
+        if vendor in ("mysql", "mariadb"):
+            # MariaDB 11.7+ / MySQL 9.0+ — ``VEC_FromBinary(?)``
+            # wraps the packed-float32 BLOB into a VECTOR value the
+            # ``VEC_DISTANCE_*`` family accepts. The packed wire
+            # format is identical to sqlite-vec's, so the binder
+            # path collapses to one shape.
+            fn = self.mysql_function
+            if fn is None:
+                raise NotImplementedError(
+                    f"{type(self).__name__} is not supported on "
+                    "MariaDB / MySQL. Use CosineDistance over "
+                    "L2-normalised embeddings instead."
+                )
+            return f"{fn}({col}, VEC_FromBinary(%s))", [
+                _pack_sqlite_vec(self.vector)
+            ]
         return f"{col} {self.pg_operator} %s::vector", [
             _format_pgvector_literal(self.vector)
         ]
@@ -135,6 +157,7 @@ class L2Distance(_VectorDistance):
     pg_operator = "<->"
     sqlite_function = "vec_distance_L2"
     libsql_function = "vector_distance_l2"
+    mysql_function = "VEC_DISTANCE_EUCLIDEAN"
 
 
 class CosineDistance(_VectorDistance):
@@ -152,6 +175,7 @@ class CosineDistance(_VectorDistance):
     pg_operator = "<=>"
     sqlite_function = "vec_distance_cosine"
     libsql_function = "vector_distance_cos"
+    mysql_function = "VEC_DISTANCE_COSINE"
 
 
 class MaxInnerProduct(_VectorDistance):
@@ -170,3 +194,4 @@ class MaxInnerProduct(_VectorDistance):
     pg_operator = "<#>"
     sqlite_function = None
     libsql_function = None
+    mysql_function = None  # MariaDB / MySQL ship Euclidean + Cosine only.

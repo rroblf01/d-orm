@@ -4,6 +4,22 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 
 Works with **SQLite**, **PostgreSQL** and **libsql / Turso**. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related`), aggregations, DB functions, async-native ORM path, queryset & row caching, and Pydantic interop — all with real static typing (`Field[T]`).
 
+## What's new in 3.1
+
+- **`settings.USE_TZ = True`** — Django ≥4-compatible timezone-aware datetimes (UTC normalisation on insert, `TIMESTAMP WITH TIME ZONE` on PG).
+- **`Meta.proxy = True`** — proxy models share the parent's table; autodetector skips them so `makemigrations` doesn't emit a phantom `CreateModel`.
+- **`QuerySet.dates(field, kind)` / `datetimes(...)`** — distinct truncated values for archive listings.
+- **`dorm migrate --fake` / `--fake-initial`** — record migrations as applied without running operations. Ideal for adopting dorm against a legacy schema.
+- **JSONField PG operators** — `__contained_by`, `__has_key`, `__has_keys`, `__has_any_keys`, `__overlap`, `__len`. Same spelling as Django's `contrib.postgres`.
+- **`Field.deconstruct()`** — base-class implementation for migration serialisation. Custom field subclasses get it for free.
+- **`Model.from_db(db, field_names, values)`** — Django-parity hydration hook; stamps `_state.db` with the alias.
+- **`dorm.transaction.savepoint()` / `savepoint_commit()` / `savepoint_rollback()`** — manual savepoints inside `atomic()`.
+- **`dorm.contrib.auth.tokens`** — stateless HMAC-signed reset tokens for password-reset / email-verification flows.
+- **`Meta.permissions = [...]`** + **`sync_permissions()`** — declare custom permissions, materialise into `auth_permission`.
+- **`dorm.contrib.tenants`** — `TenantContext` / `aTenantContext` for PostgreSQL `search_path` switching.
+- **MySQL / MariaDB scaffold** — `ENGINE = "mysql"` parses through `parse_database_url`; the connection wrapper raises `ImproperlyConfigured` pointing at v3.2 for the full implementation.
+- **MySQL / MariaDB vector support** — `VectorField` returns `VECTOR(N)` and distance expressions compile to `VEC_DISTANCE_EUCLIDEAN` / `VEC_DISTANCE_COSINE`.
+
 ## What's new in 3.0
 
 - **`dorm.contrib.auth`** — `User` / `Group` / `Permission` with stdlib PBKDF2 hashing. Same shape as Django, no `passlib` dependency.

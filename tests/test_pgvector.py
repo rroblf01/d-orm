@@ -85,14 +85,28 @@ class TestVectorFieldUnit:
 
     def test_db_type_returns_none_on_unknown_backend(self):
         # Defensive: a backend that's neither pgvector nor
-        # sqlite-vec gets None so the migration writer skips
-        # the column entirely.
+        # sqlite-vec / libsql / mysql gets None so the migration
+        # writer skips the column entirely.
         f = VectorField(dimensions=4)
 
         class _Conn:
-            vendor = "mysql"
+            vendor = "oracle"
 
         assert f.db_type(_Conn()) is None
+
+    def test_db_type_returns_vector_n_on_mysql(self):
+        # MariaDB 11.7+ / MySQL 9.0+ ship native VECTOR(N) — added
+        # in 3.1 to round out the cross-backend vector story.
+        f = VectorField(dimensions=384)
+
+        class _MySQL:
+            vendor = "mysql"
+
+        class _Maria:
+            vendor = "mariadb"
+
+        assert f.db_type(_MySQL()) == "VECTOR(384)"
+        assert f.db_type(_Maria()) == "VECTOR(384)"
 
     def test_db_type_returns_vector_n_on_pg(self):
         f = VectorField(dimensions=1536)

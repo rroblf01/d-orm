@@ -120,6 +120,12 @@ class VectorExtension(Operation):
             raw = connection.get_connection()
             load_sqlite_vec_extension(raw)
             return
+        if vendor in ("libsql", "mysql", "mariadb"):
+            # libsql, MariaDB 11.7+ and MySQL 9.0+ ship vector
+            # functions natively — no extension to load. The
+            # operation is a no-op so the same migration file
+            # works across every backend.
+            return
         _logger.warning(
             "VectorExtension: unknown backend %r — skipped.", vendor
         )
@@ -142,6 +148,9 @@ class VectorExtension(Operation):
             # so future connections don't auto-load.
             if hasattr(connection, "_vec_extension_enabled"):
                 connection._vec_extension_enabled = False
+            return
+        # libsql / mysql / mariadb — vector support is built into
+        # the engine, nothing to undo.
 
     def describe(self) -> str:
         return "Enable vector-search extension (pgvector / sqlite-vec)"

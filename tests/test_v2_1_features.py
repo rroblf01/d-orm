@@ -441,8 +441,11 @@ class TestDatabaseURL:
         assert cfg["NAME"] == ":memory:"
 
     def test_unrecognised_scheme(self):
+        # ``mysql://`` parses successfully since 3.1 (scaffold
+        # backend). Use a genuinely unsupported scheme to assert
+        # the rejection path.
         with pytest.raises(dorm.ImproperlyConfigured):
-            dorm.parse_database_url("mysql://u:p@h/db")
+            dorm.parse_database_url("oracle://u:p@h/db")
 
 
 # ── inspectdb ────────────────────────────────────────────────────────────────

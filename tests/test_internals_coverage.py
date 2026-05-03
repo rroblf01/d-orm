@@ -118,10 +118,12 @@ class TestParseDatabaseUrl:
         }
 
     def test_unknown_scheme_raises_with_helpful_message(self):
+        # ``mysql://`` parses cleanly since 3.1 (scaffold backend);
+        # use a genuinely unknown scheme for the negative path.
         with pytest.raises(ImproperlyConfigured, match="Unrecognised database URL scheme"):
-            parse_database_url("mysql://u:p@h/d")
-        with pytest.raises(ImproperlyConfigured):
             parse_database_url("oracle://u:p@h/d")
+        with pytest.raises(ImproperlyConfigured):
+            parse_database_url("redshift://u:p@h/d")
 
     def test_postgres_username_or_password_unset_returns_empty_strings(self):
         cfg = parse_database_url("postgres://host/db")

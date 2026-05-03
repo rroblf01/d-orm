@@ -97,8 +97,9 @@ comportan como sus hermanos de Django. Nuevo en dorm:
 - `dorm dbcheck` — diff de cada modelo contra el esquema vivo.
 - `dorm sql users.User` — imprime el `CREATE TABLE` de un modelo.
 
-Aún **no hay flag `--fake`**; si necesitas marcar una migración como
-aplicada sin ejecutarla, hazlo manualmente vía la tabla del recorder.
+``dorm migrate --fake`` y ``dorm migrate --fake-initial`` (3.1+)
+registran migraciones como aplicadas sin ejecutar sus operaciones —
+útil al adoptar dorm contra una base legacy administrada a mano.
 
 ## No necesitas `asgiref` (3.0+)
 
@@ -140,12 +141,36 @@ las llamadas async pasan en silencio.
 
 - **Sin admin.** dorm es un ORM, no un framework CMS.
 - **Sin middleware request/response.** dorm no tiene capa HTTP.
-- **Sin datetimes con timezone** todavía. `TIME_ZONE` / `USE_TZ`
-  son settings reservados; los datetimes se almacenan exactamente
-  como los pasas.
+- **Datetimes con timezone** llegan en 3.1+: pon
+  `settings.USE_TZ = True` para activar el comportamiento Django ≥4
+  (conversión naive→aware, normalización UTC en INSERT,
+  ``TIMESTAMP WITH TIME ZONE`` en PG). Default ``False`` mantiene
+  el comportamiento previo a 3.1.
 - **`dorm.contrib.auth` opcional** (3.0+). Modelos User / Group /
-  Permission con hashing PBKDF2 de stdlib — vistas de login,
-  sesiones y middleware NO están; eso lo hace tu framework.
+  Permission con hashing PBKDF2 stdlib. Tokens de reset stateless
+  llegan en 3.1
+  (``dorm.contrib.auth.tokens.PasswordResetTokenGenerator``) para
+  el flujo de password-reset / email-verification.
+- **`Meta.permissions = [...]`** (3.1+) — declara permisos
+  custom y materialízalos en ``auth_permission`` con
+  ``dorm.contrib.auth.management.sync_permissions()``.
+- **`Meta.proxy = True`** (3.1+) — proxy models comparten la
+  tabla del padre; el autodetector los salta así
+  ``makemigrations`` no emite un ``CreateModel`` fantasma.
+- **`Model.from_db(db, field_names, values)`** (3.1+) — hook de
+  Django para hidratación custom. Stampa el alias en
+  ``_state.db``.
+- **`QuerySet.dates(field, kind)` / `datetimes(field, kind)`** (3.1+)
+  — devuelven ``list[date]`` / ``list[datetime]`` truncados
+  distinct para listings de archivo.
+- **`dorm.transaction.savepoint()` / `savepoint_commit()` /
+  `savepoint_rollback()`** (3.1+) — savepoints manuales dentro
+  de un ``atomic()``. Misma forma que la familia
+  ``django.db.transaction.savepoint``.
+- **Operadores PG sobre JSONField** (3.1+): ``__contained_by``,
+  ``__has_key``, ``__has_keys``, ``__has_any_keys``,
+  ``__overlap``, ``__len``. Misma forma que ``contrib.postgres``
+  de Django.
 - **`GenericForeignKey`** vive en `dorm.contrib.contenttypes`,
   con la misma forma que Django.
 - **Cifrado opcional** (3.0+) via ``dorm.contrib.encrypted``
@@ -155,6 +180,13 @@ las llamadas async pasan en silencio.
 - **Exporter Prometheus opcional** (3.0+) via
   ``dorm.contrib.prometheus`` — contadores + histogramas en
   formato text-exposition plano, sin SDK externo.
+- **Multi-tenant `dorm.contrib.tenants`** (3.1+) — switch de
+  PostgreSQL ``search_path`` via ``TenantContext`` /
+  ``aTenantContext``; runner de migraciones por tenant llega en v3.2.
+- **Scaffold MySQL / MariaDB** (3.1+). ``ENGINE = "mysql"`` parsea
+  por ``parse_database_url`` y el wrapper de conexión raisea
+  ``ImproperlyConfigured`` apuntando al milestone v3.2. Permite
+  pinear con un config string forward-compatible hoy.
 
 ## Lo que es mejor que Django
 

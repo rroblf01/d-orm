@@ -92,6 +92,14 @@ class VectorField(Field[list]):
             # in the column type, so a future ``vector_concat`` /
             # ``vector_extract`` operator can validate against it.
             return f"F32_BLOB({self.dimensions})"
+        if vendor in ("mysql", "mariadb"):
+            # MariaDB 11.7+ and MySQL 9.0+ ship a native ``VECTOR(N)``
+            # column type with ``VEC_DISTANCE_EUCLIDEAN`` /
+            # ``VEC_DISTANCE_COSINE`` functions over them. Same wire
+            # format as sqlite-vec / libsql (packed little-endian
+            # float32) so the binder picks the same path; the SQL
+            # type is what changes per vendor.
+            return f"VECTOR({self.dimensions})"
         if vendor == "sqlite":
             # sqlite-vec stores vectors in BLOB columns and exposes
             # ``vec_distance_L2`` / ``vec_distance_cosine`` over them.
@@ -163,11 +171,13 @@ class VectorField(Field[list]):
             # in unit tests that import the module before
             # ``configure``), fall back to the pgvector text form.
             vendor = "postgresql"
-        if vendor in ("sqlite", "libsql"):
-            # Both SQLite (sqlite-vec) and libsql (native F32_BLOB)
-            # accept the same little-endian packed-float32 wire
-            # format. libsql's ``vector32(?)`` / ``vector_distance_*``
-            # SQL functions read it directly.
+        if vendor in ("sqlite", "libsql", "mysql", "mariadb"):
+            # SQLite (sqlite-vec), libsql (native F32_BLOB) and
+            # MariaDB / MySQL VECTOR all accept the same little-
+            # endian packed-float32 wire format on insert. libsql's
+            # ``vector32(?)`` and MariaDB's ``VEC_FromBinary(?)``
+            # read it directly; the queryset compiler wraps the
+            # binding in the vendor-specific function call.
             return _pack_float32(seq)
         return "[" + ",".join(repr(float(x)) for x in seq) + "]"
 

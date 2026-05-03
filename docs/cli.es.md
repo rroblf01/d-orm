@@ -52,6 +52,8 @@ dorm migrate blog zero             # rollback de todas las migraciones
 | Flag | Para qué |
 |---|---|
 | `--dry-run` / `--plan` (3.0+) | imprime solo el SQL; no toca la BD ni actualiza el recorder. ``--plan`` es alias para usuarios que vienen de Django |
+| `--fake` (3.1+) | registra cada migración pendiente como aplicada SIN ejecutar sus operaciones. Útil al adoptar dorm contra un schema legacy administrado a mano |
+| `--fake-initial` (3.1+) | solo "fakea" la migración *inicial* de cada app, y solo si sus ``CreateModel`` apuntan a tablas que ya existen |
 | `--verbosity N` | 0 = silencioso, 1 = default, 2 = verbose |
 | `--settings PATH` | módulo de settings a cargar |
 

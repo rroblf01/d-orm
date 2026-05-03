@@ -191,11 +191,13 @@ class ModelBase(type):
                     declared_fields.append((field_copy.name, field_copy))
 
         # Proxy-model inheritance: ``Meta.proxy = True`` shares the
-        # concrete parent's table and field set. Inherit field
-        # **instances** (not deep copies) so the proxy and its
-        # concrete model truly point at the same column descriptors —
-        # Django convention. Only one concrete parent is supported;
-        # multi-table inheritance lives outside this scope.
+        # concrete parent's table — but we deep-copy each parent
+        # field so the subsequent ``contribute_to_class`` call on
+        # the proxy doesn't mutate the parent's ``field.model``
+        # back-reference. Two model classes pointing at the same
+        # field instance + the metaclass setting ``field.model``
+        # last-writer-wins would silently break the parent's
+        # queries (descriptors look up by ``self.model``).
         proxy_flag = bool(getattr(meta, "proxy", False)) if meta else False
         if proxy_flag:
             for parent in parents:
@@ -205,7 +207,8 @@ class ModelBase(type):
                 if p_meta.abstract or getattr(p_meta, "proxy", False):
                     continue
                 for field in p_meta.fields:
-                    declared_fields.append((field.name, field))
+                    field_copy = copy.deepcopy(field)
+                    declared_fields.append((field_copy.name, field_copy))
                 break
 
         # Sort by creation counter to preserve declaration order

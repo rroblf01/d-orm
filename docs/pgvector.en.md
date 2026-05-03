@@ -1,15 +1,16 @@
 # Vector search with djanorm
 
-`dorm.contrib.pgvector` covers vector similarity search on **both**
-PostgreSQL (via [pgvector](https://github.com/pgvector/pgvector))
-and SQLite (via [sqlite-vec](https://github.com/asg017/sqlite-vec)).
-The same model + queryset code runs against either backend — the
-field decides the wire format from the active connection's vendor:
+`dorm.contrib.pgvector` covers vector similarity search on **four**
+backends — the same model + queryset code runs against any of them
+because the field decides the wire format from the active
+connection's vendor:
 
-| Backend       | Column type   | Distance functions                     |
-|---------------|--------------|----------------------------------------|
-| PostgreSQL    | `vector(N)`  | `<->` / `<=>` / `<#>` operators        |
-| SQLite        | `BLOB`       | `vec_distance_L2` / `vec_distance_cosine` |
+| Backend                 | Column type    | Distance functions                          |
+|-------------------------|---------------|---------------------------------------------|
+| PostgreSQL (pgvector)   | `vector(N)`   | `<->` / `<=>` / `<#>` operators             |
+| SQLite (sqlite-vec)     | `BLOB`        | `vec_distance_L2` / `vec_distance_cosine`   |
+| libsql / Turso (native) | `F32_BLOB(N)` | `vector_distance_l2` / `vector_distance_cos` |
+| MariaDB 11.7+ / MySQL 9.0+ (3.1+) | `VECTOR(N)` | `VEC_DISTANCE_EUCLIDEAN` / `VEC_DISTANCE_COSINE` |
 
 The module exposes:
 
@@ -17,15 +18,24 @@ The module exposes:
 - **`L2Distance` / `CosineDistance` / `MaxInnerProduct`** —
   distance expressions that compose with `annotate()` + `order_by()`.
 - **`HnswIndex` / `IvfflatIndex`** — index helpers (PostgreSQL
-  only — sqlite-vec uses a different model based on virtual
-  tables that's not yet wrapped).
+  only — other backends use different index models that aren't
+  wrapped yet).
 - **`VectorExtension`** — the migration operation that enables
-  the right extension on either backend.
+  pgvector / sqlite-vec where needed; a no-op on libsql / MariaDB
+  / MySQL because the engine ships vector functions natively.
 
 > **Note on `MaxInnerProduct`** — pgvector ships it
-> (operator `<#>`); sqlite-vec doesn't. On SQLite use
-> `CosineDistance` over L2-normalised embeddings instead
+> (operator `<#>`). sqlite-vec, libsql and MariaDB / MySQL don't:
+> use `CosineDistance` over L2-normalised embeddings instead
 > (mathematically equivalent up to a constant).
+>
+> **Note on the MySQL backend (3.1+)** — the Python wrapper for
+> the MySQL / MariaDB engine is a scaffold today (raises
+> `ImproperlyConfigured` until v3.2 ships the full implementation).
+> ``VectorField`` and the distance expressions emit the right SQL
+> already, so once the wrapper lands the same vector code keeps
+> working without changes. The ``VECTOR`` row above is in the
+> table now to pin the contract.
 
 ## Step-by-step (PostgreSQL)
 
