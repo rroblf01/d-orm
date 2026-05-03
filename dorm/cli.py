@@ -38,7 +38,18 @@ def _load_settings(settings_module: str):
             "__init__.py and models.py, or set INSTALLED_APPS in settings.py.",
             file=sys.stderr,
         )
-    configure(DATABASES=databases, INSTALLED_APPS=installed_apps)
+    # Forward every uppercase top-level attribute from the settings
+    # module — Django convention treats those as configuration. Without
+    # this users typing ``SECRET_KEY = "…"`` / ``CACHES = {…}`` /
+    # ``USE_TZ = True`` in settings.py would never see those values
+    # reach ``dorm.conf.settings`` because earlier versions only
+    # forwarded ``DATABASES`` + ``INSTALLED_APPS`` explicitly.
+    extras = {
+        k: getattr(module, k)
+        for k in dir(module)
+        if k.isupper() and not k.startswith("_") and k not in ("DATABASES", "INSTALLED_APPS")
+    }
+    configure(DATABASES=databases, INSTALLED_APPS=installed_apps, **extras)
     return module
 
 

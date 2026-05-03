@@ -10,3 +10,5 @@ DATABASES = {
 }
 
 INSTALLED_APPS = ["example", "example.sales", "dorm.contrib.auth"]
+
+SECRET_KEY = "example-only-secret-not-for-production-use-please"

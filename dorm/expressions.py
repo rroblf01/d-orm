@@ -67,10 +67,48 @@ class CombinedExpression:
         self.operator = operator
         self.rhs = rhs
 
-    def as_sql(self, compiler, connection):
-        lhs_sql, lhs_params = compiler.compile(self.lhs, connection)
-        rhs_sql, rhs_params = compiler.compile(self.rhs, connection)
+    def as_sql(
+        self, table_alias: str | None = None, **kwargs: Any
+    ) -> tuple[str, list]:
+        """Compile this expression using the same call shape as :class:`F`
+        and the aggregate classes — ``(table_alias, model=..., connection=...)``.
+
+        Why: the annotation pipeline ``query.py`` invokes every annotation
+        node with that signature. The previous ``(compiler, connection)``
+        form crashed at runtime as soon as a user wrote ``F("x") + 1``
+        in ``annotate(...)``. Recursively delegate to each side's own
+        ``as_sql`` (or render literals inline for raw ``int`` / ``float``
+        / ``Decimal`` operands).
+        """
+        lhs_sql, lhs_params = _compile_operand(self.lhs, table_alias, **kwargs)
+        rhs_sql, rhs_params = _compile_operand(self.rhs, table_alias, **kwargs)
         return f"({lhs_sql} {self.operator} {rhs_sql})", lhs_params + rhs_params
+
+
+def _compile_operand(
+    operand: Any, table_alias: str | None, **kwargs: Any
+) -> tuple[str, list]:
+    """Render either an expression node or a Python literal as
+    parameterised SQL. Mirrors ``query._compile_expr`` so the
+    annotation pipeline can compile ``F("x") + 1`` without circular
+    imports.
+
+    ``%s`` is dorm's native placeholder style (the SQLite backend
+    rewrites it to ``?`` at execute time)."""
+    if isinstance(operand, F):
+        # Qualify with the outer table alias when supplied so a
+        # multi-table query (joins, subqueries) doesn't accidentally
+        # resolve against the wrong column.
+        if table_alias:
+            return f'"{table_alias}"."{operand.name}"', []
+        return f'"{operand.name}"', []
+    if isinstance(operand, Value):
+        return "%s", [operand.value]
+    if isinstance(operand, CombinedExpression):
+        return operand.as_sql(table_alias, **kwargs)
+    if hasattr(operand, "as_sql"):
+        return operand.as_sql(table_alias, **kwargs)
+    return "%s", [operand]
 
 
 class F:
