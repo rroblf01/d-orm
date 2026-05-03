@@ -621,7 +621,7 @@ Every field accepts:
 | `db_column="x"` | override column name (default: field name) |
 | `default=value` or `default=callable` | row-level default (Python-side, fires when constructor doesn't see a value) |
 | `db_default=value` or `db_default=RawSQL("now()")` | server-side default — lands in `CREATE TABLE` as `DEFAULT <literal>`; covers raw INSERTs that omit the column |
-| `db_comment="..."` (3.1+) | column-level comment for schema-archaeology tooling. PG / MySQL emit `COMMENT ON COLUMN`; SQLite ignores |
+| `db_comment="..."` (3.1+) | column-level comment stored on the field for schema-documentation tooling. The DDL emit pass that translates this into `COMMENT ON COLUMN` (PG / MySQL) lands in 3.2; today the value is reachable via `field.db_comment` for inspection / custom migrations |
 | `validators=[fn, ...]` | run on assignment + `full_clean()` |
 | `choices=[(value, label), …]` | restrict to a fixed set |
 | `editable=False` | hidden from forms / serializers |

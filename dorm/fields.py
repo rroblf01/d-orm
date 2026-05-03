@@ -280,10 +280,12 @@ class Field(Generic[_T]):
         self.help_text = help_text
         self.db_column = db_column
         self.db_tablespace = db_tablespace
-        # ``db_comment`` lands as a ``COMMENT ON COLUMN`` after the
-        # column DDL on PostgreSQL / MySQL. SQLite ignores comments.
-        # Useful for schema-archaeology work where DBAs read the
-        # column definitions directly.
+        # ``db_comment`` is stored on the field for schema-documentation
+        # tooling and custom migrations. The DDL emit pass that
+        # translates this into ``COMMENT ON COLUMN`` (PG) / column-
+        # level ``COMMENT '...'`` (MySQL) lands in v3.2 alongside
+        # the rest of the introspection-symmetry work; today the
+        # value is reachable via ``field.db_comment`` for inspection.
         self.db_comment = db_comment
         self.validators: list = list(validators) if validators else []
         self.model = None
@@ -345,12 +347,14 @@ class Field(Generic[_T]):
             "null": False,
             "db_index": False,
             "default": NOT_PROVIDED,
+            "db_default": NOT_PROVIDED,
             "editable": True,
             "serialize": True,
             "choices": None,
             "help_text": "",
             "db_column": None,
             "db_tablespace": None,
+            "db_comment": None,
             "validators": [],
         }
         for attr, default in defaults.items():

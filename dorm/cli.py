@@ -348,25 +348,18 @@ def cmd_migrate(args):
             )
         except Exception:
             rows = []
+        # dorm uses ``%s`` as the canonical placeholder; the SQLite
+        # backend rewrites ``%s`` → ``?`` inside ``execute_write``
+        # automatically, so a single template covers every vendor.
         for r in rows:
             app = r["app"]
             name = r["name"]
             module_path = _resolve_app_module(app, installed_apps)
             mig_path = _find_migrations_dir(module_path) / f"{name}.py"
             if not mig_path.exists():
-                placeholder = "%s" if getattr(conn, "vendor", "") == "postgresql" else "?"
-                conn.execute_script(
-                    f'DELETE FROM "dorm_migrations" '
-                    f'WHERE "app" = {placeholder!s} AND "name" = {placeholder!s}'
-                    .replace("'?'", "?").replace("'%s'", "%s")
-                )
-                # The replace dance avoids the ``f`` interpolating the
-                # quote characters; keep the placeholder syntax raw.
-                # Issue the actual DELETE through a parameterised
-                # call instead of the script form.
                 conn.execute_write(
-                    f'DELETE FROM "dorm_migrations" '
-                    f'WHERE "app" = {placeholder} AND "name" = {placeholder}',
+                    'DELETE FROM "dorm_migrations" '
+                    'WHERE "app" = %s AND "name" = %s',
                     [app, name],
                 )
                 print(f"  Pruned recorder row: {app}.{name}")
@@ -1512,25 +1505,41 @@ def cmd_flush(args):
     conn = get_connection()
     vendor = getattr(conn, "vendor", "sqlite")
     seen: set[int] = set()
-    for label, model in _model_registry.items():
-        if "." in label:
-            continue
-        if id(model) in seen or model._meta.abstract or model._meta.proxy:
-            continue
-        seen.add(id(model))
-        if not getattr(model._meta, "managed", True):
-            continue
-        table = model._meta.db_table
-        if not conn.table_exists(table):
-            continue
-        if vendor == "postgresql":
-            conn.execute_script(
-                f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE'
-            )
-        elif vendor == "mysql":
-            conn.execute_script(f'DELETE FROM "{table}"')
-        else:
-            conn.execute_script(f'DELETE FROM "{table}"')
+
+    # MySQL trips on FK constraints when we DELETE FROM a parent
+    # table whose children still reference rows. Disable the
+    # check for the duration of the flush — the surrounding
+    # COMMIT re-enables for any code that runs afterwards in the
+    # same connection.
+    if vendor == "mysql":
+        conn.execute_script("SET FOREIGN_KEY_CHECKS=0")
+
+    try:
+        for label, model in _model_registry.items():
+            if "." in label:
+                continue
+            if id(model) in seen or model._meta.abstract or model._meta.proxy:
+                continue
+            seen.add(id(model))
+            if not getattr(model._meta, "managed", True):
+                continue
+            table = model._meta.db_table
+            if not conn.table_exists(table):
+                continue
+            if vendor == "postgresql":
+                conn.execute_script(
+                    f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE'
+                )
+            elif vendor == "mysql":
+                conn.execute_script(f'TRUNCATE TABLE "{table}"')
+            else:
+                conn.execute_script(f'DELETE FROM "{table}"')
+    finally:
+        if vendor == "mysql":
+            try:
+                conn.execute_script("SET FOREIGN_KEY_CHECKS=1")
+            except Exception:
+                pass
     print("Flushed.")
 
 

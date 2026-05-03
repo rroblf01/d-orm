@@ -1003,9 +1003,14 @@ class AlterModelTable(Operation):
         )
 
     def database_backwards(self, app_label: str, connection, from_state, to_state):
-        # Reverse: rename back to the prior table.
-        from_model = from_state.models.get(f"{app_label}.{self.name.lower()}", {})
-        old_table = from_model.get("options", {}).get("db_table") or (
+        # Reverse: rename ``self.table`` back to whatever the
+        # pre-forward state called it. ``to_state`` is the state
+        # we're moving TO during backwards (i.e. before the
+        # forward migration ran), so the old table name lives there.
+        # Reading ``from_state`` would just return the current
+        # post-forward name and produce a no-op.
+        target_model = to_state.models.get(f"{app_label}.{self.name.lower()}", {})
+        old_table = target_model.get("options", {}).get("db_table") or (
             f"{app_label}_{self.name.lower()}"
         )
         if old_table == self.table:

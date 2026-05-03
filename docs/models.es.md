@@ -632,7 +632,7 @@ Todo campo acepta:
 | `db_column="x"` | override del nombre de la columna |
 | `default=value` o `default=callable` | default a nivel Python (dispara cuando el constructor no recibe valor) |
 | `db_default=value` o `db_default=RawSQL("now()")` | default a nivel servidor — aparece en `CREATE TABLE` como `DEFAULT <literal>`; cubre INSERTs raw que omiten la columna |
-| `db_comment="..."` (3.1+) | comentario de columna para tooling DBA. PG / MySQL emiten `COMMENT ON COLUMN`; SQLite ignora |
+| `db_comment="..."` (3.1+) | comentario de columna almacenado en el field para tooling de documentación. El DDL que lo traduce a `COMMENT ON COLUMN` (PG / MySQL) llega en 3.2; hoy el valor es accesible vía `field.db_comment` para inspección / migraciones custom |
 | `validators=[fn, ...]` | se ejecutan al asignar y en `full_clean()` |
 | `choices=[(value, label), …]` | restringe a un conjunto fijo |
 | `editable=False` | oculto a forms / serializers |

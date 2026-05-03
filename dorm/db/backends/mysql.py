@@ -229,9 +229,46 @@ class MySQLDatabaseWrapper:
     def execute_script(self, sql: str) -> None:
         """Run one or more statements separated by ``;``. MySQL doesn't
         ship a multi-statement helper; iterate manually so each
-        statement gets its own cursor cycle."""
+        statement gets its own cursor cycle.
+
+        ``;`` characters inside SQL string literals are honoured —
+        the splitter walks the text and only treats top-level
+        ``;`` as a separator. ``DEFAULT 'a;b'`` survives intact.
+        """
         conn = self.get_connection()
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        statements: list[str] = []
+        buf: list[str] = []
+        in_str = False
+        quote_ch = ""
+        i = 0
+        while i < len(sql):
+            ch = sql[i]
+            if in_str:
+                buf.append(ch)
+                if ch == quote_ch:
+                    # SQL escapes a quote by doubling it inside the
+                    # literal. Skip over the second quote so the
+                    # literal stays open.
+                    if i + 1 < len(sql) and sql[i + 1] == quote_ch:
+                        buf.append(sql[i + 1])
+                        i += 2
+                        continue
+                    in_str = False
+            elif ch in ("'", '"', "`"):
+                in_str = True
+                quote_ch = ch
+                buf.append(ch)
+            elif ch == ";":
+                stmt = "".join(buf).strip()
+                if stmt:
+                    statements.append(stmt)
+                buf = []
+            else:
+                buf.append(ch)
+            i += 1
+        tail = "".join(buf).strip()
+        if tail:
+            statements.append(tail)
         try:
             with conn.cursor() as cur:
                 for stmt in statements:
