@@ -104,8 +104,70 @@ class CreateModel(Operation):
         for c in deferred_constraints:
             connection.execute_script(c.constraint_sql(table, connection))
 
+        # Auto-emit junction tables for ``ManyToManyField`` declarations
+        # that don't carry an explicit ``through`` model. Field instances
+        # rebuilt from a migration file haven't gone through
+        # ``contribute_to_class``, so ``field.model`` is unset — we
+        # synthesise the junction here using the source model's table
+        # plus the field name (mirroring ``ManyToManyField._get_through_table``
+        # at runtime). Without this the M2M descriptor can be queried
+        # but every read/write hits a missing junction table at runtime.
+        for fname, field in self.fields:
+            from ..fields import ManyToManyField
+            if not isinstance(field, ManyToManyField) or field.through is not None:
+                continue
+            self._emit_m2m_junction(table, fname, field, connection)
+
+    def _emit_m2m_junction(self, src_table: str, fname, field, connection) -> None:
+        from ..models import _model_registry
+        target = field.remote_field_to
+        target_model = (
+            _model_registry.get(target) if isinstance(target, str) else target
+        )
+        if target_model is None:
+            # Pending forward reference — the autodetector orders
+            # CreateModel ops by dependency so this should be rare,
+            # but if the target hasn't been registered yet we can't
+            # generate a referencing junction. Skip rather than crash;
+            # ``dorm dbcheck`` will flag the missing junction.
+            return
+        target_table = target_model._meta.db_table
+        target_pk_col = target_model._meta.pk.column
+
+        junction = f"{src_table}_{fname}"
+        src_col = f"{self.name.lower()}_id"
+        tgt_col = f"{target_model.__name__.lower()}_id"
+
+        vendor = getattr(connection, "vendor", "sqlite")
+        pk_decl = (
+            '"id" INTEGER PRIMARY KEY AUTOINCREMENT'
+            if vendor == "sqlite"
+            else (
+                '"id" BIGSERIAL PRIMARY KEY' if vendor == "postgresql"
+                else '"id" BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY'
+            )
+        )
+        sql = (
+            f'CREATE TABLE IF NOT EXISTS "{junction}" (\n'
+            f"  {pk_decl},\n"
+            f'  "{src_col}" BIGINT NOT NULL '
+            f'REFERENCES "{src_table}"("id") ON DELETE CASCADE,\n'
+            f'  "{tgt_col}" BIGINT NOT NULL '
+            f'REFERENCES "{target_table}"("{target_pk_col}") ON DELETE CASCADE,\n'
+            f'  UNIQUE ("{src_col}", "{tgt_col}")\n'
+            f")"
+        )
+        connection.execute_script(sql)
+
     def database_backwards(self, app_label: str, connection, from_state, to_state):
         table = self.options.get("db_table") or f"{app_label}_{self.name.lower()}"
+        # Drop M2M junctions before the parent table — FKs reference us.
+        for fname, field in self.fields:
+            from ..fields import ManyToManyField
+            if not isinstance(field, ManyToManyField) or field.through is not None:
+                continue
+            junction = f"{table}_{fname}"
+            connection.execute_script(f'DROP TABLE IF EXISTS "{junction}"')
         connection.execute_script(f'DROP TABLE IF EXISTS "{table}"')
 
     def describe(self) -> str:

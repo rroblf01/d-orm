@@ -93,6 +93,24 @@ def _find_migrations_dir(app_module: str) -> Path:
     return base / "migrations"
 
 
+def _resolve_app_module(app_arg: str, installed_apps: list[str]) -> str:
+    """Map a CLI ``app`` argument back to its INSTALLED_APPS entry.
+
+    Why: users on the CLI naturally type the short ``Meta.app_label``
+    (``dorm migrate auth``), but ``_find_migrations_dir`` needs the
+    importable dotted path (``dorm.contrib.auth``) to resolve the
+    package's migrations folder. When *app_arg* is already an entry
+    in INSTALLED_APPS, return it; otherwise scan for an entry whose
+    resolved label matches.
+    """
+    if app_arg in installed_apps:
+        return app_arg
+    for entry in installed_apps:
+        if _resolve_app_label(entry) == app_arg:
+            return entry
+    return app_arg
+
+
 def _resolve_app_label(installed_app: str) -> str:
     """Return the actual ``Meta.app_label`` declared by the models of
     *installed_app*, or *installed_app* itself when no override.
@@ -154,7 +172,8 @@ def cmd_makemigrations(args):
             return
         from .migrations.writer import write_empty_migration
 
-        for app in args.apps:
+        for raw_app in args.apps:
+            app = _resolve_app_module(raw_app, installed_apps)
             mig_dir = _find_migrations_dir(app)
             next_num = _next_migration_number(mig_dir)
             name = args.name or "custom"
@@ -175,7 +194,8 @@ def cmd_makemigrations(args):
             return
         from .migrations.writer import write_pgvector_extension_migration
 
-        for app in args.apps:
+        for raw_app in args.apps:
+            app = _resolve_app_module(raw_app, installed_apps)
             mig_dir = _find_migrations_dir(app)
             next_num = _next_migration_number(mig_dir)
             name = args.name or "enable_pgvector"
@@ -192,7 +212,10 @@ def cmd_makemigrations(args):
     from .migrations.writer import write_migration
     from .db.connection import get_connection
 
-    apps = args.apps if args.apps else installed_apps
+    if args.apps:
+        apps = [_resolve_app_module(a, installed_apps) for a in args.apps]
+    else:
+        apps = installed_apps
 
     for app in apps:
         print(f"Detecting changes for '{app}'...")
@@ -230,7 +253,7 @@ def cmd_squashmigrations(args):
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
-    app_arg = args.app_label
+    app_arg = _resolve_app_module(args.app_label, installed_apps)
     app_label = _resolve_app_label(app_arg)
     start = int(args.start_migration)
     end = int(args.end_migration)
@@ -301,7 +324,13 @@ def cmd_migrate(args):
     dry_run = getattr(args, "dry_run", False)
     fake = getattr(args, "fake", False)
     fake_initial = getattr(args, "fake_initial", False)
-    apps = [app_label] if app_label else installed_apps
+    if app_label:
+        # Accept both the dotted INSTALLED_APPS entry and the short
+        # ``Meta.app_label`` form so ``dorm migrate auth`` works the
+        # same as ``dorm migrate dorm.contrib.auth``.
+        apps = [_resolve_app_module(app_label, installed_apps)]
+    else:
+        apps = installed_apps
 
     for app in apps:
         mig_dir = _find_migrations_dir(app)
@@ -356,7 +385,10 @@ def cmd_showmigrations(args):
     conn = get_connection()
     executor = MigrationExecutor(conn, verbosity=0)
 
-    apps = args.apps if args.apps else installed_apps
+    if args.apps:
+        apps = [_resolve_app_module(a, installed_apps) for a in args.apps]
+    else:
+        apps = installed_apps
     for app in apps:
         mig_dir = _find_migrations_dir(app)
         executor.show_migrations(_resolve_app_label(app), mig_dir)
@@ -452,7 +484,10 @@ def cmd_dbcheck(args):
 
     conn = get_connection()
 
-    apps_to_check = args.apps if args.apps else installed_apps
+    if args.apps:
+        apps_to_check = [_resolve_app_module(a, installed_apps) for a in args.apps]
+    else:
+        apps_to_check = installed_apps
     drift_found = False
 
     for app in apps_to_check:
@@ -1205,31 +1240,32 @@ def cmd_dumpdata(args):
         ]
     else:
         for spec in args.targets:
-            if "." in spec:
-                # ``app.Model`` form — exact match against registry.
-                if spec not in _model_registry:
-                    print(f"Error: model {spec!r} not found.", file=sys.stderr)
-                    sys.exit(1)
+            # Try ``app.Model`` exact match first (registry stores
+            # both module-derived and ``Meta.app_label`` aliases).
+            if spec in _model_registry and "." in spec:
                 targets.append(_model_registry[spec])
-            else:
-                # Either a bare model name, or an app label.
-                if spec in _model_registry and "." not in spec:
-                    targets.append(_model_registry[spec])
-                    continue
-                app_models = [
-                    m
-                    for label, m in _model_registry.items()
-                    if "." not in label
-                    and m._meta.app_label == spec
-                    and not m._meta.abstract
-                ]
-                if not app_models:
-                    print(
-                        f"Error: {spec!r} matched no models or app labels.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                targets.extend(app_models)
+                continue
+            if "." not in spec and spec in _model_registry:
+                targets.append(_model_registry[spec])
+                continue
+            # Treat as app label. ``_resolve_app_label`` maps a
+            # dotted INSTALLED_APPS entry (``dorm.contrib.auth``) to
+            # the canonical ``Meta.app_label`` (``auth``).
+            resolved = _resolve_app_label(spec)
+            app_models = [
+                m
+                for label, m in _model_registry.items()
+                if "." not in label
+                and m._meta.app_label == resolved
+                and not m._meta.abstract
+            ]
+            if not app_models:
+                print(
+                    f"Error: {spec!r} matched no models or app labels.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            targets.extend(app_models)
 
     text = serialize_dumps(targets, indent=args.indent)
     if args.output and args.output != "-":

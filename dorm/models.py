@@ -320,9 +320,16 @@ class ModelBase(type):
             "MultipleObjectsReturned", (MultipleObjectsReturned,), {"__module__": module}
         )
 
-        # Register model
+        # Register model. ``app_label`` here is the module-derived
+        # label (``dorm.contrib.auth``); ``opts.app_label`` may differ
+        # when ``Meta.app_label`` overrides it (``auth``). Register
+        # under both so callers can address the model by either form
+        # — qualified module path OR the canonical app label that
+        # ``_meta.app_label`` reports.
         _model_registry[name] = new_class
         _model_registry[f"{app_label}.{name}"] = new_class
+        if opts.app_label != app_label:
+            _model_registry[f"{opts.app_label}.{name}"] = new_class
 
         # Resolve any pending reverse FK / O2O relations that
         # target this model. ``OneToOneField`` registers the
