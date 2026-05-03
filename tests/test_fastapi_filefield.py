@@ -34,6 +34,16 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 pytest.importorskip("multipart")  # python-multipart, used by UploadFile
 
+# Pin every test in this file to the same xdist worker. ``TestClient``
+# spawns a lifespan thread per app + drives the async ORM under that
+# thread; under ``-n N`` parallel workers we'd been seeing one-off
+# ``worker 'gw0' crashed`` failures in CI when psycopg's async pool
+# got finalised mid-flight by a sibling worker's interpreter shutdown.
+# Same-worker scheduling keeps the pool lifecycle linear within the
+# file (and lets faulthandler dump a useful stack on the next hang
+# instead of a bare worker death).
+pytestmark = pytest.mark.xdist_group("fastapi_filefield")
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -210,10 +220,19 @@ def _build_app() -> FastAPI:
 @pytest.fixture
 def client(media_root, documents_table):
     """Return a FastAPI ``TestClient`` bound to a fresh app for each
-    test."""
+    test.
+
+    Skip the ``with TestClient(...) as c`` form on purpose: that
+    triggers the app's lifespan, which spawns an anyio portal
+    thread. The portal interacts poorly with psycopg's async pool
+    under ``pytest -n N`` — CI was seeing one-off worker crashes
+    when a sibling worker's interpreter shutdown raced the portal
+    thread's finaliser. The app declares no lifespan handlers, so
+    the bare-instance form is functionally identical and avoids
+    the thread.
+    """
     app = _build_app()
-    with TestClient(app) as c:
-        yield c
+    yield TestClient(app)
 
 
 # ── Upload pipeline ──────────────────────────────────────────────────────────
