@@ -69,6 +69,33 @@ with transaction.atomic():           # BEGIN
 Author A and C end up persisted; B is rolled back to its savepoint.
 This is useful for "best-effort" sub-steps inside a larger transaction.
 
+## `atomic(durable=True)` (3.1+)
+
+Pass `durable=True` to assert that *this* atomic block is the
+outermost one — the surrounding code must NOT already be inside
+another `atomic()`. Raises `RuntimeError` immediately if it would
+silently degrade to a savepoint:
+
+```python
+with transaction.atomic(durable=True):  # ok — top-level
+    process_payment()
+    schedule_emails()
+
+# Mistake: nested durable will raise instead of silently being
+# a savepoint.
+with transaction.atomic():
+    with transaction.atomic(durable=True):  # RuntimeError
+        ...
+```
+
+Use this on work that MUST land in its own `COMMIT` (write-then-
+publish patterns where the publish step waits on a real fsync,
+or where a downstream consumer reads the row by polling on a
+replica). Mirrors Django's flag added in 3.2.
+
+The async counterpart `aatomic(durable=True)` enforces the same
+invariant on `async with` blocks.
+
 ## Choosing the right boundary
 
 Keep transactions **short** and **focused on writes**:

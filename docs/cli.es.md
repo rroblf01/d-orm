@@ -54,6 +54,8 @@ dorm migrate blog zero             # rollback de todas las migraciones
 | `--dry-run` / `--plan` (3.0+) | imprime solo el SQL; no toca la BD ni actualiza el recorder. ``--plan`` es alias para usuarios que vienen de Django |
 | `--fake` (3.0+) | registra cada migración pendiente como aplicada SIN ejecutar sus operaciones. Útil al adoptar dorm contra un schema legacy administrado a mano |
 | `--fake-initial` (3.0+) | solo "fakea" la migración *inicial* de cada app, y solo si sus ``CreateModel`` apuntan a tablas que ya existen |
+| `--run-syncdb` (3.1+) | crea tablas para INSTALLED_APPS sin migrations dir (apps legacy / hand-managed). Útil al adoptar dorm gradualmente |
+| `--prune` (3.1+) | borra recorder rows huérfanos (migración cuyo archivo ya no existe en disco, p.ej. tras `squashmigrations`). Solo bookkeeping, sin DDL |
 | `--verbosity N` | 0 = silencioso, 1 = default, 2 = verbose |
 | `--settings PATH` | módulo de settings a cargar |
 
@@ -259,3 +261,71 @@ warning, así que sirve como puerta pre-despliegue::
 El doctor es conservador — solo avisa cuando la regla de oro es
 ampliamente aceptada. Ajusta a tu carga antes de tratar un único
 warning como dogma.
+
+## `dorm createsuperuser` (3.1+)
+
+Crea una fila `dorm.contrib.auth.User` con `is_superuser=True`. Pasa
+`--password` para flujo no-interactivo; sin él, prompt interactivo
+con confirmación.
+
+```bash
+dorm createsuperuser --email admin@example.com --password 'secret'
+dorm createsuperuser --email admin@example.com   # prompt interactivo
+```
+
+## `dorm changepassword` (3.1+)
+
+Cambia la contraseña de un usuario existente:
+
+```bash
+dorm changepassword admin@example.com --password 'newsecret'
+dorm changepassword admin@example.com   # prompt interactivo
+```
+
+Comparación constant-time vía `hmac.compare_digest`. El nuevo hash
+usa el algoritmo configurado por defecto (PBKDF2 stdlib, o Argon2
+si `[auth-argon2]` está instalado).
+
+## `dorm flush` (3.1+)
+
+Borra todas las filas de toda tabla managed. Esquema queda — solo
+los datos se van. Confirma salvo que pases `--noinput`:
+
+```bash
+dorm flush --noinput
+```
+
+PostgreSQL usa `TRUNCATE … RESTART IDENTITY CASCADE`; SQLite y
+MySQL caen a `DELETE FROM`.
+
+## `dorm sqlmigrate` (3.1+)
+
+Imprime el SQL de una sola migración sin aplicarlo:
+
+```bash
+dorm sqlmigrate myapp 0007_add_index
+dorm sqlmigrate myapp 0007_add_index --backwards
+```
+
+Útil para review antes de correr una migración sensible en
+producción. El recorder NO se actualiza.
+
+## `dorm shell_plus` (3.1+)
+
+Alias de `dorm shell` — paridad con django-extensions. El `shell`
+base ya auto-importa todos los modelos de `INSTALLED_APPS` al
+namespace, así que ambos comandos se comportan idéntico;
+`shell_plus` se expone como entrada muscle-memory-friendly.
+
+## `dorm runscript` (3.1+)
+
+Ejecuta un archivo Python bajo los settings del proyecto, con
+INSTALLED_APPS precargado. Espejo de django-extensions
+`runscript`:
+
+```bash
+dorm runscript path/to/ops.py [args...] [--settings myproj.settings]
+```
+
+Args posicionales extra se pasan como `sys.argv[1:]` para que el
+script lea CLI args como bajo el intérprete normal.

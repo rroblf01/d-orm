@@ -13,6 +13,8 @@ uv add "djanorm[sqlite]"
 ```
 
 For PostgreSQL: `pip install "djanorm[postgresql]"`.
+For MySQL / MariaDB (3.1+): `pip install "djanorm[mysql]"`
+(pure-Python `pymysql` + `aiomysql`, no C toolchain).
 For S3 file uploads: `pip install "djanorm[s3]"` (works with AWS S3,
 MinIO, Cloudflare R2, Backblaze B2).
 
@@ -140,6 +142,34 @@ DATABASES = {
 
 Re-run `dorm migrate` against the empty PG database. Your code, models,
 and queries stay identical.
+
+## 8. MySQL / MariaDB (3.1+)
+
+Install the extra and point at the MySQL service:
+
+```bash
+pip install "djanorm[mysql]"
+```
+
+```python title="settings.py"
+DATABASES = {
+    "default": {
+        "ENGINE": "mysql",   # or "mariadb"
+        "NAME": "blog",
+        "USER": "root",
+        "PASSWORD": "secret",
+        "HOST": "localhost",
+        "PORT": 3306,
+    }
+}
+```
+
+Caveats: DDL is not transactional on MySQL — wrapping
+`ALTER TABLE` in `atomic()` won't roll it back. `RETURNING` works
+on MariaDB 10.5+ but not on MySQL; the insert path uses
+`cursor.lastrowid` for autoincrement PKs. The wrapper forces
+`ANSI_QUOTES` mode so dorm's double-quoted identifiers parse the
+same as PostgreSQL / SQLite.
 
 ## What next?
 

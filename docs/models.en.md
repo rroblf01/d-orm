@@ -45,7 +45,7 @@ you declare your own primary key.
 | `IntegerField()` | `INTEGER` |
 | `SmallIntegerField()` | `SMALLINT` |
 | `BigIntegerField()` | `BIGINT` |
-| `PositiveIntegerField()` / `PositiveSmallIntegerField()` | with `CHECK` |
+| `PositiveIntegerField()` / `PositiveSmallIntegerField()` / `PositiveBigIntegerField()` (3.1+) | with `CHECK` |
 | `FloatField()` | `DOUBLE PRECISION` / `REAL` |
 | `DecimalField(max_digits=N, decimal_places=M)` | `DECIMAL(N, M)` |
 
@@ -621,6 +621,7 @@ Every field accepts:
 | `db_column="x"` | override column name (default: field name) |
 | `default=value` or `default=callable` | row-level default (Python-side, fires when constructor doesn't see a value) |
 | `db_default=value` or `db_default=RawSQL("now()")` | server-side default — lands in `CREATE TABLE` as `DEFAULT <literal>`; covers raw INSERTs that omit the column |
+| `db_comment="..."` (3.1+) | column-level comment for schema-archaeology tooling. PG / MySQL emit `COMMENT ON COLUMN`; SQLite ignores |
 | `validators=[fn, ...]` | run on assignment + `full_clean()` |
 | `choices=[(value, label), …]` | restrict to a fixed set |
 | `editable=False` | hidden from forms / serializers |
@@ -665,6 +666,78 @@ class Author(dorm.Model):
         abstract = False                       # set True for mixins
         app_label = "blog"                     # rarely needed
 ```
+
+### Index extras (3.1+)
+
+`Index(include=[...])` emits a PostgreSQL **covering index**:
+
+```python
+indexes = [
+    dorm.Index(
+        fields=["email"],
+        name="ix_user_email_cover",
+        include=["full_name", "is_active"],
+    ),
+]
+# PG: CREATE INDEX ... ON "users" ("email") INCLUDE ("full_name", "is_active")
+# SQLite / MySQL: silently ignore the INCLUDE clause
+```
+
+The included columns travel with the index pages, so the planner
+satisfies index-only scans for `SELECT email, full_name, is_active
+WHERE email = ?` without a heap fetch.
+
+### `UniqueConstraint(deferrable=, include=)` (3.1+)
+
+```python
+constraints = [
+    # Deferred unique check — evaluated at COMMIT, not statement-end.
+    # Lets you swap two rows' unique values inside a single
+    # transaction without tripping the constraint mid-flight.
+    dorm.UniqueConstraint(
+        fields=["slot"], name="uq_slot_deferred",
+        deferrable="deferred",
+    ),
+    # Covering unique constraint — same INCLUDE pattern as Index.
+    dorm.UniqueConstraint(
+        fields=["email"], name="uq_email_cover",
+        include=["last_login_at"],
+    ),
+]
+```
+
+`deferrable=` accepts `"deferred"` (default check at COMMIT) or
+`"immediate"` (check at statement-end, switchable mid-tx with
+`SET CONSTRAINTS ... DEFERRED`). PostgreSQL only — SQLite + MySQL
+silently drop the clause.
+
+### `ExclusionConstraint` (3.1+, PG only)
+
+PostgreSQL `EXCLUDE` constraint — guarantees no two rows in the
+table satisfy the same operator over the named expressions. The
+canonical use case is range-overlap exclusion:
+
+```python
+import dorm
+
+class Reservation(dorm.Model):
+    room_id = dorm.IntegerField()
+    slot = dorm.RangeField(...)  # tstzrange
+
+    class Meta:
+        constraints = [
+            dorm.ExclusionConstraint(
+                name="no_overlap_room",
+                expressions=[("room_id", "="), ("slot", "&&")],
+                index_type="gist",   # default
+            ),
+        ]
+```
+
+Any insert/update producing a `(room_id, slot)` pair that overlaps
+an existing row's range raises `IntegrityError`. SQLite + MySQL
+emit nothing — pick a different uniqueness strategy on those
+backends.
 
 ### Abstract base classes
 

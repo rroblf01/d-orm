@@ -279,10 +279,29 @@ tablas calientes:
 
 ## Restricciones y columnas calculadas
 
-`Meta.constraints` acepta `CheckConstraint` y
-`UniqueConstraint(condition=...)` (índice único parcial — el patrón
-canónico de "solo una fila activa por usuario"). El autodetector
-emite `AddConstraint` / `RemoveConstraint`.
+`Meta.constraints` acepta `CheckConstraint`,
+`UniqueConstraint(condition=…, deferrable=…, include=…)` (3.1+
+añade `deferrable` + `include`) y `ExclusionConstraint` (3.1+,
+solo PostgreSQL). El autodetector emite `AddConstraint` /
+`RemoveConstraint`.
 
 `GeneratedField` declara una columna calculada por la BD (PG ≥ 12,
 SQLite ≥ 3.31).
+
+## Ops de migración añadidas en 3.1
+
+| Operación | Efecto |
+|---|---|
+| `SeparateDatabaseAndState(database_operations=, state_operations=)` | Aplica un par paralelo — una actualiza state, la otra corre DDL. Útil cuando el autodetector se desvía de la realidad |
+| `AlterModelOptions(name, options=)` | Actualiza opciones Meta sin DDL (`ordering`, `verbose_name`, `permissions`, `default_manager_name`, `base_manager_name`). Solo state |
+| `AlterModelTable(name, table=)` | Renombra el `db_table` subyacente — emite `ALTER TABLE old RENAME TO new` |
+| `AlterModelManagers(name, managers=)` | Registra cambios en `Meta.managers`. State puro — los managers viven solo en Python |
+
+## CLI extras en 3.1
+
+- `dorm migrate --run-syncdb` — crea tablas para INSTALLED_APPS
+  sin directorio de migraciones.
+- `dorm migrate --prune` — borra recorder rows huérfanos (archivo
+  ya no existe, p.ej. tras `squashmigrations`). Sin DDL.
+- `dorm sqlmigrate <app> <name> [--backwards]` — renderiza el SQL
+  de una migración sin aplicarla.

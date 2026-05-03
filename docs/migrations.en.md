@@ -267,10 +267,29 @@ Three operations help you avoid `AccessExclusiveLock` on hot tables:
 
 ## Constraints and generated columns
 
-`Meta.constraints` accepts `CheckConstraint` and
-`UniqueConstraint(condition=...)` (partial unique index — the
-canonical "only one active row per user" pattern). The autodetector
+`Meta.constraints` accepts `CheckConstraint`,
+`UniqueConstraint(condition=…, deferrable=…, include=…)` (3.1+
+adds the `deferrable` + `include` keywords) and
+`ExclusionConstraint` (3.1+, PostgreSQL only). The autodetector
 emits `AddConstraint` / `RemoveConstraint`.
 
 `GeneratedField` declares a database-computed column (PG ≥ 12,
 SQLite ≥ 3.31).
+
+## Migration ops added in 3.1
+
+| Operation | Effect |
+|---|---|
+| `SeparateDatabaseAndState(database_operations=, state_operations=)` | Apply a parallel pair of ops — one updates state, the other runs DDL. Useful when the autodetector's understanding diverges from the real database |
+| `AlterModelOptions(name, options=)` | Update Meta options that don't require DDL (`ordering`, `verbose_name`, `permissions`, `default_manager_name`, `base_manager_name`). State-only |
+| `AlterModelTable(name, table=)` | Rename the underlying `db_table` — emits `ALTER TABLE old RENAME TO new` |
+| `AlterModelManagers(name, managers=)` | Track `Meta.managers` changes. Pure state — managers live in Python only |
+
+## CLI extras in 3.1
+
+- `dorm migrate --run-syncdb` — create tables for INSTALLED_APPS
+  with no migrations directory.
+- `dorm migrate --prune` — drop recorder rows for migration files
+  that no longer exist (e.g. after `squashmigrations`). No DDL.
+- `dorm sqlmigrate <app> <name> [--backwards]` — render a
+  migration's SQL without applying it.

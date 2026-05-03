@@ -69,6 +69,32 @@ with transaction.atomic():           # BEGIN
 Los autores A y C acaban persistidos; B se revierte al savepoint.
 Útil para sub-pasos "best-effort" dentro de una transacción mayor.
 
+## `atomic(durable=True)` (3.1+)
+
+Pasa `durable=True` para afirmar que *este* bloque atomic es el
+más externo — el código que lo rodea NO debe estar dentro de otro
+`atomic()`. Lanza `RuntimeError` inmediato si degradaría
+silenciosamente a savepoint:
+
+```python
+with transaction.atomic(durable=True):  # ok — top-level
+    process_payment()
+    schedule_emails()
+
+# Error: durable anidado lanza en vez de ser un savepoint silencioso.
+with transaction.atomic():
+    with transaction.atomic(durable=True):  # RuntimeError
+        ...
+```
+
+Úsalo cuando el trabajo DEBE aterrizar en su propio `COMMIT`
+(patrones write-then-publish donde el publish espera un fsync
+real, o donde un consumer downstream lee la fila por polling en
+réplica). Espejo del flag Django añadido en 3.2.
+
+La contraparte async `aatomic(durable=True)` aplica la misma
+invariante a bloques `async with`.
+
 ## Elegir bien el límite
 
 Mantén las transacciones **cortas** y **centradas en escrituras**:

@@ -279,6 +279,51 @@ Aislamiento per-task via ``ContextVar`` — tasks lanzadas con
 ``asyncio.gather`` ven contadores independientes, así dos tests
 concurrentes bajo ``pytest-xdist`` no contaminan asserciones.
 
+### `override_settings` + `setUpTestData` (3.1+)
+
+`dorm.test.override_settings` es a la vez context manager y
+decorador (sync + async aware). Revierte cada clave mutada al
+salir — incluyendo borrar claves que no existían antes:
+
+```python
+from dorm.test import override_settings
+
+with override_settings(SLOW_QUERY_MS=10):
+    run_some_queries()
+
+@override_settings(USE_TZ=True, TIME_ZONE="Europe/Madrid")
+def test_tz_aware():
+    ...
+
+@override_settings(SLOW_QUERY_MS=42)
+async def test_async_path():
+    ...
+```
+
+`setUpTestData` es un decorator factory de clase que corre un
+callable `cls -> dict` una sola vez al construir la clase y pega
+cada entrada como atributo de clase — paridad Django, sin
+heredar de `unittest.TestCase`:
+
+```python
+from dorm.test import setUpTestData
+
+def _data(cls):
+    return {
+        "alice": Author.objects.create(name="Alice", age=30),
+        "bob":   Author.objects.create(name="Bob",   age=40),
+    }
+
+@setUpTestData(_data)
+class TestAuthor:
+    def test_alice_age(self):
+        assert self.alice.age == 30
+```
+
+Los tests deben revertir cualquier mutación sobre las filas
+compartidas (o reconstruir vía fixture per-test) — mismo
+contrato Django.
+
 ## Cambiar `FileField` entre disco local y S3 sin tocar código
 
 `FileField` lee el storage backend desde `settings.STORAGES` en

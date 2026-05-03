@@ -45,7 +45,7 @@ implícita (un `BigAutoField`).
 | `IntegerField()` | `INTEGER` |
 | `SmallIntegerField()` | `SMALLINT` |
 | `BigIntegerField()` | `BIGINT` |
-| `PositiveIntegerField()` / `PositiveSmallIntegerField()` | con `CHECK` |
+| `PositiveIntegerField()` / `PositiveSmallIntegerField()` / `PositiveBigIntegerField()` (3.1+) | con `CHECK` |
 | `FloatField()` | `DOUBLE PRECISION` / `REAL` |
 | `DecimalField(max_digits=N, decimal_places=M)` | `DECIMAL(N, M)` |
 
@@ -632,6 +632,7 @@ Todo campo acepta:
 | `db_column="x"` | override del nombre de la columna |
 | `default=value` o `default=callable` | default a nivel Python (dispara cuando el constructor no recibe valor) |
 | `db_default=value` o `db_default=RawSQL("now()")` | default a nivel servidor — aparece en `CREATE TABLE` como `DEFAULT <literal>`; cubre INSERTs raw que omiten la columna |
+| `db_comment="..."` (3.1+) | comentario de columna para tooling DBA. PG / MySQL emiten `COMMENT ON COLUMN`; SQLite ignora |
 | `validators=[fn, ...]` | se ejecutan al asignar y en `full_clean()` |
 | `choices=[(value, label), …]` | restringe a un conjunto fijo |
 | `editable=False` | oculto a forms / serializers |
@@ -675,6 +676,77 @@ class Author(dorm.Model):
         abstract = False                       # True para mixins
         app_label = "blog"                     # rara vez necesario
 ```
+
+### Index extras (3.1+)
+
+`Index(include=[...])` emite un **covering index** PostgreSQL:
+
+```python
+indexes = [
+    dorm.Index(
+        fields=["email"],
+        name="ix_user_email_cover",
+        include=["full_name", "is_active"],
+    ),
+]
+# PG: CREATE INDEX ... ON "users" ("email") INCLUDE ("full_name", "is_active")
+# SQLite / MySQL: ignoran INCLUDE silenciosamente
+```
+
+Las columnas incluidas viajan con las páginas del índice — el
+planner resuelve `SELECT email, full_name, is_active WHERE email = ?`
+sin tocar el heap.
+
+### `UniqueConstraint(deferrable=, include=)` (3.1+)
+
+```python
+constraints = [
+    # Unique check diferido — se evalúa en COMMIT, no a fin de
+    # statement. Permite swap de dos filas con valor único dentro
+    # de una transacción sin disparar la restricción a mitad.
+    dorm.UniqueConstraint(
+        fields=["slot"], name="uq_slot_deferred",
+        deferrable="deferred",
+    ),
+    # Unique covering — mismo INCLUDE que Index.
+    dorm.UniqueConstraint(
+        fields=["email"], name="uq_email_cover",
+        include=["last_login_at"],
+    ),
+]
+```
+
+`deferrable=` acepta `"deferred"` (check al COMMIT) o
+`"immediate"` (check al fin de statement, switchable mid-tx con
+`SET CONSTRAINTS ... DEFERRED`). Solo PostgreSQL — SQLite + MySQL
+descartan el clause silenciosamente.
+
+### `ExclusionConstraint` (3.1+, solo PG)
+
+`EXCLUDE` PostgreSQL — garantiza que no haya dos filas que
+satisfagan el mismo operador sobre las expresiones nombradas.
+Caso canónico: exclusión por solapamiento de rangos:
+
+```python
+import dorm
+
+class Reservation(dorm.Model):
+    room_id = dorm.IntegerField()
+    slot = dorm.RangeField(...)  # tstzrange
+
+    class Meta:
+        constraints = [
+            dorm.ExclusionConstraint(
+                name="no_overlap_room",
+                expressions=[("room_id", "="), ("slot", "&&")],
+                index_type="gist",   # default
+            ),
+        ]
+```
+
+Cualquier insert/update que produzca un `(room_id, slot)` que
+solape una fila existente lanza `IntegrityError`. SQLite + MySQL
+no emiten nada — usa otra estrategia de unicidad ahí.
 
 ### Clases base abstractas
 

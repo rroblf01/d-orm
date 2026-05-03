@@ -13,6 +13,8 @@ uv add "djanorm[sqlite]"
 ```
 
 Para PostgreSQL: `pip install "djanorm[postgresql]"`.
+Para MySQL / MariaDB (3.1+): `pip install "djanorm[mysql]"`
+(pure-Python `pymysql` + `aiomysql`, sin C toolchain).
 Para uploads en S3: `pip install "djanorm[s3]"` (funciona con AWS S3,
 MinIO, Cloudflare R2, Backblaze B2).
 
@@ -141,6 +143,34 @@ DATABASES = {
 
 Lanza `dorm migrate` contra la BD vacía de PG. Tu código, modelos y
 consultas no cambian.
+
+## 8. MySQL / MariaDB (3.1+)
+
+Instala el extra y apunta al servicio MySQL:
+
+```bash
+pip install "djanorm[mysql]"
+```
+
+```python title="settings.py"
+DATABASES = {
+    "default": {
+        "ENGINE": "mysql",   # o "mariadb"
+        "NAME": "blog",
+        "USER": "root",
+        "PASSWORD": "secreto",
+        "HOST": "localhost",
+        "PORT": 3306,
+    }
+}
+```
+
+Caveats: DDL no es transaccional en MySQL — envolver `ALTER TABLE`
+en `atomic()` no lo revierte. `RETURNING` funciona en MariaDB
+10.5+ pero no en MySQL; el insert usa `cursor.lastrowid` para PKs
+autoincrement. El wrapper fuerza `ANSI_QUOTES` para que los
+identificadores entre comillas dobles parseen igual que en
+PostgreSQL / SQLite.
 
 ## ¿Qué sigue?
 

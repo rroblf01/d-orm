@@ -35,13 +35,39 @@ user.has_perm("articles.publish")  # True
 
 ## Password hashing
 
-Stdlib PBKDF2-SHA256, format
+Stdlib PBKDF2-SHA256 by default, format
 ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` — same shape Django
 emits, so passwords migrate cleanly between the two ORMs.
 
 ::: dorm.contrib.auth.password.make_password
 ::: dorm.contrib.auth.password.check_password
 ::: dorm.contrib.auth.password.is_password_usable
+
+### Argon2id (3.1+, opt-in)
+
+Install the optional extra:
+
+```bash
+pip install "djanorm[auth-argon2]"
+```
+
+Then use `make_password_argon2` in place of `make_password`. The
+output is prefixed with `argon2$` so `check_password` dispatches
+by algorithm tag — both PBKDF2 and Argon2 hashes verify through
+the same call:
+
+```python
+from dorm.contrib.auth.password import (
+    make_password_argon2, check_password,
+)
+
+h = make_password_argon2("secret-pw")  # "argon2$$argon2id$..."
+assert check_password("secret-pw", h)
+```
+
+Argon2id is the current state of the art for password hashing
+(memory-hard, resistant to GPU / ASIC bruteforce). PBKDF2 stays
+the default because it ships in stdlib without a C extension.
 
 ## Reset / verification tokens
 

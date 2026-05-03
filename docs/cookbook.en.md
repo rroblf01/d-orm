@@ -276,6 +276,51 @@ Per-task isolation via ``ContextVar`` — concurrent
 running in parallel under ``pytest-xdist`` don't bleed into each
 other's assertions.
 
+### `override_settings` + `setUpTestData` (3.1+)
+
+`dorm.test.override_settings` is both a context manager and a
+decorator (sync + async aware). Reverts every mutated key on exit
+— including deletion of keys that didn't exist before:
+
+```python
+from dorm.test import override_settings
+
+with override_settings(SLOW_QUERY_MS=10):
+    run_some_queries()
+
+@override_settings(USE_TZ=True, TIME_ZONE="Europe/Madrid")
+def test_tz_aware():
+    ...
+
+@override_settings(SLOW_QUERY_MS=42)
+async def test_async_path():
+    ...
+```
+
+`setUpTestData` is a class decorator factory that runs a
+`cls -> dict` callable once at class construction and attaches
+every entry as a class attribute — Django parity, without
+inheriting from `unittest.TestCase`:
+
+```python
+from dorm.test import setUpTestData
+
+def _data(cls):
+    return {
+        "alice": Author.objects.create(name="Alice", age=30),
+        "bob":   Author.objects.create(name="Bob",   age=40),
+    }
+
+@setUpTestData(_data)
+class TestAuthor:
+    def test_alice_age(self):
+        assert self.alice.age == 30
+```
+
+Tests must roll back any mutation they make to the shared rows
+(or rebuild via a per-test fixture) — same contract Django
+enforces.
+
 ## Switching `FileField` between local disk and S3 with no code changes
 
 `FileField` reads the storage backend from `settings.STORAGES` at

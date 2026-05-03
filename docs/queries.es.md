@@ -68,6 +68,47 @@ Doc.objects.filter(data__address__city="Lisbon")
 El operador PG ``#>>`` devuelve ``text``. Combina con ``Cast`` para
 comparaciones tipadas (``Cast(F("data__age"), "INTEGER")__gt=18``).
 
+### Lookups Trigram + unaccent (3.1+, solo PG)
+
+PostgreSQL trae las extensiones `pg_trgm` y `unaccent` listas;
+actívalas una vez por base de datos y usa los lookups equivalentes:
+
+```sql
+-- DDL una sola vez (o vía migración RunSQL):
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+```
+
+```python
+# Match aproximado / fuzzy vía familia operador %.
+Author.objects.filter(name__trigram_similar="alise")        # "Alice" hace match
+Author.objects.filter(name__trigram_word_similar="ali")
+Author.objects.filter(name__trigram_strict_word_similar="ali")
+
+# Igualdad sin diacríticos.
+Author.objects.filter(name__unaccent="Cafe")  # match "Café"
+```
+
+### Lookups custom vía `register_lookup` (3.1+)
+
+Conecta un lookup específico del proyecto sin subclasear cada Field:
+
+```python
+from dorm.lookups import register_lookup
+
+register_lookup(
+    "zipcode_us",
+    "{col} ~ '^[0-9]{{5}}(-[0-9]{{4}})?$'",
+    value_transform=None,
+)
+
+Address.objects.filter(zip_code__zipcode_us=None)
+```
+
+El transform corre sobre el valor del queryset antes del bind;
+pasa `None` para lookups que ignoran el valor (regex, etc.).
+Nombres que colisionan con built-ins lanzan `ValueError`.
+
 ### Objetos Q — lógica booleana compleja
 
 ```python
@@ -183,6 +224,31 @@ authors = (
 # SELECT solo las columnas normales de Author; el COUNT() participa
 # en el WHERE pero no se devuelve.
 ```
+
+### Agregadas PostgreSQL (3.1+)
+
+```python
+from dorm import (
+    StringAgg, ArrayAgg, JSONBAgg,
+    BoolOr, BoolAnd, BitOr, BitAnd,
+)
+
+# Colección String / Array / JSON
+Tag.objects.annotate(article_titles=StringAgg("articles__title", ", "))
+Tag.objects.annotate(article_ids=ArrayAgg("articles__id"))
+Tag.objects.annotate(payload=JSONBAgg("articles__id"))
+
+# Reducción booleana sobre el grupo
+User.objects.aggregate(any_active=BoolOr("is_active"))
+User.objects.aggregate(all_active=BoolAnd("is_active"))
+
+# Reducción bitwise
+Setting.objects.aggregate(merged_flags=BitOr("flags"))
+```
+
+`JSONBAgg`, `BoolOr`, `BoolAnd` son solo PostgreSQL a nivel SQL.
+`BitOr` / `BitAnd` funcionan en PG y MySQL; SQLite necesita
+extensión.
 
 Promueve un alias a proyección real volviéndolo a declarar con
 `annotate(name=...)` más adelante en la cadena — paridad con Django.
