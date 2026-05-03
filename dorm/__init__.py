@@ -95,10 +95,13 @@ from .functions import (
     Log,
     Lower,
     LTrim,
+    CumeDist,
     Mod,
+    NthValue,
     NTile,
     Now,
     NullIf,
+    PercentRank,
     Power,
     Random,
     Rank,
@@ -200,7 +203,7 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 __all__ = [
     # Config
     "configure",
@@ -365,6 +368,9 @@ __all__ = [
     "Lead",
     "FirstValue",
     "LastValue",
+    "NthValue",
+    "PercentRank",
+    "CumeDist",
     # Constraints
     "CheckConstraint",
     "UniqueConstraint",

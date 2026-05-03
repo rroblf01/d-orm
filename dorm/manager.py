@@ -35,6 +35,14 @@ class BaseManager(Generic[_T]):
         mgr._db = using
         return mgr
 
+    def using(self, alias: str) -> QuerySet[_T]:
+        """Manager-level shortcut for ``Manager.all().using(alias)``.
+
+        Mirrors Django's pattern where ``Model.objects.using("replica")``
+        returns a queryset bound to *alias* in one call. Equivalent to
+        ``Manager.get_queryset().using(alias)``."""
+        return self.get_queryset().using(alias)
+
     def get_queryset(self) -> QuerySet[_T]:
         from .db.connection import router_db_for_read
         from .queryset import QuerySet

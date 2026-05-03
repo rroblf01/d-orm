@@ -25,12 +25,49 @@ alice = Author.objects.get_or_none(email="missing@example.com")
 ### Lookups across relations
 
 ```python
-# Books whose author's name starts with "Al":
+# Forward FK chain: books whose author's name starts with "Al".
 Book.objects.filter(author__name__startswith="Al")
 
-# Reverse relation via related_name
+# Reverse relation via the default ``<model_lower>_set`` accessor —
+# no ``related_name`` declared on the FK.
+Author.objects.filter(book_set__title="alpha").distinct()
+
+# Same query via custom ``related_name="books"``.
 Author.objects.filter(books__published=True).distinct()
+
+# Reverse-FK aggregation — ``Count`` walks the reverse accessor and
+# auto-emits ``GROUP BY`` over the outer columns. Authors with zero
+# books surface with ``book_count = 0`` (LEFT OUTER JOIN).
+from dorm import Count
+
+Author.objects.annotate(book_count=Count("book_set")).order_by("-book_count")
+
+# Reverse one-to-one accessor and many-to-many descriptor work the
+# same way.
+Profile.objects.filter(acct__email="ace@example.com")        # OneToOne reverse
+Article.objects.filter(tags__name="python").distinct()       # M2M
 ```
+
+### JSON path lookups
+
+```python
+# JSONField supports nested-key traversal in lookups. The compiler
+# emits the vendor's JSON-path operator — ``#>>`` on PostgreSQL,
+# ``json_extract`` on SQLite.
+class Doc(dorm.Model):
+    data = dorm.JSONField()
+
+Doc.objects.filter(data__name="alice")
+# PG:    SELECT ... WHERE "data" #>> '{name}' = %s
+# SQLite: SELECT ... WHERE json_extract("data", '$.name') = %s
+
+Doc.objects.filter(data__address__city="Lisbon")
+# PG:    "data" #>> '{address,city}' = %s
+# SQLite: json_extract("data", '$.address.city') = %s
+```
+
+The PG ``#>>`` operator returns ``text``. Pair with ``Cast`` for
+typed comparisons (``Cast(F("data__age"), "INTEGER")__gt=18``).
 
 ### Q objects — complex boolean logic
 
@@ -488,7 +525,8 @@ otherwise drop to `RawQuerySet` for:
   subqueries that compose with `filter()` / `annotate()`.
 - **`Window(expr, partition_by=, order_by=)`** plus `RowNumber`,
   `Rank`, `DenseRank`, `NTile`, `Lag`, `Lead`, `FirstValue`,
-  `LastValue` — ranking, running totals, deltas without bailing to
+  `LastValue`, `NthValue`, `PercentRank`, `CumeDist` — ranking,
+  running totals, deltas, percentile bucketing without bailing to
   raw SQL.
 - **`QuerySet.with_cte(name=qs)`** — non-recursive CTEs.
 - **Scalar functions**: `Greatest`, `Least`, `Round`, `Trunc`,

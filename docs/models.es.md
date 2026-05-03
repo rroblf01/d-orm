@@ -630,11 +630,37 @@ Todo campo acepta:
 | `unique=True` | añade restricción `UNIQUE` |
 | `db_index=True` | crea un índice |
 | `db_column="x"` | override del nombre de la columna |
-| `default=value` o `default=callable` | valor por defecto |
+| `default=value` o `default=callable` | default a nivel Python (dispara cuando el constructor no recibe valor) |
+| `db_default=value` o `db_default=RawSQL("now()")` | default a nivel servidor — aparece en `CREATE TABLE` como `DEFAULT <literal>`; cubre INSERTs raw que omiten la columna |
 | `validators=[fn, ...]` | se ejecutan al asignar y en `full_clean()` |
 | `choices=[(value, label), …]` | restringe a un conjunto fijo |
 | `editable=False` | oculto a forms / serializers |
 | `help_text="..."` | string de docs |
+
+### `default` vs `db_default`
+
+```python
+import dorm
+from dorm.expressions import RawSQL
+
+class Event(dorm.Model):
+    # Default Python: dispara cuando ``Event(...)`` se construye sin
+    # el kwarg. Dinámico — corre cada vez en la aplicación.
+    correlation_id = dorm.UUIDField(default=uuid.uuid4)
+
+    # Default servidor: aparece en DDL como ``DEFAULT now()``. INSERTs
+    # raw que omiten la columna (sistema externo escribiendo a la
+    # tabla directamente) siguen recibiendo un valor sano.
+    created_at = dorm.DateTimeField(db_default=RawSQL("now()"))
+
+    # Ambos a la vez: ``default`` cubre escrituras Python, ``db_default``
+    # cubre escrituras SQL raw. Atacan paths distintos, no conflictan.
+    revision = dorm.IntegerField(default=1, db_default=1)
+```
+
+`RawSQL` es la salida de emergencia para defaults específicos del
+vendor (`now()`, `gen_random_uuid()`, llamadas a secuencia). El
+string se inserta verbatim — usa uno que tu motor reconozca.
 
 ## Opciones Meta
 

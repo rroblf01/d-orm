@@ -808,6 +808,56 @@ class LastValue(WindowExpression):
     frame_required = True
 
 
+class NthValue(WindowExpression):
+    """``NTH_VALUE(expr, n) OVER (...)`` — value at the *n*-th row of
+    the window frame (1-indexed). The same frame caveat as
+    :class:`LastValue` applies — pass an explicit ``frame=`` when
+    ``n`` should reference the partition rather than the default
+    ``RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW``.
+    """
+
+    function = "NTH_VALUE"
+    frame_required = True
+
+    def __init__(self, expression: Any, n: int) -> None:
+        if not isinstance(n, int) or n <= 0:
+            raise ValueError("NthValue(n) requires a positive integer.")
+        # Inline the literal int rather than binding via ``Value(n)``:
+        # PostgreSQL types ``%s`` parameters as ``unknown`` and rejects
+        # ``nth_value(int, unknown)`` with "could not determine
+        # polymorphic type". The literal sidesteps the inference.
+        # ``n`` is validated above so splicing is safe.
+        self._inline_n = n
+        super().__init__(expression)
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        from .functions import _compile_expr
+
+        expr_sql, expr_params = _compile_expr(
+            self.expressions[0], table_alias
+        )
+        return f"NTH_VALUE({expr_sql}, {int(self._inline_n)})", expr_params
+
+
+class PercentRank(WindowExpression):
+    """``PERCENT_RANK() OVER (...)`` — relative rank in ``[0, 1]`` of
+    each row within its partition. ``(rank - 1) / (rows - 1)`` for
+    every row except the first, which is always ``0``."""
+
+    function = "PERCENT_RANK"
+    frame_required = True
+
+
+class CumeDist(WindowExpression):
+    """``CUME_DIST() OVER (...)`` — cumulative distribution in ``(0, 1]``:
+    the fraction of partition rows whose value is less than or equal
+    to the current row's. Useful for percentile bucketing.
+    """
+
+    function = "CUME_DIST"
+    frame_required = True
+
+
 class Window:
     """Wrap a :class:`WindowExpression` (or aggregate / scalar function)
     as a SQL window: ``<expr>() OVER (PARTITION BY ... ORDER BY ...)``.

@@ -246,6 +246,7 @@ class Field(Generic[_T]):
         null: bool = False,
         db_index: bool = False,
         default: Any = NOT_PROVIDED,
+        db_default: Any = NOT_PROVIDED,
         editable: bool = True,
         serialize: bool = True,
         choices: Any = None,
@@ -263,6 +264,15 @@ class Field(Generic[_T]):
         self.null = null
         self.db_index = db_index
         self.default: Any = default
+        # ``db_default`` lands on the column DDL as ``DEFAULT <literal>``,
+        # making the database itself produce the value when the column
+        # is omitted from an INSERT (think: server-side ``now()``,
+        # sequence-driven defaults, schema-level booleans). Distinct
+        # from ``default=`` which only fires when the Python ``Model``
+        # constructor doesn't see a value. Both can coexist —
+        # ``default`` wins on Python writes, ``db_default`` covers
+        # raw SQL inserts.
+        self.db_default: Any = db_default
         self.editable = editable
         self.serialize = serialize
         self.choices = choices

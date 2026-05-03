@@ -23,7 +23,6 @@ import pytest
 
 import dorm
 from dorm.exceptions import (
-    FieldDoesNotExist,
     IntegrityError,
     ValidationError,
 )
@@ -627,11 +626,11 @@ def test_unique_email_violation_raises_integrity_error():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_jsonfield_path_traversal_raises_field_does_not_exist():
-    """Regression: ``filter(jsonfield__sub_key=…)`` used to emit
-    ``WHERE "sub_key" = ?`` against a non-existent column, returning
-    0 rows on SQLite without erroring. Now raises ``FieldDoesNotExist``
-    so the unsupported-feature signal is loud."""
+def test_jsonfield_path_traversal_filter_returns_match():
+    """3.1 wires JSONField path traversal through the lookup
+    pipeline. ``filter(data__name="alice")`` emits the vendor's
+    JSON extract operator (``json_extract`` on SQLite, ``#>>`` on
+    PostgreSQL) and the comparison runs server-side."""
     from dorm.db.connection import get_connection
 
     class Doc(dorm.Model):
@@ -650,12 +649,17 @@ def test_jsonfield_path_traversal_raises_field_does_not_exist():
         if vendor == "sqlite"
         else '"id" BIGSERIAL PRIMARY KEY'
     )
+    json_type = "JSONB" if vendor == "postgresql" else "TEXT"
     conn.execute_script(
-        f'CREATE TABLE "smoke_jsondoc" ({pk_decl}, "data" TEXT NOT NULL)'
+        f'CREATE TABLE "smoke_jsondoc" ({pk_decl}, "data" {json_type} NOT NULL)'
     )
-    Doc.objects.create(data={"name": "alice"})
-    with pytest.raises(FieldDoesNotExist):
-        list(Doc.objects.filter(data__name="alice"))
+    Doc.objects.create(data={"name": "alice", "nested": {"deep": "x"}})
+    Doc.objects.create(data={"name": "bob"})
+    matches = list(Doc.objects.filter(data__name="alice"))
+    assert [m.data["name"] for m in matches] == ["alice"]
+    # Multi-level path.
+    deep = list(Doc.objects.filter(data__nested__deep="x"))
+    assert len(deep) == 1
 
 
 def test_jsonfield_value_roundtrip():

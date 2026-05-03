@@ -18,7 +18,6 @@ import pytest
 
 import dorm
 from dorm.exceptions import (
-    FieldDoesNotExist,
     IntegrityError,
 )
 
@@ -39,29 +38,15 @@ def test_reverse_fk_filter_resolves_join():
     Book.objects.create(title="alpha", author=a, pages=1)
     Book.objects.create(title="beta", author=b, pages=2)
 
-    # Known limitation: reverse-FK filter through ``<model_lower>_set``
-    # is not wired through the join machinery. Symptoms differ by
-    # backend — SQLite accepts the bogus column reference and returns
-    # the empty set; PostgreSQL raises ``column "book_set" does not
-    # exist``. Either path means "known gap".
-    from dorm.exceptions import OperationalError, ProgrammingError
-
-    try:
-        rows = list(Author.objects.filter(book_set__title="alpha"))
-    except (
-        FieldDoesNotExist,
-        NotImplementedError,
-        OperationalError,
-        ProgrammingError,
-    ):
-        pytest.skip("reverse-FK filter raises explicitly — known gap")
-        return
+    # 3.1 wires reverse-FK accessors (``<related_name>`` or default
+    # ``<model_lower>_set``) through the join machinery: the lookup
+    # emits ``LEFT OUTER JOIN books ON books.author_id = authors.id``
+    # and the WHERE picks up ``books.title = 'alpha'``. Reverse-FK
+    # was a known gap in 3.0; tightening the contract here so a
+    # regression flips the test.
+    rows = list(Author.objects.filter(book_set__title="alpha"))
     names = sorted(r.name for r in rows)
-    if names != ["RFA"]:
-        pytest.skip(
-            "reverse-FK filter not wired through join machinery — "
-            "known gap (see docs / issue tracker)"
-        )
+    assert names == ["RFA"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

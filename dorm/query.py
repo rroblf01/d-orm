@@ -19,6 +19,37 @@ def _validate_identifier(name: str, kind: str = "field") -> None:
         )
 
 
+def _json_extract_sql(
+    column_expr: str, path: list[str], vendor: str | None
+) -> str:
+    """Render a JSON path-extraction expression for the given vendor.
+
+    *column_expr* is the already-quoted column reference (``"t"."col"``).
+    *path* is a list of validated identifier segments; their order
+    is preserved.
+
+    PostgreSQL emits ``col #>> '{a,b,c}'`` (text result) — comparable
+    against string literals, which is the common case. Use the JSON
+    cast helpers in user code for typed comparisons. SQLite emits
+    ``json_extract(col, '$.a.b.c')``.
+
+    Both forms quote the path segments inside string literals; the
+    caller has already validated each segment as a SQL-safe
+    identifier so embedded ``"``/``'`` are impossible.
+    """
+    if not path:
+        return column_expr
+    if vendor == "postgresql":
+        # ``#>>`` returns text; nicer for equality comparisons. Use
+        # ``#>`` if a future caller needs the typed JSON path result.
+        components = ",".join(path)
+        return f"{column_expr} #>> '{{{components}}}'"
+    # Default: SQLite ``json_extract`` (also accepted by libsql and
+    # any other backend that ships a JSON1 module).
+    dotted = ".".join(path)
+    return f"json_extract({column_expr}, '$.{dotted}')"
+
+
 def _compile_expr(
     val, table_alias: str | None = None, model: Any = None
 ) -> tuple[str, list]:
@@ -318,7 +349,10 @@ class SQLQuery:
                 # idiom — PG's ``GREATEST`` vs SQLite's variadic ``MAX``,
                 # ``STRPOS`` vs ``INSTR``.
                 agg_sql, agg_p = agg.as_sql(
-                    alias, model=self.model, connection=connection
+                    alias,
+                    model=self.model,
+                    connection=connection,
+                    query=self,
                 )
                 if alias_name in self.alias_only_names:
                     # alias()-only: skip the SELECT projection. We still
@@ -445,12 +479,31 @@ class SQLQuery:
         if where_sql:
             select += f" WHERE {where_sql}"
 
-        # GROUP BY
+        # GROUP BY — explicit field list wins; otherwise auto-emit
+        # the outer model's columns when an annotation aggregate
+        # forced a JOIN. PG rejects mixed aggregate + scalar SELECT
+        # without GROUP BY ("column X must appear in the GROUP BY
+        # clause or be used in an aggregate function"); SQLite is
+        # lenient but emits implementation-defined values for the
+        # bare scalar columns. The explicit GROUP BY makes the
+        # ``Author.objects.annotate(n=Count("book_set"))`` shape
+        # work uniformly across backends.
         if self.group_by_fields:
             for f in self.group_by_fields:
                 _validate_identifier(f)
             gb = ", ".join(f'"{f}"' for f in self.group_by_fields)
             select += f" GROUP BY {gb}"
+        elif self.annotations and self.joins and self._annotations_have_aggregate():
+            # Group by every selected outer column so the join
+            # multiplication collapses to one row per outer entity.
+            outer_table = self.model._meta.db_table
+            cols = [
+                f'"{outer_table}"."{f.column}"'
+                for f in self.model._meta.fields
+                if f.column and not getattr(f, "many_to_many", False)
+            ]
+            if cols:
+                select += " GROUP BY " + ", ".join(cols)
 
         # HAVING
         if self.having_nodes:
@@ -771,7 +824,7 @@ class SQLQuery:
         return joined, params
 
     def _compile_leaf(self, field_parts: list[str], lookup: str, value, connection) -> tuple[str, list]:
-        col = self._resolve_column(field_parts)
+        col = self._resolve_column(field_parts, connection)
 
         # QuerySet as value → compile as an IN subquery
         if lookup == "in" and hasattr(value, "_query") and hasattr(value, "model"):
@@ -1098,7 +1151,16 @@ class SQLQuery:
         except FieldDoesNotExist:
             return None
 
-    def _resolve_column(self, field_parts: list[str]) -> str:
+    def _annotations_have_aggregate(self) -> bool:
+        """``True`` when any annotation is an aggregate (Count / Sum /
+        Avg / Max / Min / StringAgg / ArrayAgg) — used to decide
+        whether to auto-emit ``GROUP BY`` on a query that joined for
+        the aggregate's expression."""
+        from .aggregates import Aggregate
+
+        return any(isinstance(a, Aggregate) for a in self.annotations.values())
+
+    def _resolve_column(self, field_parts: list[str], connection: Any = None) -> str:
         from .exceptions import FieldDoesNotExist
 
         model = self.model
@@ -1120,12 +1182,13 @@ class SQLQuery:
             # silently getting a stale column reference.
             try:
                 field = model._meta.get_field(fname)
+                is_forward_relation = hasattr(field, "remote_field_to")
             except FieldDoesNotExist:
-                # Stash for the post-loop diagnostic — `parts` already
-                # popped *fname*, so reinsert for the error message.
-                parts.insert(0, fname)
-                break
-            if hasattr(field, "remote_field_to"):
+                field = None
+                is_forward_relation = False
+
+            if is_forward_relation:
+                assert field is not None
                 rel_model = field._resolve_related_model()
                 table = rel_model._meta.db_table
                 join_alias = f"{current_alias}_{fname}"
@@ -1153,30 +1216,154 @@ class SQLQuery:
                     self.joins[idx] = (join_type, table, join_alias, on_cond)
                 model = rel_model
                 current_alias = join_alias
-            else:
-                # Trying to traverse INTO a scalar field (e.g.
-                # ``filter(jsonfield__sub_key="x")``). dorm doesn't
-                # implement JSON-path traversal yet — silently
-                # falling through used to emit
-                # ``WHERE "sub_key" = ?`` referencing a non-existent
-                # column; on SQLite that produced 0 rows with no
-                # error, masking the typo / unsupported feature.
-                # Raise instead so users get a clear signal.
-                raise FieldDoesNotExist(
-                    f"Cannot resolve lookup path "
-                    f"{'__'.join(field_parts)!r} on model "
-                    f"{model.__name__!r}: field {fname!r} is not a "
-                    f"relation, and traversal into scalar / JSON "
-                    f"fields is not supported. Remove the "
-                    f"sub-lookup, or use a built-in lookup suffix "
-                    f"(``__exact``, ``__icontains``, ...)."
+                continue
+
+            # Reverse-FK / reverse-O2O traversal: the descriptor lives
+            # on the model class (installed by ``ForeignKey.contribute_to_class``
+            # under ``related_name`` or ``<lower>_set``). Look it up
+            # by attribute name and emit the equivalent JOIN from the
+            # outer table's PK to the source's FK column.
+            descriptor = getattr(model, fname, None)
+            from .related_managers import (
+                ManyToManyDescriptor,
+                ReverseFKDescriptor,
+                ReverseOneToOneDescriptor,
+            )
+
+            if isinstance(descriptor, (ReverseFKDescriptor, ReverseOneToOneDescriptor)):
+                source_model = descriptor.source_model
+                fk_field = descriptor.fk_field
+                table = source_model._meta.db_table
+                join_alias = f"{current_alias}_{fname}"
+                on_cond = (
+                    f'"{join_alias}"."{fk_field.column}" = '
+                    f'"{current_alias}"."{model._meta.pk.column}"'
                 )
+                # Reverse relations are always LEFT OUTER — a parent
+                # row that has zero children must still appear in
+                # the result (filtered out later by the WHERE if it
+                # mentioned the reverse alias) without dropping
+                # legitimate parent-only rows from outer queries.
+                existing = next(
+                    (j for j in self.joins if j[2] == join_alias), None
+                )
+                if existing is None:
+                    self.joins.append(("LEFT OUTER", table, join_alias, on_cond))
+                model = source_model
+                current_alias = join_alias
+                continue
+
+            if isinstance(descriptor, ManyToManyDescriptor):
+                m2m_field = descriptor.field
+                source = model
+                target = m2m_field._resolve_related_model()
+                junction = m2m_field._get_through_table()
+                src_col, tgt_col = m2m_field._get_through_columns()
+                # Two joins: outer → junction, junction → target.
+                j_alias = f"{current_alias}_{fname}_j"
+                t_alias = f"{current_alias}_{fname}"
+                self.joins.append((
+                    "LEFT OUTER", junction, j_alias,
+                    f'"{j_alias}"."{src_col}" = "{current_alias}"."{source._meta.pk.column}"',
+                ))
+                self.joins.append((
+                    "LEFT OUTER", target._meta.db_table, t_alias,
+                    f'"{t_alias}"."{target._meta.pk.column}" = "{j_alias}"."{tgt_col}"',
+                ))
+                model = target
+                current_alias = t_alias
+                continue
+
+            # JSON path traversal: ``filter(jsonfield__nested__key=…)``
+            # emits the vendor's JSON extract operator. Path keys are
+            # validated as identifiers — splice into SQL is safe
+            # (raw user input never touches the literal).
+            from .fields import JSONField
+
+            if field is not None and isinstance(field, JSONField):
+                json_path = list(parts)  # remaining keys after fname
+                for key in json_path:
+                    _validate_identifier(
+                        key, kind=f"JSON path component on {fname!r}"
+                    )
+                # Returns the extract expression directly — caller
+                # bypasses the trailing column-resolve below.
+                vendor = getattr(connection, "vendor", None) or getattr(
+                    getattr(self, "_connection", None), "vendor", None
+                )
+                col_qual = (
+                    f'"{current_alias}"."{field.column}"'
+                    if (self.joins or self.select_related_fields)
+                    else f'"{field.column}"'
+                )
+                return _json_extract_sql(col_qual, json_path, vendor)
+
+            # Stash for the post-loop diagnostic — ``parts`` already
+            # popped *fname*, so reinsert for the error message.
+            parts.insert(0, fname)
+            if field is None:
+                # Truly unknown identifier — keep traversal output for
+                # legacy "treat as raw column" fallback below.
+                break
+            # Trying to traverse INTO a scalar field that isn't JSON.
+            raise FieldDoesNotExist(
+                f"Cannot resolve lookup path "
+                f"{'__'.join(field_parts)!r} on model "
+                f"{model.__name__!r}: field {fname!r} is not a "
+                f"relation or a JSONField. Remove the sub-lookup, "
+                f"or use a built-in lookup suffix "
+                f"(``__exact``, ``__icontains``, ...)."
+            )
 
         fname = parts[0]
         try:
             field = model._meta.get_field(fname)
             col_name = field.column
         except FieldDoesNotExist:
+            # Single-part lookups for reverse-FK / reverse-O2O / M2M
+            # accessors — the descriptor lives on the model class.
+            # Resolve it as "join to the target and reference the
+            # target's pk" so callers like ``Count("book_set")`` see
+            # a real column.
+            from .related_managers import (
+                ManyToManyDescriptor,
+                ReverseFKDescriptor,
+                ReverseOneToOneDescriptor,
+            )
+
+            descriptor = getattr(model, fname, None)
+            if isinstance(descriptor, (ReverseFKDescriptor, ReverseOneToOneDescriptor)):
+                source_model = descriptor.source_model
+                fk_field = descriptor.fk_field
+                table = source_model._meta.db_table
+                join_alias = f"{current_alias}_{fname}"
+                on_cond = (
+                    f'"{join_alias}"."{fk_field.column}" = '
+                    f'"{current_alias}"."{model._meta.pk.column}"'
+                )
+                if not any(j[2] == join_alias for j in self.joins):
+                    self.joins.append(("LEFT OUTER", table, join_alias, on_cond))
+                return f'"{join_alias}"."{source_model._meta.pk.column}"'
+            if isinstance(descriptor, ManyToManyDescriptor):
+                m2m_field = descriptor.field
+                target = m2m_field._resolve_related_model()
+                junction = m2m_field._get_through_table()
+                src_col, tgt_col = m2m_field._get_through_columns()
+                j_alias = f"{current_alias}_{fname}_j"
+                t_alias = f"{current_alias}_{fname}"
+                if not any(j[2] == j_alias for j in self.joins):
+                    self.joins.append((
+                        "LEFT OUTER", junction, j_alias,
+                        f'"{j_alias}"."{src_col}" = '
+                        f'"{current_alias}"."{model._meta.pk.column}"',
+                    ))
+                if not any(j[2] == t_alias for j in self.joins):
+                    self.joins.append((
+                        "LEFT OUTER", target._meta.db_table, t_alias,
+                        f'"{t_alias}"."{target._meta.pk.column}" = '
+                        f'"{j_alias}"."{tgt_col}"',
+                    ))
+                return f'"{t_alias}"."{target._meta.pk.column}"'
             # Falling back to a literal column name — re-validate so a
             # user-supplied raw identifier can never reach the SQL.
             _validate_identifier(fname)

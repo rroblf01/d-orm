@@ -619,11 +619,38 @@ Every field accepts:
 | `unique=True` | adds `UNIQUE` constraint |
 | `db_index=True` | adds an index |
 | `db_column="x"` | override column name (default: field name) |
-| `default=value` or `default=callable` | row-level default |
+| `default=value` or `default=callable` | row-level default (Python-side, fires when constructor doesn't see a value) |
+| `db_default=value` or `db_default=RawSQL("now()")` | server-side default — lands in `CREATE TABLE` as `DEFAULT <literal>`; covers raw INSERTs that omit the column |
 | `validators=[fn, ...]` | run on assignment + `full_clean()` |
 | `choices=[(value, label), …]` | restrict to a fixed set |
 | `editable=False` | hidden from forms / serializers |
 | `help_text="..."` | docs string |
+
+### `default` vs `db_default`
+
+```python
+import dorm
+from dorm.expressions import RawSQL
+
+class Event(dorm.Model):
+    # Python default: fires when ``Event(...)`` is built without
+    # the kwarg. Dynamic — runs every time on the application.
+    correlation_id = dorm.UUIDField(default=uuid.uuid4)
+
+    # Server-side default: lands in DDL as ``DEFAULT now()``. Raw
+    # INSERTs that omit the column (think: a partner system writing
+    # to the table directly) still get a sane value.
+    created_at = dorm.DateTimeField(db_default=RawSQL("now()"))
+
+    # Both at once: ``default`` covers Python writes, ``db_default``
+    # covers raw SQL writes. They target different paths and don't
+    # conflict.
+    revision = dorm.IntegerField(default=1, db_default=1)
+```
+
+`RawSQL` is the escape hatch for vendor-specific server-side
+defaults (`now()`, `gen_random_uuid()`, sequence calls). The string
+is spliced verbatim — pick one your vendor recognises.
 
 ## Meta options
 

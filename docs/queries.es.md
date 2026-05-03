@@ -25,12 +25,48 @@ alice = Author.objects.get_or_none(email="missing@example.com")
 ### Lookups a través de relaciones
 
 ```python
-# Libros cuyo autor empieza por "Al":
+# FK forward: libros cuyo autor empieza por "Al".
 Book.objects.filter(author__name__startswith="Al")
 
-# Relación inversa vía related_name
+# Relación inversa vía accesor por defecto ``<model_lower>_set`` —
+# sin ``related_name`` declarado en la FK.
+Author.objects.filter(book_set__title="alpha").distinct()
+
+# Misma query vía ``related_name="books"`` custom.
 Author.objects.filter(books__published=True).distinct()
+
+# Agregación reverse-FK — ``Count`` recorre el accesor inverso y
+# auto-emite ``GROUP BY`` sobre las columnas externas. Autores con
+# cero libros aparecen con ``book_count = 0`` (LEFT OUTER JOIN).
+from dorm import Count
+
+Author.objects.annotate(book_count=Count("book_set")).order_by("-book_count")
+
+# Accesor reverse one-to-one y descriptor M2M funcionan igual.
+Profile.objects.filter(acct__email="ace@example.com")        # reverse OneToOne
+Article.objects.filter(tags__name="python").distinct()       # M2M
 ```
+
+### Lookups con path JSON
+
+```python
+# JSONField soporta traversal por clave anidada en lookups. El
+# compilador emite el operador JSON-path del vendor — ``#>>`` en
+# PostgreSQL, ``json_extract`` en SQLite.
+class Doc(dorm.Model):
+    data = dorm.JSONField()
+
+Doc.objects.filter(data__name="alice")
+# PG:    SELECT ... WHERE "data" #>> '{name}' = %s
+# SQLite: SELECT ... WHERE json_extract("data", '$.name') = %s
+
+Doc.objects.filter(data__address__city="Lisbon")
+# PG:    "data" #>> '{address,city}' = %s
+# SQLite: json_extract("data", '$.address.city') = %s
+```
+
+El operador PG ``#>>`` devuelve ``text``. Combina con ``Cast`` para
+comparaciones tipadas (``Cast(F("data__age"), "INTEGER")__gt=18``).
 
 ### Objetos Q — lógica booleana compleja
 
@@ -494,7 +530,8 @@ otra forma te obligaría a `RawQuerySet`:
   `annotate()`.
 - **`Window(expr, partition_by=, order_by=)`** más `RowNumber`,
   `Rank`, `DenseRank`, `NTile`, `Lag`, `Lead`, `FirstValue`,
-  `LastValue` — ranking, totales acumulados, deltas sin bajar a
+  `LastValue`, `NthValue`, `PercentRank`, `CumeDist` — ranking,
+  totales acumulados, deltas, bucketing percentil sin bajar a
   SQL crudo.
 - **`QuerySet.with_cte(name=qs)`** — CTEs no recursivos.
 - **Funciones escalares**: `Greatest`, `Least`, `Round`, `Trunc`,

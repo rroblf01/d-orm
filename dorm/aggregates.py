@@ -40,7 +40,40 @@ class Aggregate:
         expr = self.expression
         if expr == "pk" and model is not None and model._meta.pk:
             expr = model._meta.pk.column
-        if expr == "*":
+        # Allow the caller (the query compiler) to thread its own
+        # ``_resolve_column`` so reverse-FK / M2M descriptors and FK
+        # chains traverse the join machinery the same way ``filter``
+        # does. Without this, ``Count("book_set")`` would emit
+        # ``COUNT("authors"."book_set")`` against a non-existent
+        # column.
+        query = kwargs.get("query")
+        if (
+            query is not None
+            and isinstance(expr, str)
+            and expr not in ("*",)
+            and "." not in expr
+        ):
+            try:
+                col = query._resolve_column(expr.split("__"), connection)
+            except Exception:
+                # Fallback to the literal-column path; whatever
+                # ``_resolve_column`` raised will resurface in the
+                # outer compile if the column truly doesn't exist.
+                col = (
+                    f'"{table_alias}"."{expr}"'
+                    if table_alias
+                    else f'"{expr}"'
+                )
+            else:
+                # Qualify the bare column reference with the outer
+                # table alias when ``_resolve_column`` returned
+                # unqualified output (i.e. no joins were registered
+                # by this lookup). Pinned on purpose: existing tests
+                # — and the SQL planner on PG — read better with
+                # ``COUNT("authors"."id")`` than ``COUNT("id")``.
+                if "." not in col and table_alias:
+                    col = f'"{table_alias}".{col}'
+        elif expr == "*":
             col = "*"
         elif table_alias:
             col = f'"{table_alias}"."{expr}"'

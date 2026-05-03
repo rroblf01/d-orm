@@ -271,22 +271,26 @@ def test_generic_foreign_key_resolves_target():
 
 
 def test_manager_using_alias_default():
-    """``QuerySet.using('default')`` must route through the default
-    alias even with a single-DB project. Manager only exposes
-    ``get_queryset()``; ``using()`` lives on the queryset."""
+    """3.1 adds ``Manager.using(alias)`` as a one-call shortcut for
+    ``Manager.get_queryset().using(alias)``. Both forms must round-trip
+    cleanly against the default alias even with a single-DB project."""
     from tests.models import Author
 
     Author.objects.create(name="UA", age=10, email="ua@e.com")
-    rows = list(Author.objects.all().using("default").filter(email="ua@e.com"))
+    # Manager-level form (the new shortcut).
+    rows = list(Author.objects.using("default").filter(email="ua@e.com"))
     assert len(rows) == 1
+    # Queryset-level form (the long-standing path).
+    rows2 = list(Author.objects.all().using("default").filter(email="ua@e.com"))
+    assert len(rows2) == 1
 
 
-def test_queryset_using_unknown_alias_raises():
+def test_manager_using_unknown_alias_raises():
     from dorm.exceptions import ImproperlyConfigured
     from tests.models import Author
 
     with pytest.raises((ImproperlyConfigured, KeyError, AttributeError, Exception)):
-        list(Author.objects.all().using("nonexistent").all())
+        list(Author.objects.using("nonexistent").all())
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -928,8 +928,37 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
     if field.unique and not field.primary_key:
         parts.append("UNIQUE")
 
-    if field.has_default() and field.default is not None:
-        from ..fields import NOT_PROVIDED
+    # Emit DDL DEFAULT. Resolution: ``db_default`` (server-side, the
+    # only one that fires for raw INSERTs that omit the column) wins
+    # over ``default`` (Python-side fallback). Both can coexist —
+    # they target different write paths.
+    from ..fields import NOT_PROVIDED
+
+    db_default = getattr(field, "db_default", NOT_PROVIDED)
+    if db_default is not NOT_PROVIDED and db_default is not None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        # ``db_default`` accepts either a Python literal (rendered
+        # the same way ``default`` is) or a raw SQL string passed
+        # through :class:`dorm.expressions.RawSQL`. RawSQL is the
+        # escape hatch for vendor-specific server-side defaults
+        # (``now()``, ``gen_random_uuid()``, sequence calls).
+        from ..expressions import RawSQL
+
+        if isinstance(db_default, RawSQL):
+            parts.append(f"DEFAULT {db_default.sql}")
+        else:
+            literal = field.get_db_prep_value(db_default)
+            if isinstance(db_default, bool):
+                if vendor == "sqlite":
+                    parts.append(f"DEFAULT {int(db_default)}")
+                else:
+                    parts.append("DEFAULT TRUE" if db_default else "DEFAULT FALSE")
+            elif isinstance(literal, str):
+                escaped = literal.replace("'", "''")
+                parts.append(f"DEFAULT '{escaped}'")
+            elif literal is not None:
+                parts.append(f"DEFAULT {literal}")
+    elif field.has_default() and field.default is not None:
         if field.default is not NOT_PROVIDED and not callable(field.default):
             vendor = getattr(connection, "vendor", "sqlite")
             default_val = field.get_db_prep_value(field.default)

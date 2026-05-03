@@ -8,21 +8,207 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Roadmap (not yet shipped)
 
-- **MySQL / MariaDB backend full implementation** (slated v3.1).
-  Scaffold ships in 3.0 (recognises ``ENGINE = "mysql"`` so
-  configs parse) but the wire-up raises ``ImproperlyConfigured``
-  pointing at the v3.1 milestone.
-- **Per-tenant migration runner** (slated v3.1). The runtime
-  ``TenantContext`` ships in 3.0; the auto-CREATE-SCHEMA + per-
-  tenant migrate command lands with the second cut.
-- **History / audit trail** ``HistoricalModel`` mixin (slated v3.1).
-- **Connection-pool autoscaling** (slated v3.1). Risky — needs
-  careful rollout.
-- **`dorm migrate-from-django` converter** (slated v3.1). Parses
-  Django ``models.py``, emits dorm-shaped equivalents.
+- **MySQL / MariaDB backend full implementation** (deferred to v3.2).
+  Scaffold raised ``ImproperlyConfigured`` in 3.0; 3.1 leaves it
+  unchanged. PG + SQLite + libsql / Turso remain the supported
+  trio.
+- **Per-tenant migration runner** (deferred to v3.2).
+- **`dorm migrate-from-django` converter** (deferred to v3.2).
+  Parses Django ``models.py`` + ``migrations/`` and emits
+  dorm-shaped equivalents.
+- **History / audit trail** ``HistoricalModel`` mixin (deferred to v3.2).
+- **Connection-pool autoscaling** (deferred to v3.2).
 - **`FilteredRelation`** — JOIN with condition (slated v4.0).
   Significant queryset-compiler lift; defer until the compiler
   refactor lands.
+
+## [3.1.0] - 2026-05-04
+
+Minor release. Closes the Django-parity gaps that 3.0's smoke
+testing surfaced and adds runtime helpers we were missing. **No
+breaking changes vs 3.0**: every addition is opt-in or zero-cost
+when unused. Pool-teardown race fix (CI worker SIGSEGV under
+``pytest -n N`` on Python 3.14) lands here too — production users
+running long-lived async pools see the same ``force_close_sync``
+ordering improvement.
+
+### Added — reverse-FK / reverse-O2O / M2M traversal in lookups
+
+- ``Author.objects.filter(book_set__title="x")`` now emits a
+  ``LEFT OUTER JOIN books ON books.author_id = authors.id`` and
+  filters by ``books.title``. Same shape Django produces. Works
+  for the default ``<lower>_set`` accessor, custom ``related_name``,
+  reverse-O2O accessors, and M2M descriptors. Reverse-FK was a
+  known-broken gap in 3.0 (smoke marked it ``skip``); the lookup
+  resolver now walks the descriptor chain the same way forward
+  FK lookups already did.
+- ``Author.objects.annotate(book_count=Count("book_set"))`` works
+  end-to-end. The aggregate threads through the new
+  ``query=`` kwarg on :meth:`Aggregate.as_sql` so the column
+  resolves to the joined target's pk; the annotation pipeline
+  auto-emits ``GROUP BY <outer columns>`` when an aggregate
+  forced a JOIN, so PG no longer rejects the query with
+  "column X must appear in GROUP BY".
+- The same path handles M2M (``Article.objects.filter(tags__name="x")``)
+  end-to-end — two joins (outer → junction → target) emitted in
+  the right order, both ``LEFT OUTER`` so a parent without
+  children stays in the result set when the user explicitly
+  asks for it.
+
+### Added — JSON path traversal in lookups
+
+- ``filter(jsonfield__nested__key="x")`` now emits the vendor's
+  JSON-path operator instead of raising ``FieldDoesNotExist``:
+  PG uses ``col #>> '{nested,key}'`` (text result; pair with
+  ``Cast`` for typed comparisons), SQLite emits
+  ``json_extract(col, '$.nested.key')``. Multi-level paths work
+  on both backends; path components are validated as identifiers
+  before splicing so user input never reaches the literal.
+- 3.0 surfaced a ``FieldDoesNotExist`` for any sub-key traversal
+  on JSONField (better than 2.x's silent-empty-results bug, but
+  still a feature gap). 3.1 fills it in.
+
+### Added — ``Manager.using(alias)`` shortcut
+
+- ``Model.objects.using("replica")`` returns a queryset bound to
+  *alias* in one call — same shape Django exposes. Equivalent to
+  ``Model.objects.get_queryset().using(alias)`` / the existing
+  ``Manager.db_manager(alias).all()``. Smoke surfaced this gap
+  in 3.0.
+
+### Added — ``Field(db_default=…)``
+
+- New keyword argument on every Field. Lands in the column DDL
+  as ``DEFAULT <literal>``, distinct from ``default=`` (which
+  only fires when the Python ``Model`` constructor doesn't see
+  a value). Both can coexist — ``default`` wins on Python writes,
+  ``db_default`` covers raw SQL inserts and the
+  ``CREATE TABLE`` shape that downstream tools / DBAs read.
+- Accepts Python literals (rendered via the field's
+  ``get_db_prep_value``) or :class:`dorm.expressions.RawSQL` for
+  vendor-specific server-side defaults: ``RawSQL("now()")``,
+  ``RawSQL("gen_random_uuid()")``, sequence calls. The literal
+  is spliced verbatim, so the caller is responsible for the
+  vendor compatibility of the SQL fragment.
+
+### Added — extended window-function family
+
+- :class:`NthValue`: ``NTH_VALUE(expr, n) OVER (...)`` — value at
+  the *n*-th row of the window frame (1-indexed). The integer
+  ``n`` is rendered inline (not as a bound parameter) so PG's
+  type inference doesn't reject ``unknown`` types in
+  ``nth_value(int, $1)``.
+- :class:`PercentRank`: ``PERCENT_RANK() OVER (...)`` — relative
+  rank in ``[0, 1]`` of each row within its partition.
+- :class:`CumeDist`: ``CUME_DIST() OVER (...)`` — cumulative
+  distribution in ``(0, 1]``.
+- All three exported from :mod:`dorm` and :mod:`dorm.functions`.
+
+### Fixed — PG async pool teardown race (SIGSEGV under pytest -n N)
+
+- :meth:`PostgreSQLAsyncWrapper.force_close_sync` previously
+  scheduled ``pool.close()`` on the original loop **before**
+  draining the libpq sockets synchronously. Under ``pytest -n 2``
+  on Python 3.14 + FastAPI ``TestClient`` the two paths could
+  reach the same ``pgconn`` concurrently — the C-level
+  ``pgconn.finish()`` ran while the async ``pool.close()``
+  coroutine was still iterating, dereferencing freed memory and
+  taking the worker down with a SIGSEGV. Reorder: mark the pool
+  closed first, drain ``pgconn.finish()`` for every idle conn,
+  clear the deque, *then* schedule the async close (with a
+  ``fut.result(timeout=0.5)`` so the coroutine has a chance to
+  finish on the same loop iteration).
+
+### Fixed — ``Settings.__getattr__`` raises ``AttributeError`` for
+unknown-but-configured settings
+
+- ``getattr(settings, name, default)`` now returns *default* for
+  missing settings after :func:`dorm.configure` ran. Previously
+  ``__getattr__`` raised :class:`ImproperlyConfigured` regardless,
+  which only matches ``AttributeError`` for the default-fallback
+  shape that ``getattr`` looks for — so callers like
+  :mod:`dorm.contrib.encrypted._resolve_keys` (which probes both
+  ``FIELD_ENCRYPTION_KEY`` and ``FIELD_ENCRYPTION_KEYS`` via
+  ``getattr-with-default``) crashed when only one of the two
+  was set. The not-configured case still raises
+  ``ImproperlyConfigured`` so missing-bootstrap errors are loud.
+
+### Fixed — `EncryptedFieldMixin` was a no-op (security regression)
+
+- The mixin overrode ``get_prep_value`` (Django convention) but
+  dorm's INSERT / UPDATE pipeline calls
+  ``get_db_prep_value``. The encryption hook was silently
+  bypassed and plaintext landed on disk. Fixed by adding the
+  matching ``get_db_prep_value`` override that routes through
+  ``_encrypt`` before the bound parameter reaches the cursor.
+  Audit any fields you defined using ``EncryptedCharField`` /
+  ``EncryptedTextField`` against rows written under 3.0 — they
+  may need re-encryption. The fix landed mid-3.0 patch line but
+  is documented here for visibility.
+
+### Fixed — registry alias for ``Meta.app_label`` override
+
+- ``_model_registry`` now stores under both the module-derived
+  app label and the ``Meta.app_label`` override (when they
+  differ — e.g. ``dorm.contrib.auth.User`` *and* ``auth.User``).
+  Smoke surfaced this when ``dorm makemigrations`` couldn't find
+  contrib-app models. The CLI also gained a
+  ``_resolve_app_module`` reverse-lookup so ``dorm migrate auth``
+  and ``dorm migrate dorm.contrib.auth`` both work.
+
+### Fixed — ``CombinedExpression.as_sql`` signature mismatch
+
+- ``F("x") + 1`` in ``annotate(...)`` used to crash with
+  ``TypeError: unexpected keyword argument 'model'`` — the
+  annotation pipeline calls every node with
+  ``(table_alias, model=…, connection=…)``, but
+  ``CombinedExpression.as_sql`` was still on the older
+  ``(compiler, connection)`` form. Both signatures now share
+  the F-style shape via a ``_compile_operand`` helper.
+
+### Fixed — ``CreateModel`` auto-emits M2M junction tables
+
+- 3.0 ``CreateModel.database_forwards`` skipped M2M fields
+  entirely (a long-standing bug masked by the test suite that
+  built junctions by hand in conftest). 3.1 emits the implicit
+  junction (``<table>_<fname>``) with FKs to the source + target
+  pks plus a ``UNIQUE (src_id, tgt_id)`` so duplicate
+  associations error at the DB. Reverse drop in
+  ``database_backwards`` removes the junction before the parent
+  table.
+
+### Fixed — CLI threads ``Meta.app_label`` through every subcommand
+
+- Resolver helper :func:`_resolve_app_label` maps an INSTALLED_APPS
+  entry to the actual ``Meta.app_label`` declared by its models.
+  Threaded through ``makemigrations``, ``migrate``,
+  ``squashmigrations``, ``showmigrations`` and ``dbcheck`` so
+  contrib-app migrations land in the recorder under the right
+  label. Reverse helper :func:`_resolve_app_module` maps the
+  short label back to the package path so
+  ``dorm migrate auth`` resolves to
+  ``dorm/contrib/auth/migrations/`` for the file lookup.
+
+### Fixed — CLI forwards every uppercase setting
+
+- ``_load_settings`` previously only forwarded ``DATABASES`` and
+  ``INSTALLED_APPS``; everything else (``SECRET_KEY``,
+  ``USE_TZ``, ``CACHES``, every memoised knob) silently never
+  reached :data:`dorm.conf.settings`. Now every uppercase
+  top-level attribute on the settings module is forwarded
+  through :func:`dorm.configure`.
+
+### Tests
+
+- ``tests/test_v3_1_release.py`` — reverse-FK filter / Count
+  aggregate, distinct dedup, JSON path traversal, manager-level
+  using(), db_default DDL emission (literal + RawSQL forms),
+  window function extras (NthValue / PercentRank / CumeDist),
+  reverse-O2O filter.
+- ``tests/test_smoke_coverage.py``, ``tests/test_smoke_extended.py``,
+  ``tests/test_smoke_remaining.py`` — 184 end-to-end smoke
+  cases promoted from ``example/smoke.py`` covering every
+  public-API contract that lacked runtime tests in 3.0.
 
 ## [3.0.0] - 2026-05-02
 
