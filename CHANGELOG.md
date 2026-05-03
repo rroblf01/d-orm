@@ -8,19 +8,222 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Roadmap (not yet shipped)
 
-- **MySQL / MariaDB backend full implementation** (deferred to v3.2).
-  Scaffold raised ``ImproperlyConfigured`` in 3.0; 3.1 leaves it
-  unchanged. PG + SQLite + libsql / Turso remain the supported
-  trio.
-- **Per-tenant migration runner** (deferred to v3.2).
-- **`dorm migrate-from-django` converter** (deferred to v3.2).
-  Parses Django ``models.py`` + ``migrations/`` and emits
-  dorm-shaped equivalents.
-- **History / audit trail** ``HistoricalModel`` mixin (deferred to v3.2).
-- **Connection-pool autoscaling** (deferred to v3.2).
+- **Per-tenant migration runner** (slated v3.2).
+- **`dorm migrate-from-django` converter** (slated v3.2). Parses
+  Django ``models.py`` + ``migrations/`` and emits dorm-shaped
+  equivalents.
+- **History / audit trail** ``HistoricalModel`` mixin (slated v3.2).
+- **Connection-pool autoscaling** (slated v3.2).
+- **Async migration executor** ``await executor.amigrate(...)`` for
+  100% async stacks (Lambda, edge runtime) (slated v3.2).
+- **OpenTelemetry per-query traces** (slated v3.2). Metrics
+  exporter ships in 3.0; trace spans land later.
 - **`FilteredRelation`** — JOIN with condition (slated v4.0).
   Significant queryset-compiler lift; defer until the compiler
   refactor lands.
+
+### Added — MySQL / MariaDB backend (real)
+
+- 3.1 ships a working MySQL / MariaDB backend backed by
+  ``pymysql`` (sync) and ``aiomysql`` (async) — both pure-Python
+  drivers, no C toolchain. Forces ``ANSI_QUOTES`` mode on every
+  connection so dorm's double-quoted identifiers parse the same
+  as PostgreSQL / SQLite. Supports CRUD, DDL via the migration
+  executor, ``AUTO_INCREMENT`` PKs, transactions, and the
+  vendor-specific upsert syntax (``INSERT ... ON DUPLICATE KEY
+  UPDATE``).
+- New ``[mysql]`` extra installs the drivers:
+  ``pip install 'djanorm[mysql]'``.
+- GitHub Actions matrix now spins up a MySQL 8 service container
+  alongside the Postgres one and runs the full suite against
+  every supported Python.
+- Caveats: DDL is not transactional on MySQL — wrapping
+  ``ALTER TABLE`` in :func:`atomic` won't roll it back. ``RETURNING``
+  is supported on MariaDB 10.5+ but not on MySQL; the insert
+  path uses ``cursor.lastrowid`` for autoincrement PKs.
+
+### Added — RelatedManager API parity with Django
+
+- Reverse-FK manager grew ``add(*objs, bulk=)``, ``remove(*objs)``,
+  ``clear()``, ``set([objs], clear=)``, ``get_or_create()`` and
+  ``update_or_create()``. The FK back to the parent is auto-
+  injected on every form so ``author.book_set.create(title="X")``
+  always points at the right author. ``remove`` / ``clear`` /
+  diff-mode ``set`` raise ``ValueError`` when the FK is NOT NULL,
+  pointing at ``.delete()`` instead.
+- Same shape was already shipped for ``ManyRelatedManager`` (M2M);
+  3.1 brings reverse-FK to parity.
+
+### Added — `transaction.atomic(durable=True)`
+
+- New keyword on :func:`atomic` and :func:`aatomic`. When set,
+  the block raises :class:`RuntimeError` immediately if it would
+  silently degrade to a savepoint instead of a top-level
+  transaction. Use this on work that MUST land in its own
+  COMMIT (write-then-publish patterns where the publish step
+  waits on a real fsync). Mirrors Django's
+  ``transaction.atomic(durable=True)`` flag added in Django 3.2.
+
+### Added — `Field.register_lookup` extension hook
+
+- :func:`dorm.lookups.register_lookup` lets users plug in custom
+  lookup names process-wide. Names collide-check against the
+  built-in vocabulary; ``unregister_lookup`` reverses for tests
+  and refuses to drop built-ins.
+
+### Added — Argon2 password hasher
+
+- :func:`dorm.contrib.auth.password.make_password_argon2` produces
+  ``argon2$<full-argon2-hash>`` strings; :func:`check_password`
+  dispatches by the leading algorithm tag (matches the format
+  Django emits). PBKDF2 stays the default (stdlib only); Argon2
+  is opt-in via ``pip install 'djanorm[auth-argon2]'``.
+
+### Added — `dorm.test.override_settings` + `setUpTestData`
+
+- :class:`override_settings` is a context manager AND decorator
+  (sync + async function aware) that temporarily mutates
+  :data:`dorm.conf.settings` for the wrapped block. Reverts every
+  mutated key on exit, including deletion of keys that didn't
+  exist before.
+- :func:`setUpTestData` is a class decorator factory: pass a
+  ``cls -> dict`` callable, the dict's items become class
+  attributes. Useful for pytest-style classes that want
+  Django-style "create rows once, reuse across methods"
+  fixtures without inheriting from ``unittest.TestCase``.
+
+### Added — CLI: `migrate --run-syncdb` / `--prune`
+
+- ``--run-syncdb`` creates tables for every model whose
+  INSTALLED_APPS entry has NO migrations directory. Useful for
+  legacy / hand-managed apps that haven't been onboarded to the
+  migration graph yet, mirroring Django's flag.
+- ``--prune`` walks the recorder and drops rows for migrations
+  whose source files no longer exist on disk (e.g. after
+  ``squashmigrations``). No DDL — only the bookkeeping table
+  is touched.
+
+### Added — CLI: `dorm shell_plus` + `dorm runscript`
+
+- ``dorm shell_plus`` is a Django-extensions parity alias for
+  ``dorm shell`` (which already auto-imports every model into
+  the namespace). Muscle-memory friendly.
+- ``dorm runscript path/to/ops.py [--settings X] [args ...]``
+  configures dorm and runs the file with ``runpy.run_path``.
+  Forwards extra positional args as ``sys.argv[1:]`` so scripts
+  read CLI args the way they would under a normal interpreter.
+
+### Added — `Field(db_comment=…)`
+
+- New keyword on every Field for column-level documentation.
+  Reachable via ``field.db_comment`` for tooling and DDL
+  emission (PostgreSQL ``COMMENT ON COLUMN`` / MySQL
+  ``COMMENT '...'`` lands in v3.2's introspection pass).
+
+### Added — CLI: `createsuperuser` / `changepassword` / `flush` / `sqlmigrate`
+
+- ``dorm createsuperuser --email X --password Y --username Z``
+  mints a contrib.auth ``User`` with ``is_superuser=True``.
+  Prompts interactively when ``--password`` is omitted.
+- ``dorm changepassword <email>`` updates an existing user's
+  password (constant-time hash comparison via
+  :func:`hmac.compare_digest`).
+- ``dorm flush [--noinput]`` drops every row from every
+  managed table (schema stays); ``TRUNCATE … RESTART IDENTITY
+  CASCADE`` on PG, ``DELETE FROM`` elsewhere.
+- ``dorm sqlmigrate <app> <name> [--backwards]`` prints the SQL
+  a migration would run without applying it.
+
+### Added — extended PG aggregates
+
+- :class:`BoolOr`, :class:`BoolAnd`: ``BOOL_OR`` / ``BOOL_AND``
+  aggregates over boolean columns.
+- :class:`BitOr`, :class:`BitAnd`: bitwise OR / AND across the
+  group.
+- :class:`JSONBAgg`: ``JSONB_AGG`` for typed-JSON aggregation.
+
+### Added — pg_trgm + unaccent lookups
+
+- New string lookup names that map to PostgreSQL extensions:
+  ``__trigram_similar`` (``%`` operator), ``__trigram_word_similar``
+  (``<%``), ``__trigram_strict_word_similar`` (``<<%``),
+  ``__unaccent`` (``unaccent(col) = unaccent(%s)``). Require the
+  ``pg_trgm`` / ``unaccent`` extensions enabled at the database
+  level — dorm doesn't auto-CREATE them.
+
+### Added — `dorm.search.SearchHeadline`
+
+- ``ts_headline(<config>, document, query, options)`` wrapper for
+  search-result snippet rendering. Options dict is inlined as
+  the standard ``key=value, ...`` literal that PG expects;
+  identifier-shape validated to keep user input out of the SQL.
+
+### Added — Window function family extended (recap from 3.1.0 first cut)
+
+- :class:`NthValue`, :class:`PercentRank`, :class:`CumeDist`.
+
+### Added — `Index(include=[...])` + `UniqueConstraint(deferrable=, include=)`
+
+- PostgreSQL covering indexes via ``INCLUDE (col1, col2)``. The
+  index returns the included columns alongside the key so the
+  planner can satisfy index-only scans without a heap fetch.
+  SQLite + MySQL silently ignore the clause.
+- :class:`UniqueConstraint(deferrable="deferred"|"immediate")`
+  emits ``DEFERRABLE INITIALLY DEFERRED`` (PG only) so
+  row-swaps inside a transaction don't trip the unique check
+  at statement-end.
+
+### Added — `ExclusionConstraint`
+
+- New :class:`dorm.ExclusionConstraint` mirrors Django's
+  ``ExclusionConstraint``. Maps to PG's
+  ``ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING <method>
+  (col WITH op, ...)`` form. Useful for "no two reservations
+  for the same room can overlap" range-overlap exclusions.
+  ``index_type`` accepts ``gist`` / ``spgist`` / ``btree``;
+  operator strings are validated against a safe character class
+  (``<>=!&|@~?+*-/``) so user input can't splice arbitrary SQL.
+  PostgreSQL only — SQLite + MySQL emit the empty string and
+  the surrounding ``AddConstraint`` becomes a no-op.
+
+### Added — Migration ops
+
+- :class:`dorm.migrations.operations.SeparateDatabaseAndState` —
+  apply a parallel pair of ops (one updates state, the other
+  runs DDL) for cases where the autodetector's understanding
+  diverges from reality.
+- :class:`AlterModelOptions`, :class:`AlterModelTable`,
+  :class:`AlterModelManagers`. The first two land in 3.1's
+  ``makemigrations`` autodetector output for ``Meta.ordering``
+  / ``Meta.permissions`` / ``Meta.db_table`` changes; the third
+  is state-only (managers live in Python) and lets dorm read
+  Django-shaped migration files without a custom shim.
+
+### Added — `Field.db_default`
+
+- New keyword on every Field that lands in the column DDL as
+  ``DEFAULT <literal>``. Distinct from ``default=`` (Python-side,
+  fires when constructor doesn't see a value). Both can coexist
+  — ``default`` covers Python writes, ``db_default`` covers raw
+  INSERT statements that omit the column. Accepts Python
+  literals or :class:`dorm.expressions.RawSQL` for vendor-
+  specific server-side defaults (``RawSQL("now()")``,
+  ``RawSQL("gen_random_uuid()")``).
+
+### Added — `PositiveBigIntegerField` + `FilePathField`
+
+- :class:`PositiveBigIntegerField`: 64-bit unsigned counterpart
+  of :class:`PositiveIntegerField`. Useful for IDs from upstream
+  services that exceed ``2**31`` (Twitter snowflakes, KSUID-
+  derived ints).
+- :class:`FilePathField`: ``CharField`` whose value is a file
+  path under *path*. Validates ``match`` (regex) at assignment.
+
+### Fixed — registry + CLI MySQL routing message
+
+- ``dorm.db.connection`` error message for unsupported engines
+  now correctly lists ``mysql`` and ``mariadb`` alongside the
+  legacy supported set.
 
 ## [3.1.0] - 2026-05-04
 

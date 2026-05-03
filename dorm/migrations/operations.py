@@ -887,6 +887,164 @@ class RunPython(Operation):
         return f"RunPython(code={self.code!r})"
 
 
+class SeparateDatabaseAndState(Operation):
+    """Apply a parallel pair of operations: one updates the
+    :class:`ProjectState` (the migration graph's idea of the
+    schema), the other runs the actual DDL. Useful when the
+    autodetector's understanding of the schema diverges from the
+    real database (post-manual edit, post-vendor-specific
+    optimisation, post-data-migration that touched DDL outside
+    the migration graph).
+
+    Mirrors Django's ``django.db.migrations.operations.SeparateDatabaseAndState``.
+
+    Example::
+
+        SeparateDatabaseAndState(
+            database_operations=[],  # already in DB; no DDL to run
+            state_operations=[AddField(...)],  # but the graph needs updating
+        )
+    """
+
+    def __init__(
+        self,
+        database_operations: list | None = None,
+        state_operations: list | None = None,
+    ) -> None:
+        self.database_operations = list(database_operations or [])
+        self.state_operations = list(state_operations or [])
+
+    def state_forwards(self, app_label: str, state):
+        for op in self.state_operations:
+            op.state_forwards(app_label, state)
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        for op in self.database_operations:
+            op.database_forwards(app_label, connection, from_state, to_state)
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        for op in self.database_operations:
+            if hasattr(op, "database_backwards"):
+                op.database_backwards(app_label, connection, from_state, to_state)
+
+    def describe(self) -> str:
+        n_db = len(self.database_operations)
+        n_state = len(self.state_operations)
+        return f"Custom state/database split ({n_db} DB, {n_state} state)"
+
+    def __repr__(self):
+        return (
+            f"SeparateDatabaseAndState("
+            f"database_operations={self.database_operations!r}, "
+            f"state_operations={self.state_operations!r})"
+        )
+
+
+class AlterModelOptions(Operation):
+    """Update :class:`Meta` options that don't require DDL —
+    ``ordering``, ``verbose_name``, ``permissions``,
+    ``default_manager_name``, ``base_manager_name``. The
+    autodetector emits this when only the ``options`` dict
+    differs between two states.
+
+    No-op at the database level — only the in-memory project state
+    moves.
+    """
+
+    def __init__(self, name: str, options: dict | None = None) -> None:
+        self.name = name
+        self.options = options or {}
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.name.lower()}"
+        model = state.models.get(key)
+        if model is not None:
+            opts = dict(model.get("options") or {})
+            opts.update(self.options)
+            model["options"] = opts
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        # No DDL — Meta options live in Python only.
+        pass
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        pass
+
+    def describe(self) -> str:
+        return f"Alter {self.name} options"
+
+
+class AlterModelTable(Operation):
+    """Rename the underlying ``db_table`` for a model. Maps to
+    ``ALTER TABLE old RENAME TO new`` on every supported backend.
+    """
+
+    def __init__(self, name: str, table: str) -> None:
+        self.name = name
+        self.table = table
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.name.lower()}"
+        model = state.models.get(key)
+        if model is not None:
+            opts = dict(model.get("options") or {})
+            opts["db_table"] = self.table
+            model["options"] = opts
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        from_model = from_state.models.get(f"{app_label}.{self.name.lower()}", {})
+        old_table = from_model.get("options", {}).get("db_table") or (
+            f"{app_label}_{self.name.lower()}"
+        )
+        if old_table == self.table:
+            return
+        connection.execute_script(
+            f'ALTER TABLE "{old_table}" RENAME TO "{self.table}"'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        # Reverse: rename back to the prior table.
+        from_model = from_state.models.get(f"{app_label}.{self.name.lower()}", {})
+        old_table = from_model.get("options", {}).get("db_table") or (
+            f"{app_label}_{self.name.lower()}"
+        )
+        if old_table == self.table:
+            return
+        connection.execute_script(
+            f'ALTER TABLE "{self.table}" RENAME TO "{old_table}"'
+        )
+
+    def describe(self) -> str:
+        return f"Rename table for {self.name} to {self.table}"
+
+
+class AlterModelManagers(Operation):
+    """Track ``Meta.managers`` changes. Manager objects exist only
+    in Python — no DDL — so this op is a state-only no-op that
+    the autodetector emits to keep the migration graph honest."""
+
+    def __init__(self, name: str, managers: list | None = None) -> None:
+        self.name = name
+        self.managers = list(managers or [])
+
+    def state_forwards(self, app_label: str, state):
+        key = f"{app_label}.{self.name.lower()}"
+        model = state.models.get(key)
+        if model is not None:
+            opts = dict(model.get("options") or {})
+            opts["managers"] = self.managers
+            model["options"] = opts
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        pass
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        pass
+
+    def describe(self) -> str:
+        return f"Alter {self.name} managers"
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -919,6 +1077,18 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
             vendor = getattr(connection, "vendor", "sqlite")
             if vendor == "sqlite":
                 parts = [f'"{col}" INTEGER PRIMARY KEY AUTOINCREMENT']
+                return parts[0]
+            if vendor == "mysql":
+                # MySQL / MariaDB use ``BIGINT AUTO_INCREMENT PRIMARY KEY``
+                # for auto-numbered surrogate keys. The ``db_type`` for
+                # ``AutoField`` / ``BigAutoField`` / ``SmallAutoField``
+                # already returns ``INTEGER``; switch the integer width
+                # here based on the field class so the column matches
+                # what dorm generates on the other vendors.
+                int_type = "BIGINT" if isinstance(field, BigAutoField) else (
+                    "SMALLINT" if isinstance(field, SmallAutoField) else "INT"
+                )
+                parts = [f'"{col}" {int_type} NOT NULL AUTO_INCREMENT PRIMARY KEY']
                 return parts[0]
         parts.append("PRIMARY KEY")
 

@@ -519,12 +519,14 @@ def test_savepoint_rejects_invalid_id():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_mysql_backend_scaffold_raises_clear_error():
+def test_mysql_backend_constructs_wrapper():
+    """3.1 ships a real MySQL backend (``pymysql`` + ``aiomysql``).
+    Wrapper construction stays lazy — no network — and the vendor
+    attribute identifies the engine for downstream branches."""
     from dorm.db.backends.mysql import MySQLDatabaseWrapper
-    from dorm.exceptions import ImproperlyConfigured
 
-    with pytest.raises(ImproperlyConfigured, match="not implemented yet"):
-        MySQLDatabaseWrapper({"ENGINE": "mysql", "NAME": "x"})
+    conn = MySQLDatabaseWrapper({"ENGINE": "mysql", "NAME": "x"})
+    assert conn.vendor == "mysql"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -335,6 +335,86 @@ def cmd_migrate(args):
     dry_run = getattr(args, "dry_run", False)
     fake = getattr(args, "fake", False)
     fake_initial = getattr(args, "fake_initial", False)
+    run_syncdb = getattr(args, "run_syncdb", False)
+    prune = getattr(args, "prune", False)
+
+    if prune:
+        # Walk the recorder, drop rows whose corresponding migration
+        # file no longer exists on disk. Skip if the recorder table
+        # itself isn't present (no migrations have ever run).
+        try:
+            rows = conn.execute(
+                'SELECT "app", "name" FROM "dorm_migrations"'
+            )
+        except Exception:
+            rows = []
+        for r in rows:
+            app = r["app"]
+            name = r["name"]
+            module_path = _resolve_app_module(app, installed_apps)
+            mig_path = _find_migrations_dir(module_path) / f"{name}.py"
+            if not mig_path.exists():
+                placeholder = "%s" if getattr(conn, "vendor", "") == "postgresql" else "?"
+                conn.execute_script(
+                    f'DELETE FROM "dorm_migrations" '
+                    f'WHERE "app" = {placeholder!s} AND "name" = {placeholder!s}'
+                    .replace("'?'", "?").replace("'%s'", "%s")
+                )
+                # The replace dance avoids the ``f`` interpolating the
+                # quote characters; keep the placeholder syntax raw.
+                # Issue the actual DELETE through a parameterised
+                # call instead of the script form.
+                conn.execute_write(
+                    f'DELETE FROM "dorm_migrations" '
+                    f'WHERE "app" = {placeholder} AND "name" = {placeholder}',
+                    [app, name],
+                )
+                print(f"  Pruned recorder row: {app}.{name}")
+        if not target and not app_label and not (fake or fake_initial or run_syncdb):
+            return
+
+    if run_syncdb:
+        # Create tables for every model whose app has NO migrations
+        # directory. The migration executor handles apps that DO ship
+        # migrations elsewhere in the loop.
+        from .migrations.operations import _field_to_column_sql
+        from .models import _model_registry
+
+        seen: set[int] = set()
+        for label, model in _model_registry.items():
+            if "." in label or id(model) in seen:
+                continue
+            seen.add(id(model))
+            if model._meta.abstract or model._meta.proxy:
+                continue
+            if not getattr(model._meta, "managed", True):
+                continue
+            module_path = (
+                model.__module__.removesuffix(".models")
+                if model.__module__.endswith(".models")
+                else model.__module__
+            )
+            try:
+                mig_dir = _find_migrations_dir(module_path)
+            except Exception:
+                mig_dir = None
+            if mig_dir is not None and mig_dir.exists():
+                continue  # skip — has migrations, executor handles it
+            table = model._meta.db_table
+            if conn.table_exists(table):
+                continue
+            cols = [
+                _field_to_column_sql(f.name, f, conn)
+                for f in model._meta.fields
+                if f.db_type(conn)
+            ]
+            conn.execute_script(
+                f'CREATE TABLE IF NOT EXISTS "{table}" (\n  '
+                + ",\n  ".join(filter(None, cols))
+                + "\n)"
+            )
+            print(f"  syncdb: created {table}")
+
     if app_label:
         # Accept both the dotted INSTALLED_APPS entry and the short
         # ``Meta.app_label`` form so ``dorm migrate auth`` works the
@@ -1317,6 +1397,183 @@ def cmd_loaddata(args):
     print(f"Total: {total} row(s) loaded.")
 
 
+def cmd_runscript(args):
+    """Execute a Python file under the project's settings, with
+    ``INSTALLED_APPS`` preloaded. Mirrors Django-extensions
+    ``runscript`` — a one-shot maintenance script runner.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+
+    _load_apps(settings.INSTALLED_APPS)
+
+    script_path = os.path.abspath(args.path)
+    if not os.path.isfile(script_path):
+        print(f"Error: script {args.path!r} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Forward extra positional args so the script can read ``sys.argv``
+    # the way it would under a normal interpreter invocation.
+    extra = list(getattr(args, "args", None) or [])
+    saved_argv = sys.argv
+    sys.argv = [args.path, *extra]
+    try:
+        import runpy
+
+        runpy.run_path(script_path, run_name="__main__")
+    finally:
+        sys.argv = saved_argv
+
+
+def cmd_createsuperuser(args):
+    """Mint a contrib.auth ``User`` with ``is_superuser=True``."""
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+
+    _load_apps(settings.INSTALLED_APPS)
+    from .contrib.auth.models import User
+
+    pw = args.password
+    if pw is None:
+        import getpass
+
+        pw = getpass.getpass("Password: ")
+        confirm = getpass.getpass("Password (again): ")
+        if pw != confirm:
+            print("Passwords do not match.", file=sys.stderr)
+            sys.exit(1)
+    if not pw:
+        print("Refusing to create a user with an empty password.", file=sys.stderr)
+        sys.exit(1)
+    User.objects.create_superuser(
+        email=args.email, password=pw, username=args.username
+    )
+    print(f"Superuser {args.email} created.")
+
+
+def cmd_changepassword(args):
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+
+    _load_apps(settings.INSTALLED_APPS)
+    from .contrib.auth.models import User
+
+    try:
+        user = User.objects.get(email=args.email)
+    except User.DoesNotExist:
+        print(f"User {args.email!r} not found.", file=sys.stderr)
+        sys.exit(1)
+    pw = args.password
+    if pw is None:
+        import getpass
+
+        pw = getpass.getpass(f"New password for {args.email}: ")
+        confirm = getpass.getpass("New password (again): ")
+        if pw != confirm:
+            print("Passwords do not match.", file=sys.stderr)
+            sys.exit(1)
+    if not pw:
+        print("Refusing to set an empty password.", file=sys.stderr)
+        sys.exit(1)
+    user.set_password(pw)
+    user.save(update_fields=["password"])
+    print(f"Password updated for {args.email}.")
+
+
+def cmd_flush(args):
+    """Drop every row from every table the project owns. The schema
+    stays in place; only the data is removed. Confirms unless
+    ``--noinput`` is passed."""
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings as _settings
+
+    _load_apps(_settings.INSTALLED_APPS)
+
+    if not args.noinput:
+        ack = input(
+            "This will delete EVERY ROW in every table managed by INSTALLED_APPS. "
+            "Type 'yes' to confirm: "
+        )
+        if ack.strip().lower() != "yes":
+            print("Aborted.")
+            return
+
+    from .db.connection import get_connection
+    from .models import _model_registry
+
+    conn = get_connection()
+    vendor = getattr(conn, "vendor", "sqlite")
+    seen: set[int] = set()
+    for label, model in _model_registry.items():
+        if "." in label:
+            continue
+        if id(model) in seen or model._meta.abstract or model._meta.proxy:
+            continue
+        seen.add(id(model))
+        if not getattr(model._meta, "managed", True):
+            continue
+        table = model._meta.db_table
+        if not conn.table_exists(table):
+            continue
+        if vendor == "postgresql":
+            conn.execute_script(
+                f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE'
+            )
+        elif vendor == "mysql":
+            conn.execute_script(f'DELETE FROM "{table}"')
+        else:
+            conn.execute_script(f'DELETE FROM "{table}"')
+    print("Flushed.")
+
+
+def cmd_sqlmigrate(args):
+    """Render the SQL a migration would run, without applying it."""
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+
+    installed = settings.INSTALLED_APPS
+    _load_apps(installed)
+
+    from .db.connection import get_connection
+    from .migrations.loader import MigrationLoader
+
+    conn = get_connection()
+    app_module = _resolve_app_module(args.app_label, installed)
+    app_label = _resolve_app_label(app_module)
+    mig_dir = _find_migrations_dir(app_module)
+    loader = MigrationLoader(conn)
+    loader.load(mig_dir, app_label)
+    matches = [
+        m for m in loader.migrations.get(app_label, []) if m[1] == args.name
+    ]
+    if not matches:
+        print(
+            f"Migration {args.name!r} not found for app {args.app_label!r}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    _, _, module = matches[0]
+    ops = list(getattr(module, "operations", []))
+    if args.backwards:
+        ops = list(reversed(ops))
+    print(f"-- {app_label}.{args.name} ({'backwards' if args.backwards else 'forwards'})")
+    for op in ops:
+        # Each op exposes ``describe()`` for human-readable text;
+        # the actual SQL emitter (``_run_capture``) is internal —
+        # show describe + class name for now.
+        print(f"-- {type(op).__name__}: {op.describe()}")
+
+
 def cmd_help(args):
     args.parser.print_help()
 
@@ -1408,6 +1665,25 @@ def main():
         "CreateModel target table already exists. Subsequent "
         "migrations run for real.",
     )
+    mg.add_argument(
+        "--run-syncdb",
+        action="store_true",
+        default=False,
+        help="Create tables for INSTALLED_APPS that ship NO migration "
+        "files (legacy / hand-managed apps). Mirrors Django's "
+        "``migrate --run-syncdb`` — useful when adopting dorm "
+        "incrementally against a multi-app project where a "
+        "subset has migrations and the rest doesn't yet.",
+    )
+    mg.add_argument(
+        "--prune",
+        action="store_true",
+        default=False,
+        help="Drop recorder rows for migrations whose source files "
+        "no longer exist on disk (e.g. after squashmigrations). "
+        "No DDL — only the ``dorm_migrations`` bookkeeping is "
+        "touched.",
+    )
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)
 
@@ -1443,10 +1719,39 @@ def main():
     # shell
     sh = sub.add_parser(
         "shell",
-        help="Start an interactive Python shell (uses IPython if installed, otherwise the standard Python REPL)",
+        help=(
+            "Start an interactive Python shell with every INSTALLED_APPS "
+            "model preloaded (uses IPython if installed, otherwise the "
+            "stdlib REPL)"
+        ),
     )
     sh.add_argument("--settings", default=None)
     sh.set_defaults(func=cmd_shell)
+
+    # shell_plus — Django-extensions parity alias. ``dorm shell``
+    # already auto-imports every model into the namespace, so the
+    # two commands are functionally identical; ``shell_plus`` is
+    # exposed because muscle memory from Django.
+    sh_plus = sub.add_parser(
+        "shell_plus",
+        help="Alias for ``dorm shell`` — Django-extensions parity",
+    )
+    sh_plus.add_argument("--settings", default=None)
+    sh_plus.set_defaults(func=cmd_shell)
+
+    # runscript — execute a Python file with dorm configured
+    rs = sub.add_parser(
+        "runscript",
+        help="Execute a Python file under the project's settings, with INSTALLED_APPS preloaded",
+    )
+    rs.add_argument("path", help="Path to the Python file to execute.")
+    rs.add_argument("--settings", default=None)
+    rs.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help="Extra positional args forwarded as ``sys.argv[1:]``.",
+    )
+    rs.set_defaults(func=cmd_runscript)
 
     # sql — dump CREATE TABLE for given models
     sq2 = sub.add_parser(
@@ -1635,6 +1940,59 @@ def main():
     )
     ld.add_argument("--settings", default=None)
     ld.set_defaults(func=cmd_loaddata)
+
+    # createsuperuser
+    csu = sub.add_parser(
+        "createsuperuser",
+        help="Create a superuser from the contrib.auth User model",
+    )
+    csu.add_argument("--email", required=True)
+    csu.add_argument(
+        "--password",
+        required=False,
+        help="Password (prompted interactively when omitted).",
+    )
+    csu.add_argument("--username", required=False)
+    csu.add_argument("--settings", required=False)
+    csu.set_defaults(func=cmd_createsuperuser)
+
+    # changepassword
+    cpw = sub.add_parser(
+        "changepassword",
+        help="Change a user's password (contrib.auth User by default)",
+    )
+    cpw.add_argument("email")
+    cpw.add_argument("--password", required=False)
+    cpw.add_argument("--settings", required=False)
+    cpw.set_defaults(func=cmd_changepassword)
+
+    # flush
+    flush = sub.add_parser(
+        "flush",
+        help="Truncate every table for the configured INSTALLED_APPS",
+    )
+    flush.add_argument(
+        "--noinput",
+        action="store_true",
+        help="Skip the confirmation prompt — automation-friendly.",
+    )
+    flush.add_argument("--settings", required=False)
+    flush.set_defaults(func=cmd_flush)
+
+    # sqlmigrate
+    sqm = sub.add_parser(
+        "sqlmigrate",
+        help="Print the SQL of a single migration without running it",
+    )
+    sqm.add_argument("app_label")
+    sqm.add_argument("name")
+    sqm.add_argument(
+        "--backwards",
+        action="store_true",
+        help="Render the reverse SQL (useful before unapplying).",
+    )
+    sqm.add_argument("--settings", required=False)
+    sqm.set_defaults(func=cmd_sqlmigrate)
 
     # help
     hp = sub.add_parser("help", help="Show this help message and exit")

@@ -78,6 +78,25 @@ def check_password(password: str, encoded: str) -> bool:
     if len(parts) != 4:
         return False
     algorithm, iterations_s, salt, expected = parts
+    if algorithm == "argon2":
+        # Argon2 hashes are produced by :func:`make_password_argon2`
+        # — see below. The encoded form is ``argon2$<full-argon2-hash>``
+        # where the argon2 portion already carries its own salt /
+        # parameters / digest. The optional ``argon2`` package is
+        # required to verify; if missing, treat as a failed check
+        # rather than crashing (a deployment that lost its argon2
+        # install at runtime shouldn't lock every existing user out
+        # of error).
+        try:
+            from argon2 import PasswordHasher
+            from argon2.exceptions import VerifyMismatchError, InvalidHashError
+        except ImportError:
+            return False
+        ph = PasswordHasher()
+        try:
+            return ph.verify(parts[1] + "$" + parts[2] + "$" + parts[3], password)
+        except (VerifyMismatchError, InvalidHashError, Exception):
+            return False
     if algorithm != "pbkdf2_sha256":
         # Future: dispatch table by algorithm name. For now we ship
         # only one algorithm; an unknown tag means the hash was
@@ -89,6 +108,28 @@ def check_password(password: str, encoded: str) -> bool:
         return False
     candidate = _pbkdf2(password, salt, iterations)
     return hmac.compare_digest(candidate, expected)
+
+
+def make_password_argon2(password: str) -> str:
+    """Hash *password* with Argon2id (state-of-the-art memory-hard).
+
+    Requires the optional ``argon2-cffi`` package
+    (``pip install 'djanorm[auth-argon2]'``). The output is prefixed
+    with ``argon2$`` so :func:`check_password` can dispatch — same
+    shape Django uses for its ``argon2`` hasher entries.
+    """
+    try:
+        from argon2 import PasswordHasher
+    except ImportError as exc:
+        from ...exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "make_password_argon2 requires the ``argon2-cffi`` package. "
+            "Install it via ``pip install 'djanorm[auth-argon2]'``."
+        ) from exc
+    if password is None:
+        return _UNUSABLE_PREFIX + secrets.token_urlsafe(16)
+    return "argon2$" + PasswordHasher().hash(password)
 
 
 def is_password_usable(encoded: str | None) -> bool:

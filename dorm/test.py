@@ -220,6 +220,136 @@ def assertMaxQueriesFactory(num: int):
     return _decorate(num, max_only=True)
 
 
+class override_settings:
+    """Context manager + decorator that temporarily mutates dorm
+    settings for the duration of the wrapped block / function.
+
+    Mirrors Django's ``django.test.utils.override_settings``::
+
+        with override_settings(SLOW_QUERY_MS=10):
+            run_some_queries()
+
+        @override_settings(USE_TZ=True, TIME_ZONE="Europe/Madrid")
+        def test_tz_aware(): ...
+
+    Reverts every mutated key on exit, including deletion of keys
+    that didn't exist before.
+    """
+
+    def __init__(self, **overrides: Any) -> None:
+        self.overrides = overrides
+        self._prev: dict[str, Any] = {}
+        self._absent: set[str] = set()
+
+    def _apply(self) -> None:
+        from .conf import settings
+
+        for k, v in self.overrides.items():
+            if k in settings._explicit_settings:
+                self._prev[k] = getattr(settings, k)
+            else:
+                self._absent.add(k)
+            setattr(settings, k, v)
+            settings._explicit_settings.add(k)
+
+    def _revert(self) -> None:
+        from .conf import settings
+
+        for k in self.overrides:
+            if k in self._prev:
+                setattr(settings, k, self._prev[k])
+            else:
+                if k in settings._explicit_settings:
+                    try:
+                        delattr(settings, k)
+                    except AttributeError:
+                        pass
+                    settings._explicit_settings.discard(k)
+        self._prev.clear()
+        self._absent.clear()
+
+    def __enter__(self):
+        self._apply()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._revert()
+
+    async def __aenter__(self):
+        self._apply()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._revert()
+
+    def __call__(self, fn):
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def awrapper(*a: Any, **kw: Any):
+                self._apply()
+                try:
+                    return await fn(*a, **kw)
+                finally:
+                    self._revert()
+
+            return awrapper
+
+        @functools.wraps(fn)
+        def wrapper(*a: Any, **kw: Any):
+            self._apply()
+            try:
+                return fn(*a, **kw)
+            finally:
+                self._revert()
+
+        return wrapper
+
+
+def setUpTestData(get_data: Callable[..., dict[str, Any]]):
+    """Class decorator factory that runs *get_data* once at class
+    construction and attaches every ``{attr: value}`` entry as a
+    class attribute.
+
+    Mirrors Django's :meth:`TestCase.setUpTestData` semantics —
+    rows created once and reused across test methods — without the
+    Django metaclass machinery (pytest test classes don't inherit
+    from ``unittest.TestCase`` by default).
+
+    Usage::
+
+        def _data(cls):
+            return {
+                "alice": Author.objects.create(name="Alice", age=30),
+                "bob":   Author.objects.create(name="Bob",   age=40),
+            }
+
+        @setUpTestData(_data)
+        class TestAuthor:
+            def test_alice_age(self):
+                assert self.alice.age == 30  # type: ignore[attr-defined]
+
+    Tests must roll back any mutation they make to the shared rows
+    (or rebuild via a fixture) — same contract Django enforces.
+    """
+    if not callable(get_data):
+        raise TypeError(
+            "setUpTestData expects a callable ``cls -> dict``."
+        )
+
+    def decorate(target_cls):
+        data = get_data(target_cls)
+        if not isinstance(data, dict):
+            raise TypeError(
+                "setUpTestData callable must return a dict."
+            )
+        for k, v in data.items():
+            setattr(target_cls, k, v)
+        return target_cls
+
+    return decorate
+
+
 __all__ = [
     "transactional_db",
     "atransactional_db",
@@ -228,4 +358,6 @@ __all__ = [
     "assertNumQueriesFactory",
     "assertMaxQueries",
     "assertMaxQueriesFactory",
+    "override_settings",
+    "setUpTestData",
 ]

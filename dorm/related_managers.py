@@ -447,6 +447,92 @@ class ReverseFKManager:
         kwargs[self.fk_field.name] = self.instance
         return self.source_model.objects.create(**kwargs)
 
+    def get_or_create(
+        self, defaults: dict | None = None, **kwargs: Any
+    ) -> tuple[Any, bool]:
+        """``Author.book_set.get_or_create(title="X", defaults={...})`` —
+        the FK back to the parent is auto-injected so the new row
+        always points at ``self.instance``."""
+        kwargs[self.fk_field.name] = self.instance
+        return self.source_model.objects.get_or_create(
+            defaults=defaults, **kwargs
+        )
+
+    def update_or_create(
+        self, defaults: dict | None = None, **kwargs: Any
+    ) -> tuple[Any, bool]:
+        kwargs[self.fk_field.name] = self.instance
+        return self.source_model.objects.update_or_create(
+            defaults=defaults, **kwargs
+        )
+
+    def add(self, *objs: Any, bulk: bool = True) -> None:
+        """Re-parent each *obj* under the current instance. With
+        ``bulk=False`` each object is saved individually (signals
+        fire); the default ``bulk=True`` issues a single UPDATE
+        for all rows."""
+        if not objs:
+            return
+        ids = [o.pk for o in objs]
+        if bulk:
+            self.source_model.objects.filter(pk__in=ids).update(
+                **{self.fk_field.name: self.instance}
+            )
+            for o in objs:
+                setattr(o, self.fk_field.name, self.instance)
+        else:
+            for o in objs:
+                setattr(o, self.fk_field.name, self.instance)
+                o.save()
+
+    def remove(self, *objs: Any) -> None:
+        """Disassociate each *obj* by NULL-ing the FK column. Only
+        valid when the FK is nullable; otherwise a NOT NULL
+        violation surfaces."""
+        if not objs:
+            return
+        if not getattr(self.fk_field, "null", False):
+            raise ValueError(
+                f"Cannot remove() — {self.source_model.__name__}.{self.fk_field.name} "
+                "is NOT NULL. Use ``.delete()`` to remove the rows entirely."
+            )
+        ids = [o.pk for o in objs]
+        self.source_model.objects.filter(pk__in=ids).update(
+            **{self.fk_field.name: None}
+        )
+
+    def clear(self) -> None:
+        """Disassociate every related row. Same NOT NULL guard as
+        :meth:`remove`."""
+        if not getattr(self.fk_field, "null", False):
+            raise ValueError(
+                f"Cannot clear() — {self.source_model.__name__}.{self.fk_field.name} "
+                "is NOT NULL. Use ``.delete()`` instead."
+            )
+        self.get_queryset().update(**{self.fk_field.name: None})
+
+    def set(self, objs: list, *, bulk: bool = True, clear: bool = False) -> None:
+        """Replace the related set with *objs*. ``clear=True`` runs
+        :meth:`clear` first; otherwise rows already pointing at the
+        parent stay put and only the diff is applied."""
+        existing = {o.pk for o in self.get_queryset()}
+        target = {o.pk for o in objs}
+        to_add_ids = target - existing
+        to_remove_ids = existing - target
+        if to_add_ids:
+            adds = [o for o in objs if o.pk in to_add_ids]
+            self.add(*adds, bulk=bulk)
+        if to_remove_ids:
+            if not getattr(self.fk_field, "null", False):
+                raise ValueError(
+                    "set() with diff would orphan NOT NULL rows. "
+                    "Use ``clear=True`` only when the FK is nullable, "
+                    "or pass the full target set so nothing is removed."
+                )
+            self.source_model.objects.filter(
+                pk__in=list(to_remove_ids)
+            ).update(**{self.fk_field.name: None})
+
     def __iter__(self) -> Iterator:
         return iter(self.get_queryset())
 

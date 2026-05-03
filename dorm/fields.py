@@ -253,6 +253,7 @@ class Field(Generic[_T]):
         help_text: str = "",
         db_column: str | None = None,
         db_tablespace: str | None = None,
+        db_comment: str | None = None,
         validators: list | None = None,
     ):
         self.verbose_name = verbose_name
@@ -279,6 +280,11 @@ class Field(Generic[_T]):
         self.help_text = help_text
         self.db_column = db_column
         self.db_tablespace = db_tablespace
+        # ``db_comment`` lands as a ``COMMENT ON COLUMN`` after the
+        # column DDL on PostgreSQL / MySQL. SQLite ignores comments.
+        # Useful for schema-archaeology work where DBAs read the
+        # column definitions directly.
+        self.db_comment = db_comment
         self.validators: list = list(validators) if validators else []
         self.model = None
         self.attname = None
@@ -512,6 +518,25 @@ class PositiveSmallIntegerField(PositiveIntegerField):
         backend = getattr(connection, "vendor", "sqlite")
         if backend == "postgresql":
             return "SMALLINT"
+        if backend == "mysql":
+            return "SMALLINT UNSIGNED"
+        return "INTEGER"
+
+
+class PositiveBigIntegerField(PositiveIntegerField):
+    """64-bit unsigned integer counterpart of :class:`PositiveIntegerField`.
+
+    Mirrors Django's ``PositiveBigIntegerField`` — useful for IDs from
+    upstream services that exceed ``2**31`` (Twitter snowflakes,
+    KSUID-derived ints, etc.).
+    """
+
+    def db_type(self, connection) -> str:
+        backend = getattr(connection, "vendor", "sqlite")
+        if backend == "postgresql":
+            return "BIGINT"
+        if backend == "mysql":
+            return "BIGINT UNSIGNED"
         return "INTEGER"
 
 
@@ -1086,6 +1111,36 @@ class GeneratedField(Field[Any]):
 
     def pre_save(self, model_instance: Any, add: bool) -> Any:
         return None
+
+
+class FilePathField(CharField):
+    """``CharField`` whose value is restricted to a file path under
+    *path*. Validates on assignment that the filename matches *match*
+    (regex) and lives at *recursive* depth from *path*.
+
+    Mirrors Django's ``FilePathField`` — used for "let the user pick
+    a file off disk" forms (admin uploads, config selectors). The
+    column type is plain ``VARCHAR``; the validation runs Python-side
+    when a value is set and during ``full_clean()``.
+    """
+
+    def __init__(
+        self,
+        path: str = "",
+        *,
+        match: str | None = None,
+        recursive: bool = False,
+        allow_files: bool = True,
+        allow_folders: bool = False,
+        max_length: int = 100,
+        **kwargs: Any,
+    ) -> None:
+        self.path = path
+        self.match = match
+        self.recursive = recursive
+        self.allow_files = allow_files
+        self.allow_folders = allow_folders
+        super().__init__(max_length=max_length, **kwargs)
 
 
 class BinaryField(Field[bytes]):

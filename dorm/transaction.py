@@ -311,15 +311,23 @@ def aon_rollback(
 class _AtomicContextManager:
     """Backs :func:`atomic`. Supports both ``with atomic():`` and ``@atomic``."""
 
-    def __init__(self, using: str = "default") -> None:
+    def __init__(self, using: str = "default", *, durable: bool = False) -> None:
         self.using = using
+        self.durable = durable
         self._cm: Any = None
         self._rollback_requested: bool = False
 
     def __enter__(self):
         from .db.connection import get_connection
 
-        self._cm = get_connection(self.using).atomic()
+        conn = get_connection(self.using)
+        if self.durable and getattr(conn, "_atomic_depth", 0) > 0:
+            raise RuntimeError(
+                "atomic(durable=True) was nested inside another atomic() "
+                "block — durable atomics must be top-level so they map "
+                "to a real COMMIT, not a savepoint."
+            )
+        self._cm = conn.atomic()
         self._cm.__enter__()
         _push_sync_frame(self.using)
         return self
@@ -366,15 +374,23 @@ class _AtomicContextManager:
 class _AsyncAtomicContextManager:
     """Backs :func:`aatomic`. Supports both ``async with aatomic():`` and ``@aatomic``."""
 
-    def __init__(self, using: str = "default") -> None:
+    def __init__(self, using: str = "default", *, durable: bool = False) -> None:
         self.using = using
+        self.durable = durable
         self._cm: Any = None
         self._rollback_requested: bool = False
 
     async def __aenter__(self):
         from .db.connection import get_async_connection
 
-        self._cm = get_async_connection(self.using).aatomic()
+        conn = get_async_connection(self.using)
+        if self.durable and getattr(conn, "_atomic_depth", 0) > 0:
+            raise RuntimeError(
+                "aatomic(durable=True) was nested inside another aatomic() "
+                "block — durable atomics must be top-level so they map "
+                "to a real COMMIT, not a savepoint."
+            )
+        self._cm = conn.aatomic()
         await self._cm.__aenter__()
         _push_async_frame(self.using)
         return self
@@ -419,7 +435,9 @@ class _RollbackForce(Exception):
     """
 
 
-def atomic(using: str | Callable[..., Any] = "default"):
+def atomic(
+    using: str | Callable[..., Any] = "default", *, durable: bool = False
+):
     """Wrap a block of code in a database transaction.
 
     Usable as a context manager or as a decorator::
@@ -439,19 +457,31 @@ def atomic(using: str | Callable[..., Any] = "default"):
     Nested calls create savepoints so only the inner block is rolled back on
     inner failure. The returned context manager exposes :meth:`set_rollback`
     so test fixtures (or generic cleanup helpers) can force a rollback
-    without having to raise an exception."""
+    without having to raise an exception.
+
+    Pass ``durable=True`` (Django 3.2+) to assert that *this* atomic
+    block is the outermost one — i.e. the surrounding code is NOT
+    already inside another ``atomic()``. The block raises
+    :class:`RuntimeError` immediately if it would silently degrade
+    to a savepoint instead of a top-level transaction. Use this on
+    work that MUST land in its own COMMIT (write-then-publish
+    patterns where the publish step waits on a real fsync).
+    """
     # @atomic (no parens) — `using` is the function being decorated.
     if callable(using) and not isinstance(using, str):
-        return _AtomicContextManager("default")(using)
-    return _AtomicContextManager(using)
+        return _AtomicContextManager("default", durable=durable)(using)
+    return _AtomicContextManager(using, durable=durable)
 
 
-def aatomic(using: str | Callable[..., Any] = "default"):
+def aatomic(
+    using: str | Callable[..., Any] = "default", *, durable: bool = False
+):
     """Async counterpart of :func:`atomic`. Same usage as ``atomic``: works
-    as ``async with`` context manager or as a decorator on async functions."""
+    as ``async with`` context manager or as a decorator on async functions.
+    ``durable=True`` is enforced the same way as the sync version."""
     if callable(using) and not isinstance(using, str):
-        return _AsyncAtomicContextManager("default")(using)
-    return _AsyncAtomicContextManager(using)
+        return _AsyncAtomicContextManager("default", durable=durable)(using)
+    return _AsyncAtomicContextManager(using, durable=durable)
 
 
 # ── Manual savepoint API (3.1+) ──────────────────────────────────────────────

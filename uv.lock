@@ -7,6 +7,18 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "aiomysql"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pymysql" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/e0/302aeffe8d90853556f47f3106b89c16cc2ec2a4d269bdfd82e3f4ae12cc/aiomysql-0.3.2.tar.gz", hash = "sha256:72d15ef5cfc34c03468eb41e1b90adb9fd9347b0b589114bd23ead569a02ac1a", size = 108311, upload-time = "2025-10-22T00:15:21.278Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/af/aae0153c3e28712adaf462328f6c7a3c196a1c1c27b491de4377dd3e6b52/aiomysql-0.3.2-py3-none-any.whl", hash = "sha256:c82c5ba04137d7afd5c693a258bea8ead2aad77101668044143a991e04632eb2", size = 71834, upload-time = "2025-10-22T00:15:15.905Z" },
+]
+
+[[package]]
 name = "aiosqlite"
 version = "0.22.1"
 source = { registry = "https://pypi.org/simple" }
@@ -508,7 +520,9 @@ source = { editable = "." }
 
 [package.optional-dependencies]
 all = [
+    { name = "aiomysql" },
     { name = "aiosqlite" },
+    { name = "argon2-cffi" },
     { name = "boto3" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -523,6 +537,7 @@ all = [
     { name = "pillow" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic" },
+    { name = "pymysql" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -535,6 +550,9 @@ all = [
     { name = "sqlite-vec" },
     { name = "testcontainers", extra = ["minio"] },
     { name = "ty" },
+]
+auth-argon2 = [
+    { name = "argon2-cffi" },
 ]
 dev = [
     { name = "boto3" },
@@ -568,6 +586,10 @@ image = [
 libsql = [
     { name = "pyturso" },
 ]
+mysql = [
+    { name = "aiomysql" },
+    { name = "pymysql" },
+]
 otel = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-sdk" },
@@ -600,16 +622,20 @@ vector = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiomysql" },
     { name = "fakeredis" },
+    { name = "pymysql" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "aiomysql", marker = "extra == 'mysql'", specifier = ">=0.2.0" },
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.22.1,<0.23" },
+    { name = "argon2-cffi", marker = "extra == 'auth-argon2'", specifier = ">=23.0" },
     { name = "boto3", marker = "extra == 'dev'", specifier = ">=1.43.1" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.43.1" },
     { name = "cryptography", marker = "extra == 'encrypted'", specifier = ">=42.0" },
-    { name = "djanorm", extras = ["dev", "sqlite", "postgresql", "libsql", "redis", "pydantic", "docs", "otel", "s3", "image", "pgvector", "sqlite-vec", "encrypted", "mysql"], marker = "extra == 'all'" },
+    { name = "djanorm", extras = ["dev", "sqlite", "postgresql", "libsql", "redis", "pydantic", "docs", "otel", "s3", "image", "pgvector", "sqlite-vec", "encrypted", "mysql", "auth-argon2"], marker = "extra == 'all'" },
     { name = "djanorm", extras = ["pgvector", "sqlite-vec"], marker = "extra == 'vector'" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -626,6 +652,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'image'", specifier = ">=12.2.0" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgresql'", specifier = ">=3.3.3" },
     { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.0" },
+    { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
@@ -639,10 +666,14 @@ requires-dist = [
     { name = "testcontainers", extras = ["postgres", "minio"], marker = "extra == 'dev'", specifier = ">=4.14.2" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.33" },
 ]
-provides-extras = ["dev", "otel", "sqlite", "postgresql", "s3", "image", "pydantic", "pgvector", "sqlite-vec", "vector", "libsql", "redis", "docs", "encrypted", "mysql", "all"]
+provides-extras = ["dev", "otel", "sqlite", "postgresql", "s3", "image", "pydantic", "pgvector", "sqlite-vec", "vector", "libsql", "redis", "docs", "encrypted", "auth-argon2", "mysql", "all"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "fakeredis", specifier = ">=2.35.1" }]
+dev = [
+    { name = "aiomysql", specifier = ">=0.3.2" },
+    { name = "fakeredis", specifier = ">=2.35.1" },
+    { name = "pymysql", specifier = ">=1.1.3" },
+]
 
 [[package]]
 name = "docker"
@@ -1567,6 +1598,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/df/08/f1c908c581fd11913da4711ea7ba32c0eee40b0190000996bb863b0c9349/pymdown_extensions-10.21.2.tar.gz", hash = "sha256:c3f55a5b8a1d0edf6699e35dcbea71d978d34ff3fa79f3d807b8a5b3fa90fbdc", size = 853922, upload-time = "2026-03-29T15:01:55.233Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/27/a2fc51a4a122dfd1015e921ae9d22fee3d20b0b8080d9a704578bf9deece/pymdown_extensions-10.21.2-py3-none-any.whl", hash = "sha256:5c0fd2a2bea14eb39af8ff284f1066d898ab2187d81b889b75d46d4348c01638", size = 268901, upload-time = "2026-03-29T15:01:53.244Z" },
+]
+
+[[package]]
+name = "pymysql"
+version = "1.1.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/ec/8d45c920e90445f0b75c590b32851853ed319763b0d8dff8d283052da8cf/pymysql-1.1.3.tar.gz", hash = "sha256:e70ebf2047a4edf6138cf79c68ad418ef620af65900aa585c5e8bfc95044d43a", size = 48207, upload-time = "2026-05-01T09:09:54.532Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8e/dc/9085f3d6f497e9b25fb40d6e8ecef3ddbb5cf977a949b933624a299f5c16/pymysql-1.1.3-py3-none-any.whl", hash = "sha256:8164ba62c552f6105f3b11753352d0f16b90d1703ba67d81923d5a8a5d1c5289", size = 45356, upload-time = "2026-05-01T09:09:53.316Z" },
 ]
 
 [[package]]

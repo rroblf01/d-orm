@@ -43,6 +43,22 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # MySQL 8 for the mysql-parametrized tests (3.1 ships a real backend).
+      # ``mysql_native_password`` is the auth plugin pymysql understands
+      # without extra config; the default ``caching_sha2_password`` needs
+      # extra round-trips and a public-key fetch that flakes on cold runners.
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: dorm_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pmysql"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     env:
       # Tell conftest to use this service container directly instead of
@@ -52,6 +68,11 @@ jobs:
       DORM_TEST_POSTGRES_USER: postgres
       DORM_TEST_POSTGRES_PASSWORD: postgres
       DORM_TEST_POSTGRES_DB: dorm_test
+      DORM_TEST_MYSQL_HOST: 127.0.0.1
+      DORM_TEST_MYSQL_PORT: 3306
+      DORM_TEST_MYSQL_USER: root
+      DORM_TEST_MYSQL_PASSWORD: mysql
+      DORM_TEST_MYSQL_DB: dorm_test
 
     steps:
       - uses: actions/checkout@v6

@@ -104,6 +104,7 @@ class Index:
         method: str = "btree",
         condition: Any = None,
         opclasses: list[str] | None = None,
+        include: list[str] | None = None,
     ) -> None:
         if not fields:
             raise ValueError("Index requires at least one field/expression.")
@@ -144,6 +145,16 @@ class Index:
             for op in opclasses:
                 _validate_identifier(op, kind="Index opclass")
         self.opclasses = list(opclasses) if opclasses else []
+
+        # ``include=[...]`` declares non-key payload columns that the
+        # index returns alongside the key — PostgreSQL "covering"
+        # indexes (``CREATE INDEX ... INCLUDE (col1, col2)``). Reduces
+        # heap fetches for queries that select only the included
+        # columns. SQLite ignores the clause when present.
+        if include is not None:
+            for col in include:
+                _validate_identifier(col, kind="Index include column")
+        self.include = list(include) if include else []
 
         self.unique = unique
         self._name = name
@@ -221,9 +232,18 @@ class Index:
             )
             with_clause = f" WITH ({rendered})"
 
+        # PostgreSQL ``INCLUDE (...)`` covering clause — non-key columns
+        # the planner can fetch from the index without touching the
+        # heap. SQLite has no equivalent; emit the clause only on PG
+        # (other backends fall back to a regular index, no error).
+        include_clause = ""
+        if self.include and vendor == "postgresql":
+            inc_cols = ", ".join(f'"{c}"' for c in self.include)
+            include_clause = f" INCLUDE ({inc_cols})"
+
         forward = (
             f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}"'
-            f'{method_clause} ({cols}){with_clause}{where_clause}'
+            f'{method_clause} ({cols}){include_clause}{with_clause}{where_clause}'
         )
         reverse = f'DROP INDEX IF EXISTS "{idx_name}"'
         return forward, reverse

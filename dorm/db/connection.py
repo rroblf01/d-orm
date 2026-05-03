@@ -206,7 +206,7 @@ def _create_sync_connection(alias: str, db_settings: dict):
 
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql', 'libsql' (mysql scaffold ships in 3.0+)."
+        "Supported: 'sqlite', 'postgresql', 'libsql', 'mysql', 'mariadb'."
     )
 
 
@@ -228,7 +228,7 @@ def _create_async_connection(alias: str, db_settings: dict):
 
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql', 'libsql' (mysql scaffold ships in 3.0+)."
+        "Supported: 'sqlite', 'postgresql', 'libsql', 'mysql', 'mariadb'."
     )
 
 

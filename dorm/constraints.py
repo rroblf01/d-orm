@@ -168,6 +168,8 @@ class UniqueConstraint(BaseConstraint):
         fields: list[str] | tuple[str, ...],
         name: str,
         condition: Q | None = None,
+        deferrable: str | None = None,
+        include: list[str] | None = None,
     ) -> None:
         if not fields:
             raise ImproperlyConfigured("UniqueConstraint(fields=...) cannot be empty.")
@@ -177,12 +179,30 @@ class UniqueConstraint(BaseConstraint):
             raise ImproperlyConfigured(
                 "UniqueConstraint(condition=...) must be a Q object."
             )
+        if deferrable is not None and deferrable not in (
+            "deferred",
+            "immediate",
+        ):
+            raise ImproperlyConfigured(
+                "UniqueConstraint(deferrable=...) must be one of "
+                "'deferred', 'immediate', or None."
+            )
+        if include is not None:
+            for col in include:
+                _validate_identifier(col, kind="UniqueConstraint include column")
         super().__init__(name=name)
         self.fields = list(fields)
         self.condition = condition
+        self.deferrable = deferrable
+        self.include = list(include) if include else []
 
     def constraint_sql(self, table: str, connection: Any) -> str:
         cols = ", ".join(f'"{c}"' for c in self.fields)
+        vendor = getattr(connection, "vendor", "sqlite")
+        include_clause = ""
+        if self.include and vendor == "postgresql":
+            inc = ", ".join(f'"{c}"' for c in self.include)
+            include_clause = f" INCLUDE ({inc})"
         if self.condition is not None:
             from .functions import _compile_condition
             from .fields import _inline_literal
@@ -194,15 +214,24 @@ class UniqueConstraint(BaseConstraint):
                 pred_sql = _inline_literal(pred_sql, pred_params)
             return (
                 f'CREATE UNIQUE INDEX "{self.name}" ON "{table}" '
-                f"({cols}) WHERE {pred_sql}"
+                f"({cols}){include_clause} WHERE {pred_sql}"
             )
-        vendor = getattr(connection, "vendor", "sqlite")
         if vendor == "sqlite":
             # SQLite has no ALTER TABLE ADD CONSTRAINT; a unique index
             # achieves the same uniqueness guarantee.
             return f'CREATE UNIQUE INDEX "{self.name}" ON "{table}" ({cols})'
+        # ``DEFERRABLE INITIALLY DEFERRED`` lets the unique check
+        # run at COMMIT instead of statement-end — useful for
+        # row-swaps inside a transaction (Django parity, PG only).
+        # MySQL doesn't support deferrable constraints; ignore the
+        # flag silently there.
+        deferr_clause = ""
+        if vendor == "postgresql" and self.deferrable is not None:
+            mode = "DEFERRED" if self.deferrable == "deferred" else "IMMEDIATE"
+            deferr_clause = f" DEFERRABLE INITIALLY {mode}"
         return (
-            f'ALTER TABLE "{table}" ADD CONSTRAINT "{self.name}" UNIQUE ({cols})'
+            f'ALTER TABLE "{table}" ADD CONSTRAINT "{self.name}" '
+            f"UNIQUE ({cols}){include_clause}{deferr_clause}"
         )
 
     def remove_sql(self, table: str, connection: Any) -> str:
@@ -228,3 +257,107 @@ class UniqueConstraint(BaseConstraint):
     def describe(self) -> str:
         cond = ", condition=..." if self.condition is not None else ""
         return f"UniqueConstraint(fields={self.fields!r}, name={self.name!r}{cond})"
+
+
+class ExclusionConstraint(BaseConstraint):
+    """PostgreSQL ``EXCLUDE`` constraint — guarantees no two rows
+    in the table satisfy the same operator over the named
+    expressions. Most common use case: range-overlap exclusion
+    for "no two reservations for the same room can overlap"
+    (``EXCLUDE USING gist (room_id WITH =, slot WITH &&)``).
+
+    Mirrors Django's ``ExclusionConstraint``. PostgreSQL only —
+    SQLite + MySQL silently downgrade to a no-op
+    (``constraint_sql`` returns the empty string and
+    :meth:`AddConstraint` skips application).
+
+    *expressions* is a list of ``(column_or_expression, operator)``
+    pairs. Each operator is validated against the safe-identifier
+    regex so user input can't splice arbitrary SQL into the
+    ``EXCLUDE`` clause.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        expressions: list[tuple[str, str]],
+        index_type: str = "gist",
+        condition: Q | None = None,
+        deferrable: str | None = None,
+    ) -> None:
+        if not expressions:
+            raise ImproperlyConfigured(
+                "ExclusionConstraint requires at least one (column, operator) pair."
+            )
+        for col, op in expressions:
+            _validate_identifier(col, kind="ExclusionConstraint column")
+            # Operators are PG-supported strings like ``=``, ``&&``,
+            # ``<@``. Whitelist by character class to avoid splicing
+            # arbitrary SQL.
+            if not all(ch in "<>=!&|@~?+*-/" for ch in op):
+                raise ImproperlyConfigured(
+                    f"ExclusionConstraint operator {op!r} contains "
+                    "unexpected characters."
+                )
+        if index_type.lower() not in ("gist", "spgist", "btree"):
+            raise ImproperlyConfigured(
+                f"ExclusionConstraint(index_type={index_type!r}) — must be "
+                "'gist', 'spgist', or 'btree'."
+            )
+        if condition is not None and not isinstance(condition, Q):
+            raise ImproperlyConfigured(
+                "ExclusionConstraint(condition=...) must be a Q object."
+            )
+        if deferrable is not None and deferrable not in (
+            "deferred",
+            "immediate",
+        ):
+            raise ImproperlyConfigured(
+                "ExclusionConstraint(deferrable=...) must be one of "
+                "'deferred', 'immediate', or None."
+            )
+        super().__init__(name=name)
+        self.expressions = list(expressions)
+        self.index_type = index_type.lower()
+        self.condition = condition
+        self.deferrable = deferrable
+
+    def constraint_sql(self, table: str, connection: Any) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            return ""
+        parts = ", ".join(
+            f'"{col}" WITH {op}' for col, op in self.expressions
+        )
+        where_clause = ""
+        if self.condition is not None:
+            from .functions import _compile_condition
+            from .fields import _inline_literal
+
+            pred_sql, pred_params = _compile_condition(
+                self.condition, table_alias=None, connection=connection
+            )
+            if pred_params:
+                pred_sql = _inline_literal(pred_sql, pred_params)
+            where_clause = f" WHERE ({pred_sql})"
+        deferr = ""
+        if self.deferrable is not None:
+            mode = "DEFERRED" if self.deferrable == "deferred" else "IMMEDIATE"
+            deferr = f" DEFERRABLE INITIALLY {mode}"
+        return (
+            f'ALTER TABLE "{table}" ADD CONSTRAINT "{self.name}" '
+            f"EXCLUDE USING {self.index_type} ({parts}){where_clause}{deferr}"
+        )
+
+    def remove_sql(self, table: str, connection: Any) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            return ""
+        return f'ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{self.name}"'
+
+    def describe(self) -> str:
+        return (
+            f"ExclusionConstraint(name={self.name!r}, "
+            f"expressions={self.expressions!r})"
+        )

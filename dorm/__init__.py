@@ -56,6 +56,11 @@ from .exceptions import (
 from .expressions import Exists, F, OuterRef, Q, Subquery, Value
 from .aggregates import (
     ArrayAgg,
+    BitAnd,
+    BitOr,
+    BoolAnd,
+    BoolOr,
+    JSONBAgg,
     Avg,
     Count,
     Max,
@@ -127,7 +132,7 @@ from .functions import (
     When,
     Window,
 )
-from .constraints import CheckConstraint, UniqueConstraint
+from .constraints import CheckConstraint, ExclusionConstraint, UniqueConstraint
 from .fields import (
     ArrayField,
     AutoField,
@@ -149,6 +154,7 @@ from .fields import (
     EmailField,
     EnumField,
     FileField,
+    FilePathField,
     FloatField,
     ImageField,
     ForeignKey,
@@ -161,6 +167,7 @@ from .fields import (
     ManyToManyField,
     NullBooleanField,
     OneToOneField,
+    PositiveBigIntegerField,
     PositiveIntegerField,
     PositiveSmallIntegerField,
     Range,
@@ -241,6 +248,7 @@ __all__ = [
     "IntegerField",
     "SmallIntegerField",
     "BigIntegerField",
+    "PositiveBigIntegerField",
     "PositiveIntegerField",
     "PositiveSmallIntegerField",
     "FloatField",
@@ -264,6 +272,7 @@ __all__ = [
     "EnumField",
     "CITextField",
     "FileField",
+    "FilePathField",
     "ImageField",
     # Storage
     "Storage",
@@ -309,6 +318,11 @@ __all__ = [
     # PG-only aggregates
     "StringAgg",
     "ArrayAgg",
+    "JSONBAgg",
+    "BoolOr",
+    "BoolAnd",
+    "BitOr",
+    "BitAnd",
     # Functions
     "Case",
     "When",
@@ -374,6 +388,7 @@ __all__ = [
     # Constraints
     "CheckConstraint",
     "UniqueConstraint",
+    "ExclusionConstraint",
     # Index
     "Index",
     # Validators

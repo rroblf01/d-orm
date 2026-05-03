@@ -743,14 +743,16 @@ def test_parse_database_url_matrix():
     assert pg2["OPTIONS"].get("sslmode") == "require"
 
 
-def test_mysql_engine_raises_until_v3_1(db_config):
-    """MySQL backend must raise a clear ``ImproperlyConfigured``
-    pointing at the v3.1 milestone — never crash with an opaque
-    AttributeError on a missing module."""
+def test_mysql_engine_constructs_wrapper(db_config):
+    """3.1 ships a real MySQL backend (``pymysql`` / ``aiomysql``).
+    The sync wrapper instantiates without touching the network
+    (lazy connection on first call); ``get_connection`` returns
+    something usable. Restore the prior configuration on exit so
+    subsequent tests in the session don't see the MySQL config
+    leak through."""
     from dorm import configure
     from dorm.conf import parse_database_url
     from dorm.db.connection import get_connection, reset_connections
-    from dorm.exceptions import ImproperlyConfigured
 
     cfg = parse_database_url("mysql://u:p@host:3306/dbname")
     assert cfg["ENGINE"] == "mysql"
@@ -758,11 +760,9 @@ def test_mysql_engine_raises_until_v3_1(db_config):
     reset_connections()
     configure(DATABASES={"default": cfg}, INSTALLED_APPS=["tests"])
     try:
-        with pytest.raises(ImproperlyConfigured):
-            get_connection()
+        conn = get_connection()
+        assert conn.vendor == "mysql"
     finally:
-        # Restore the prior configuration so subsequent tests in
-        # this session don't see the MySQL config leak through.
         reset_connections()
         configure(DATABASES={"default": db_config}, INSTALLED_APPS=["tests"])
 

@@ -98,25 +98,29 @@ def test_parse_database_url_unknown_scheme_message_lists_mysql():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_mysql_sync_connection_routes_to_scaffold():
+def test_mysql_sync_connection_constructs_wrapper():
+    """3.1 ships a real MySQL backend backed by ``pymysql``. The
+    sync route should now return a usable wrapper (lazy connection
+    on first ``execute``); only an actual network attempt would
+    fail against a non-existent host."""
     from dorm.db.connection import _create_sync_connection
 
-    with pytest.raises(ImproperlyConfigured, match="not implemented yet"):
-        _create_sync_connection("default", {"ENGINE": "mysql", "NAME": "x"})
+    conn = _create_sync_connection("default", {"ENGINE": "mysql", "NAME": "x"})
+    assert conn.vendor == "mysql"
 
 
-def test_mariadb_sync_connection_routes_to_scaffold():
+def test_mariadb_sync_connection_constructs_wrapper():
     from dorm.db.connection import _create_sync_connection
 
-    with pytest.raises(ImproperlyConfigured, match="not implemented yet"):
-        _create_sync_connection("default", {"ENGINE": "mariadb", "NAME": "x"})
+    conn = _create_sync_connection("default", {"ENGINE": "mariadb", "NAME": "x"})
+    assert conn.vendor == "mysql"
 
 
-def test_mysql_async_connection_routes_to_scaffold():
+def test_mysql_async_connection_constructs_wrapper():
     from dorm.db.connection import _create_async_connection
 
-    with pytest.raises(ImproperlyConfigured, match="not implemented yet"):
-        _create_async_connection("default", {"ENGINE": "mysql", "NAME": "x"})
+    conn = _create_async_connection("default", {"ENGINE": "mysql", "NAME": "x"})
+    assert conn.vendor == "mysql"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

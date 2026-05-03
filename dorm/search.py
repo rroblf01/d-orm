@@ -40,6 +40,8 @@ from .exceptions import ImproperlyConfigured
 # names — alphanumerics + underscore only.
 import re as _re
 
+_SAFE_CONFIG = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 _CONFIG_RE = _re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
@@ -198,3 +200,80 @@ class SearchRank:
 
     def __repr__(self) -> str:
         return f"SearchRank({self.vector!r}, {self.query!r})"
+
+
+class SearchHeadline:
+    """Compute ``ts_headline(<config>, document, query [, options])``
+    — render the matched fragment with the matching tokens wrapped
+    in ``<b>...</b>`` (or whatever ``StartSel`` / ``StopSel`` you
+    configure). Useful for search-result snippets.
+
+    *expression* is the column / expression containing the document
+    text (typically a string ``F("body")`` or a string literal).
+
+    *query* is a :class:`SearchQuery` instance reused from the same
+    search call.
+
+    *options* is a free-form ``dict`` mapping the standard
+    ``ts_headline`` keys to values — ``MaxWords``, ``MinWords``,
+    ``ShortWord``, ``HighlightAll``, ``MaxFragments``,
+    ``StartSel``, ``StopSel``, ``FragmentDelimiter``. Values are
+    passed as bound parameters; PG joins them in the
+    ``<key>=<value>`` syntax via ``%s`` placeholders.
+    """
+
+    def __init__(
+        self,
+        expression: Any,
+        query: "SearchQuery",
+        *,
+        config: str = "english",
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        if not isinstance(query, SearchQuery):
+            raise ImproperlyConfigured(
+                "SearchHeadline(query=...) must be a SearchQuery instance."
+            )
+        if not _SAFE_CONFIG.match(config):
+            raise ImproperlyConfigured(
+                f"SearchHeadline(config={config!r}) — config must be a "
+                "PostgreSQL regconfig identifier."
+            )
+        self.expression = expression
+        self.query = query
+        self.config = config
+        self.options = options or {}
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        from .functions import _compile_expr
+
+        expr_sql, expr_params = _compile_expr(self.expression, table_alias)
+        q_sql, q_params = self.query.as_sql(table_alias)
+        params: list = list(expr_params) + list(q_params)
+        if self.options:
+            for k in self.options:
+                if not _SAFE_CONFIG.match(k):
+                    raise ImproperlyConfigured(
+                        f"SearchHeadline option {k!r} is not a valid identifier."
+                    )
+            # Inline the options dict as a string literal — PG's
+            # ``ts_headline(... , 'opt=val')`` syntax doesn't accept
+            # bound parameters for the options string. Single-quote
+            # values are SQL-escaped so a literal ``'`` in
+            # ``StartSel`` etc. survives.
+            options_str = ", ".join(
+                f"{k}={str(v).replace(chr(39), chr(39) + chr(39))}"
+                for k, v in self.options.items()
+            )
+            return (
+                f"ts_headline('{self.config}', {expr_sql}, {q_sql}, "
+                f"'{options_str}')",
+                params,
+            )
+        return (
+            f"ts_headline('{self.config}', {expr_sql}, {q_sql})",
+            params,
+        )
+
+    def __repr__(self) -> str:
+        return f"SearchHeadline({self.expression!r}, {self.query!r})"

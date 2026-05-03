@@ -157,13 +157,18 @@ docs = [
 # package. Stays optional because the hot ORM path never imports
 # ``cryptography``; only ``dorm.contrib.encrypted`` does.
 encrypted = ["cryptography>=42.0"]
+# Argon2id password hashing — slot-in replacement for PBKDF2 when
+# ``make_password_argon2`` is preferred over the stdlib default.
+# Optional because PBKDF2 ships in stdlib and covers most threat
+# models without a C extension.
+auth-argon2 = ["argon2-cffi>=23.0"]
 # MySQL / MariaDB scaffold ships in 3.0 — full backend lands in
 # v3.1. Empty extra keeps ``pip install 'djanorm[mysql]'`` working
 # as a forward-compatible pin: the install succeeds today, picks up
 # real driver pins (``pymysql`` + ``asyncmy``) on the v3.1 bump
 # without changing user requirements files.
-mysql = []
-all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted,mysql]"]
+mysql = ["pymysql>=1.1.0", "aiomysql>=0.2.0"]
+all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted,mysql,auth-argon2]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"
@@ -177,7 +182,9 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "aiomysql>=0.3.2",
     "fakeredis>=2.35.1",
+    "pymysql>=1.1.3",
 ]
 
 [tool.pytest.ini_options]

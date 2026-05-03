@@ -431,12 +431,15 @@ def test_get_settings_unknown_alias_raises():
 
 
 def test_create_connection_unsupported_engine():
+    """3.1 wires MySQL — ``_create_*`` constructs wrappers without
+    raising. Pin an actually-unsupported engine name to exercise
+    the catch-all path."""
     from dorm.db.connection import _create_sync_connection, _create_async_connection
 
     with pytest.raises(ImproperlyConfigured):
-        _create_sync_connection("default", {"ENGINE": "mysql", "NAME": "x"})
+        _create_sync_connection("default", {"ENGINE": "oracle", "NAME": "x"})
     with pytest.raises(ImproperlyConfigured):
-        _create_async_connection("default", {"ENGINE": "mysql", "NAME": "x"})
+        _create_async_connection("default", {"ENGINE": "oracle", "NAME": "x"})
 
 
 def test_health_check_returns_ok_dict():

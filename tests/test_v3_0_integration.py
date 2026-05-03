@@ -22,7 +22,6 @@ from __future__ import annotations
 import pytest
 
 import dorm
-from dorm.exceptions import ImproperlyConfigured
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -244,19 +243,18 @@ def test_password_reset_namespace_separation_blocks_cross_use(_auth_tables):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_mysql_url_parse_then_configure_then_connection_raises():
-    """End-to-end: a ``DATABASE_URL=mysql://...`` env var on
-    deployment day. ``parse_database_url`` accepts it,
-    ``configure`` stores it, the first connection attempt surfaces
-    the v3.1-pointer error so the user's logs say what's missing."""
+def test_mysql_url_parse_then_configure_then_connection_constructs_wrapper():
+    """End-to-end: ``DATABASE_URL=mysql://...`` parses through
+    :func:`parse_database_url` and wires up to the real backend
+    in 3.1 (lazy connection on first ``execute``)."""
     cfg = dorm.parse_database_url("mysql://root:s@db:3306/myapp")
     assert cfg["ENGINE"] == "mysql"
     assert cfg["HOST"] == "db"
 
     from dorm.db.connection import _create_sync_connection
 
-    with pytest.raises(ImproperlyConfigured, match="not implemented yet"):
-        _create_sync_connection("default", cfg)
+    conn = _create_sync_connection("default", cfg)
+    assert conn.vendor == "mysql"
 
 
 def test_mariadb_scheme_routes_through_same_path():
@@ -265,8 +263,8 @@ def test_mariadb_scheme_routes_through_same_path():
 
     from dorm.db.connection import _create_async_connection
 
-    with pytest.raises(ImproperlyConfigured, match="not implemented yet"):
-        _create_async_connection("default", cfg)
+    conn = _create_async_connection("default", cfg)
+    assert conn.vendor == "mysql"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

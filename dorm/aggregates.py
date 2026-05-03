@@ -224,3 +224,45 @@ class ArrayAgg(Aggregate):
     """
 
     function = "ARRAY_AGG"
+
+
+class JSONBAgg(Aggregate):
+    """``JSONB_AGG(expr)`` — aggregate every group's values into a
+    JSON array. PostgreSQL-only counterpart of :class:`ArrayAgg` for
+    callers that want a homogeneous-but-typed-JSON output (Pydantic
+    serialisation, edge functions).
+    """
+
+    function = "JSONB_AGG"
+
+
+class BoolOr(Aggregate):
+    """``BOOL_OR(expr)`` — TRUE if at least one row in the group has
+    a truthy value. PostgreSQL-only at the SQL function level;
+    SQLite users can express the same intent with
+    ``Max(Case(...))``.
+    """
+
+    function = "BOOL_OR"
+
+
+class BoolAnd(Aggregate):
+    """``BOOL_AND(expr)`` — TRUE only when every row in the group
+    has a truthy value. PostgreSQL-only.
+    """
+
+    function = "BOOL_AND"
+
+
+class BitOr(Aggregate):
+    """``BIT_OR(expr)`` — bitwise OR across the group. Supported on
+    both PostgreSQL and MySQL; SQLite needs an extension."""
+
+    function = "BIT_OR"
+
+
+class BitAnd(Aggregate):
+    """``BIT_AND(expr)`` — bitwise AND across the group. Same vendor
+    notes as :class:`BitOr`."""
+
+    function = "BIT_AND"

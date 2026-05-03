@@ -85,10 +85,16 @@ def _ci_postgres_available() -> bool:
     return bool(os.environ.get("DORM_TEST_POSTGRES_HOST"))
 
 
+def _ci_mysql_available() -> bool:
+    return bool(os.environ.get("DORM_TEST_MYSQL_HOST"))
+
+
 def _backends() -> list[str]:
     backends = ["sqlite"]
     if _ci_postgres_available() or _docker_available():
         backends.append("postgres")
+    if _ci_mysql_available():
+        backends.append("mysql")
     return backends
 
 
@@ -297,6 +303,42 @@ def db_config(request, tmp_path_factory, worker_id):
     """
     if request.param == "sqlite":
         yield {"ENGINE": "sqlite", "NAME": _db_path}
+        return
+
+    if request.param == "mysql":
+        # Per-worker database isolation, same shape Postgres uses.
+        # MySQL doesn't have an admin db distinct from user dbs, so
+        # we connect to the configured base db and ``CREATE DATABASE``
+        # for each worker.
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+        base_db = os.environ.get("DORM_TEST_MYSQL_DB", "mysql")
+        worker_db = f"dorm_test_{worker}" if worker != "main" else base_db
+
+        import pymysql
+
+        admin = pymysql.connect(
+            host=os.environ["DORM_TEST_MYSQL_HOST"],
+            port=int(os.environ.get("DORM_TEST_MYSQL_PORT", "3306")),
+            user=os.environ["DORM_TEST_MYSQL_USER"],
+            password=os.environ["DORM_TEST_MYSQL_PASSWORD"],
+            db=base_db,
+            autocommit=True,
+        )
+        try:
+            with admin.cursor() as cur:
+                cur.execute(f"DROP DATABASE IF EXISTS `{worker_db}`")
+                cur.execute(f"CREATE DATABASE `{worker_db}`")
+        finally:
+            admin.close()
+
+        yield {
+            "ENGINE": "mysql",
+            "NAME": worker_db,
+            "USER": os.environ["DORM_TEST_MYSQL_USER"],
+            "PASSWORD": os.environ["DORM_TEST_MYSQL_PASSWORD"],
+            "HOST": os.environ["DORM_TEST_MYSQL_HOST"],
+            "PORT": int(os.environ.get("DORM_TEST_MYSQL_PORT", "3306")),
+        }
         return
 
     admin = _shared_admin_dsn(tmp_path_factory, worker_id)

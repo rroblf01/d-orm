@@ -88,9 +88,87 @@ LOOKUPS: dict[str, tuple[str, Callable[..., Any] | None]] = {
         "to_tsvector('english', {col}) @@ plainto_tsquery('english', %s)",
         lambda v: v,
     ),
+    # ── PG pg_trgm operators (extension; load with
+    # ``CREATE EXTENSION IF NOT EXISTS pg_trgm``) ─────────────────────
+    "trigram_similar": ("{col} %% %s", lambda v: v),       # `%` operator
+    "trigram_word_similar": ("{col} <%% %s", lambda v: v),  # `<%`
+    "trigram_strict_word_similar": ("{col} <<%% %s", lambda v: v),  # `<<%`
+    # ``unaccent`` requires the ``unaccent`` extension. Equality on
+    # the unaccented form lets you match "café" ↔ "cafe".
+    "unaccent": ("unaccent({col}) = unaccent(%s)", lambda v: v),
 }
 
 VALID_LOOKUPS = set(LOOKUPS.keys())
+
+
+def register_lookup(
+    name: str,
+    sql_template: str,
+    value_transform: Callable[..., Any] | None = lambda v: v,
+) -> None:
+    """Register a custom lookup name available to every model.
+
+    Mirrors Django's ``Field.register_lookup`` extension hook but is
+    process-wide rather than field-class-bound — most user-defined
+    lookups (``__zipcode_5``, ``__phone_us``, ``__icontains_unaccent``)
+    apply to every CharField in practice. Per-field gating, when
+    needed, is the user's responsibility (raise inside the transform).
+
+    *sql_template* uses ``{col}`` as the column placeholder and ``%s``
+    for any bound parameter slots. *value_transform* runs on the
+    queryset value before binding (defaults to identity); pass
+    ``None`` to indicate "lookup ignores the value" (e.g. ``isnull``-
+    style booleans).
+
+    Example::
+
+        from dorm.lookups import register_lookup
+
+        register_lookup(
+            "zipcode_us",
+            "{col} ~ '^[0-9]{{5}}(-[0-9]{{4}})?$'",
+            value_transform=None,
+        )
+
+        # Then anywhere:
+        Address.objects.filter(zip_code__zipcode_us=None)
+
+    Names must be valid Python identifiers; collisions with built-in
+    lookup names raise :class:`ValueError` to avoid silently shadowing
+    ``__exact`` / ``__year`` / etc.
+    """
+    if not _SAFE_CONFIG.match(name):
+        raise ValueError(
+            f"register_lookup({name!r}) — name must be a Python identifier."
+        )
+    if name in LOOKUPS:
+        raise ValueError(
+            f"register_lookup({name!r}) collides with a built-in lookup. "
+            "Pick a different name to avoid shadowing the dorm-supplied form."
+        )
+    LOOKUPS[name] = (sql_template, value_transform)
+    VALID_LOOKUPS.add(name)
+
+
+def unregister_lookup(name: str) -> None:
+    """Remove a previously registered lookup. Built-in lookups can't
+    be removed — :class:`ValueError` is raised. Useful for tests that
+    register a lookup in setUp and want to leave the global state
+    clean."""
+    if name not in LOOKUPS:
+        return
+    # Crude but enough to keep callers from breaking the rest of the
+    # suite: refuse to drop anything that ships with dorm. The
+    # snapshot is taken at import time below.
+    if name in _BUILTIN_LOOKUPS:
+        raise ValueError(
+            f"unregister_lookup({name!r}) — cannot remove a built-in lookup."
+        )
+    LOOKUPS.pop(name, None)
+    VALID_LOOKUPS.discard(name)
+
+
+_BUILTIN_LOOKUPS = frozenset(LOOKUPS.keys())
 
 
 def parse_lookup_key(key: str) -> tuple[list[str], str]:
