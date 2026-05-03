@@ -845,18 +845,20 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._loop = None
         self._autocommit_conn = None
         if pool is not None:
-            if loop is not None and not loop.is_closed():
-                try:
-                    asyncio.run_coroutine_threadsafe(pool.close(), loop)
-                except RuntimeError:
-                    pass
+            # Mark the pool closed FIRST so the dispatcher can't hand
+            # out an idle connection while we're tearing one down.
+            try:
+                pool._closed = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
             # Defensive teardown of the libpq layer. ``pgconn.finish``
             # is the sync C-level close — safe from any thread because
             # libpq's connection objects aren't bound to an event loop.
-            # Wrapped in best-effort try/except: by the time the
-            # process gets here the pool may already be in a partially
-            # torn-down state, and the only thing worse than leaking a
-            # connection is raising while trying to release one.
+            # Drain the deque BEFORE attempting any async close so the
+            # two paths can't race over the same pgconn (concurrent
+            # ``pool.close()`` running on the session loop while the
+            # GC reaches a closed pgconn here was the SIGSEGV under
+            # ``pytest -n N`` on Python 3.14).
             for conn in list(getattr(pool, "_pool", None) or ()):
                 try:
                     pgconn = getattr(conn, "pgconn", None)
@@ -868,22 +870,35 @@ class PostgreSQLAsyncDatabaseWrapper:
                 pool._pool.clear()  # type: ignore[attr-defined]
             except Exception:
                 pass
-            try:
-                pool._closed = True  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        if autocommit_conn is not None:
+            # Schedule the async ``pool.close()`` on the original loop
+            # only if it's alive AND we just drained its connections.
+            # The close() coroutine has nothing to operate on now —
+            # it's a flag-flip and bookkeeping, not network I/O.
             if loop is not None and not loop.is_closed():
                 try:
-                    asyncio.run_coroutine_threadsafe(autocommit_conn.close(), loop)
+                    fut = asyncio.run_coroutine_threadsafe(pool.close(), loop)
+                    # Brief wait so the close completes on the same
+                    # loop iteration; if the loop is busy elsewhere
+                    # we drop the wait and rely on the sync teardown
+                    # above to have fully released the libpq layer.
+                    try:
+                        fut.result(timeout=0.5)
+                    except Exception:
+                        pass
                 except RuntimeError:
                     pass
+        if autocommit_conn is not None:
             try:
                 pgconn = getattr(autocommit_conn, "pgconn", None)
                 if pgconn is not None:
                     pgconn.finish()
             except Exception:
                 pass
+            if loop is not None and not loop.is_closed():
+                try:
+                    asyncio.run_coroutine_threadsafe(autocommit_conn.close(), loop)
+                except RuntimeError:
+                    pass
 
     async def notify(self, channel: str, payload: str = "") -> None:
         """Send a ``NOTIFY`` to *channel* with optional *payload*.
