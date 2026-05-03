@@ -30,7 +30,14 @@ import dorm
 
 def _configure(backend: str) -> None:
     if backend == "sqlite":
-        path = tempfile.mktemp(suffix=".db")
+        # ``mkstemp`` returns (fd, path); close the fd immediately so
+        # SQLite can open the file itself. ``mktemp`` is deprecated
+        # because of the open-the-file-yourself race; we don't care
+        # for a throw-away bench DB but use the modern API anyway.
+        import os
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         dorm.configure(
             DATABASES={"default": {"ENGINE": "sqlite", "NAME": path}},
             INSTALLED_APPS=["bench.scenarios"],

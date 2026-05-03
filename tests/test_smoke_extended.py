@@ -561,11 +561,20 @@ def test_qs_cache_invalidates_on_save():
 
 
 def test_encrypted_field_key_rotation_reads_old_ciphertext():
-    """Insert with key A, rotate to ``[B, A]``, decrypt — the old
-    ciphertext must still be readable. Insert with the new
-    primary key B; the original A-encrypted row stays decryptable."""
+    """Insert with key A, rotate to ``[B, A]``, decrypt — old
+    ciphertext must remain readable.
+
+    Settings is process-wide; under ``pytest -n N`` other encrypted
+    tests share the same worker. Use ``dorm.configure`` (the public
+    API that backs ``_explicit_settings`` consistently) and reset
+    via ``configure(KEY="", KEYS=[])`` in finally — same shape
+    ``test_v2_8_encrypted`` uses, so neighbour tests that re-call
+    ``configure(KEY=…)`` see a clean slate.
+    """
     pytest.importorskip("cryptography")
-    from dorm.conf import settings
+    import base64
+
+    import dorm as _dorm_mod
     from dorm.contrib.encrypted import EncryptedCharField
     from dorm.db.connection import get_connection
 
@@ -582,25 +591,10 @@ def test_encrypted_field_key_rotation_reads_old_ciphertext():
         f'CREATE TABLE "smoke_rot" ({pk}, "body" VARCHAR(200) NOT NULL)'
     )
 
-    key_a = b"A" * 32
-    key_b = b"B" * 32
-
-    # Snapshot prior settings so the rotation doesn't leak into
-    # downstream tests (``test_v2_8_encrypted`` shares the same
-    # process-wide Settings singleton).
-    prev_key = settings._explicit_settings.intersection({"FIELD_ENCRYPTION_KEY"})
-    prev_keys = settings._explicit_settings.intersection({"FIELD_ENCRYPTION_KEYS"})
-    prev_key_val = (
-        settings.FIELD_ENCRYPTION_KEY if "FIELD_ENCRYPTION_KEY" in prev_key else None
-    )
-    prev_keys_val = (
-        settings.FIELD_ENCRYPTION_KEYS if "FIELD_ENCRYPTION_KEYS" in prev_keys else None
-    )
-
-    settings.FIELD_ENCRYPTION_KEY = key_a  # ty:ignore[invalid-assignment]
-    if "FIELD_ENCRYPTION_KEYS" in settings._explicit_settings:
-        delattr(settings, "FIELD_ENCRYPTION_KEYS")
-        settings._explicit_settings.discard("FIELD_ENCRYPTION_KEYS")
+    # Use base64-encoded 32-byte AES keys via ``dorm.configure`` so
+    # the key shape matches what ``test_v2_8_encrypted`` uses.
+    key_a = base64.b64encode(b"\x07" * 32).decode("ascii")
+    key_b = base64.b64encode(b"\x08" * 32).decode("ascii")
 
     class Sec(dorm.Model):
         body = EncryptedCharField(max_length=200)
@@ -609,14 +603,14 @@ def test_encrypted_field_key_rotation_reads_old_ciphertext():
             db_table = "smoke_rot"
             app_label = "smoke_rot"
 
+    _dorm_mod.configure(FIELD_ENCRYPTION_KEY=key_a, FIELD_ENCRYPTION_KEYS=[])
     try:
         s = Sec.objects.create(body="encrypted-with-A")
 
-        settings.FIELD_ENCRYPTION_KEYS = [key_b, key_a]
-        from dorm.contrib import encrypted as enc_mod
-
-        if hasattr(enc_mod, "_reset_cipher_cache"):
-            enc_mod._reset_cipher_cache()  # type: ignore[attr-defined]
+        _dorm_mod.configure(
+            FIELD_ENCRYPTION_KEYS=[key_b, key_a],
+            FIELD_ENCRYPTION_KEY="",
+        )
 
         fresh = Sec.objects.get(id=s.id)  # ty:ignore[unresolved-attribute]
         try:
@@ -625,23 +619,13 @@ def test_encrypted_field_key_rotation_reads_old_ciphertext():
             pytest.skip(f"key rotation not supported: {exc}")
         assert body == "encrypted-with-A"
     finally:
-        # Restore prior settings so other tests aren't poisoned.
-        if prev_key_val is None:
-            if "FIELD_ENCRYPTION_KEY" in settings._explicit_settings:
-                delattr(settings, "FIELD_ENCRYPTION_KEY")
-                settings._explicit_settings.discard("FIELD_ENCRYPTION_KEY")
-        else:
-            settings.FIELD_ENCRYPTION_KEY = prev_key_val
-        if prev_keys_val is None:
-            if "FIELD_ENCRYPTION_KEYS" in settings._explicit_settings:
-                delattr(settings, "FIELD_ENCRYPTION_KEYS")
-                settings._explicit_settings.discard("FIELD_ENCRYPTION_KEYS")
-        else:
-            settings.FIELD_ENCRYPTION_KEYS = prev_keys_val
-        from dorm.contrib import encrypted as enc_mod_cleanup
-
-        if hasattr(enc_mod_cleanup, "_reset_cipher_cache"):
-            enc_mod_cleanup._reset_cipher_cache()  # type: ignore[attr-defined]
+        # Reset to the same shape ``test_v2_8_encrypted`` leaves at
+        # the end of its rotation test — both names present, both
+        # empty — so any neighbour test calling
+        # ``dorm.configure(FIELD_ENCRYPTION_KEY=...)`` afterwards
+        # sees a falsy ``FIELD_ENCRYPTION_KEYS`` list and falls
+        # through to the single-key path.
+        _dorm_mod.configure(FIELD_ENCRYPTION_KEY="", FIELD_ENCRYPTION_KEYS=[])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
