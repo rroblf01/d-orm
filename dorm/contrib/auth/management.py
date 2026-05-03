@@ -52,10 +52,18 @@ def sync_permissions(*, registry: dict | None = None) -> int:
 
     seen_codenames: set[str] = set()
     desired: list[tuple[str, str]] = []
-    for key, model_cls in registry.items():
-        if "." in key:
-            # Aliased entries duplicate concrete-model entries.
+    # Walk the registry by *class identity* to dedup any aliased
+    # entries (the global ``_model_registry`` stores both bare
+    # ``"User"`` and qualified ``"auth.User"`` keys pointing at the
+    # same class). When the caller passes a custom registry shape
+    # — e.g. only the FQN keys — that's also handled by the
+    # ``id(model_cls)`` dedup below, since each class instance is
+    # registered once.
+    seen_classes: set[int] = set()
+    for _key, model_cls in registry.items():
+        if id(model_cls) in seen_classes:
             continue
+        seen_classes.add(id(model_cls))
         meta = getattr(model_cls, "_meta", None)
         if meta is None:
             continue

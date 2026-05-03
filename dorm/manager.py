@@ -148,6 +148,12 @@ class BaseManager(Generic[_T]):
         """Read a single row by primary key, going through the cache
         layer first.
 
+        Calling ``cache_get`` lazy-attaches the queryset-cache
+        invalidation handlers (``post_save`` / ``post_delete`` ➜
+        ``bump_model_cache_version``) — without this step, a
+        subsequent ``Model.save()`` would NOT bump the per-model
+        version and the row cache would return the stale snapshot.
+
         Lookup flow:
 
         1. Build a cache key namespaced by the model's app/name and
@@ -174,6 +180,7 @@ class BaseManager(Generic[_T]):
             sign_payload,
             verify_payload,
         )
+        from .cache.invalidation import ensure_signals_connected
         from .exceptions import ImproperlyConfigured
         import pickle
 
@@ -182,6 +189,9 @@ class BaseManager(Generic[_T]):
             cache = get_cache(using)
         except ImproperlyConfigured:
             return self.get(pk=pk)
+        # Wire up the post_save / post_delete invalidation hooks
+        # the first time anyone uses the cache. Idempotent.
+        ensure_signals_connected()
 
         version = model_cache_version(self.model)
         key = f"dormrow:{model_cache_namespace(self.model)}:v{version}:{pk}"
@@ -234,6 +244,7 @@ class BaseManager(Generic[_T]):
             sign_payload,
             verify_payload,
         )
+        from .cache.invalidation import ensure_signals_connected
         from .exceptions import ImproperlyConfigured
         import pickle
 
@@ -244,6 +255,7 @@ class BaseManager(Generic[_T]):
             cache = get_cache(using)
         except ImproperlyConfigured:
             return {obj.pk: obj for obj in self.filter(pk__in=pks)}
+        ensure_signals_connected()
 
         version = model_cache_version(self.model)
         ns = model_cache_namespace(self.model)
@@ -298,6 +310,7 @@ class BaseManager(Generic[_T]):
             sign_payload,
             verify_payload,
         )
+        from .cache.invalidation import ensure_signals_connected
         from .exceptions import ImproperlyConfigured
         import pickle
 
@@ -306,6 +319,7 @@ class BaseManager(Generic[_T]):
             cache = get_cache(using)
         except ImproperlyConfigured:
             return await self.aget(pk=pk)
+        ensure_signals_connected()
 
         version = model_cache_version(self.model)
         key = f"dormrow:{model_cache_namespace(self.model)}:v{version}:{pk}"
@@ -349,6 +363,7 @@ class BaseManager(Generic[_T]):
             sign_payload,
             verify_payload,
         )
+        from .cache.invalidation import ensure_signals_connected
         from .exceptions import ImproperlyConfigured
         import pickle
 
@@ -362,6 +377,7 @@ class BaseManager(Generic[_T]):
                 obj.pk: obj
                 async for obj in self.filter(pk__in=pks).aiterator()
             }
+        ensure_signals_connected()
 
         version = model_cache_version(self.model)
         ns = model_cache_namespace(self.model)

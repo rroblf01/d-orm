@@ -93,6 +93,40 @@ def _find_migrations_dir(app_module: str) -> Path:
     return base / "migrations"
 
 
+def _resolve_app_label(installed_app: str) -> str:
+    """Return the actual ``Meta.app_label`` declared by the models of
+    *installed_app*, or *installed_app* itself when no override.
+
+    Why: contrib apps (e.g. ``dorm.contrib.auth``) live at a nested
+    dotted path but declare a short ``app_label = "auth"`` so their
+    db_table names stay clean. INSTALLED_APPS holds the dotted path,
+    but ``ProjectState.from_apps`` / loader / executor / recorder all
+    key by the actual ``app_label``. Without this resolver,
+    ``makemigrations`` walks the registry looking for models tagged
+    ``"dorm.contrib.auth"`` and finds none.
+
+    Resolution rule: a model belongs to *installed_app* when its
+    ``__module__`` equals or descends from *installed_app*. If every
+    such model agrees on a single ``app_label``, return it; otherwise
+    fall back to *installed_app* (ambiguous → user's package path is
+    the safe default).
+    """
+    from .models import _model_registry
+
+    candidates: set[str] = set()
+    for key, model_cls in _model_registry.items():
+        if "." in key:
+            continue  # skip aliased entries
+        mod = getattr(model_cls, "__module__", "")
+        if mod == installed_app or mod.startswith(installed_app + "."):
+            label = getattr(model_cls._meta, "app_label", "") or ""
+            if label:
+                candidates.add(label)
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return installed_app
+
+
 def _next_migration_number(mig_dir: Path) -> int:
     existing = list(mig_dir.glob("*.py")) if mig_dir.exists() else []
     numbers = []
@@ -124,7 +158,9 @@ def cmd_makemigrations(args):
             mig_dir = _find_migrations_dir(app)
             next_num = _next_migration_number(mig_dir)
             name = args.name or "custom"
-            path = write_empty_migration(app, mig_dir, next_num, name=name)
+            path = write_empty_migration(
+                _resolve_app_label(app), mig_dir, next_num, name=name
+            )
             print(f"  Created empty migration: {path}")
         return
 
@@ -143,7 +179,9 @@ def cmd_makemigrations(args):
             mig_dir = _find_migrations_dir(app)
             next_num = _next_migration_number(mig_dir)
             name = args.name or "enable_pgvector"
-            path = write_pgvector_extension_migration(app, mig_dir, next_num, name=name)
+            path = write_pgvector_extension_migration(
+                _resolve_app_label(app), mig_dir, next_num, name=name
+            )
             print(f"  Created pgvector extension migration: {path}")
         return
 
@@ -158,27 +196,28 @@ def cmd_makemigrations(args):
 
     for app in apps:
         print(f"Detecting changes for '{app}'...")
+        app_label = _resolve_app_label(app)
         conn = get_connection()
         loader = MigrationLoader(conn)
         mig_dir = _find_migrations_dir(app)
-        loader.load(mig_dir, app)
+        loader.load(mig_dir, app_label)
 
         # from_state = state described by all migration files on disk
-        from_state = loader.get_migration_state(app, all_migrations=True)
+        from_state = loader.get_migration_state(app_label, all_migrations=True)
 
         # to_state = current model definitions
-        to_state = ProjectState.from_apps(app_label=app)
+        to_state = ProjectState.from_apps(app_label=app_label)
 
         detector = MigrationAutodetector(from_state, to_state)
-        changes = detector.changes(app_label=app)
+        changes = detector.changes(app_label=app_label)
 
-        if app not in changes or not changes[app]:
+        if app_label not in changes or not changes[app_label]:
             print(f"  No changes detected for '{app}'.")
             continue
 
         next_num = _next_migration_number(mig_dir)
-        ops = changes[app]
-        path = write_migration(app, mig_dir, next_num, ops)
+        ops = changes[app_label]
+        path = write_migration(app_label, mig_dir, next_num, ops)
         print(f"  Created migration: {path}")
 
 
@@ -191,7 +230,8 @@ def cmd_squashmigrations(args):
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
-    app_label = args.app_label
+    app_arg = args.app_label
+    app_label = _resolve_app_label(app_arg)
     start = int(args.start_migration)
     end = int(args.end_migration)
     squashed_name = args.squashed_name or "squashed"
@@ -201,9 +241,9 @@ def cmd_squashmigrations(args):
     from .migrations.writer import write_squashed_migration
     from .db.connection import get_connection
 
-    mig_dir = _find_migrations_dir(app_label)
+    mig_dir = _find_migrations_dir(app_arg)
     if not mig_dir.exists():
-        print(f"Error: no migrations directory found for '{app_label}'.")
+        print(f"Error: no migrations directory found for '{app_arg}'.")
         return
 
     conn = get_connection()
@@ -265,6 +305,7 @@ def cmd_migrate(args):
 
     for app in apps:
         mig_dir = _find_migrations_dir(app)
+        resolved_label = _resolve_app_label(app)
         if not mig_dir.exists():
             print(f"  No migrations directory for '{app}'. Run makemigrations first.")
             continue
@@ -273,7 +314,7 @@ def cmd_migrate(args):
                 print("  Error: --dry-run is not supported with a target.")
                 sys.exit(1)
             try:
-                executor.migrate_to(app, mig_dir, target)
+                executor.migrate_to(resolved_label, mig_dir, target)
             except ValueError as exc:
                 print(f"  Error: {exc}")
                 # Surface the failure through the CLI exit code so
@@ -283,7 +324,7 @@ def cmd_migrate(args):
                 sys.exit(1)
         else:
             captured = executor.migrate(
-                app, mig_dir,
+                resolved_label, mig_dir,
                 dry_run=dry_run, fake=fake, fake_initial=fake_initial,
             )
             if dry_run and captured:
@@ -303,6 +344,11 @@ def cmd_showmigrations(args):
     from .conf import settings
 
     installed_apps = settings.INSTALLED_APPS
+    # ``_load_apps`` populates the registry so ``_resolve_app_label``
+    # can map ``dorm.contrib.auth`` → ``auth``. Without it the resolver
+    # falls back to the dotted path and ``show_migrations`` looks under
+    # the wrong ``app_label`` in the recorder table.
+    _load_apps(installed_apps)
 
     from .migrations.executor import MigrationExecutor
     from .db.connection import get_connection
@@ -313,7 +359,7 @@ def cmd_showmigrations(args):
     apps = args.apps if args.apps else installed_apps
     for app in apps:
         mig_dir = _find_migrations_dir(app)
-        executor.show_migrations(app, mig_dir)
+        executor.show_migrations(_resolve_app_label(app), mig_dir)
 
 
 def cmd_sql(args):
@@ -410,10 +456,13 @@ def cmd_dbcheck(args):
     drift_found = False
 
     for app in apps_to_check:
+        resolved_label = _resolve_app_label(app)
         models = [
             m
             for label, m in _model_registry.items()
-            if "." not in label and m._meta.app_label == app and not m._meta.abstract
+            if "." not in label
+            and m._meta.app_label == resolved_label
+            and not m._meta.abstract
         ]
         if not models:
             continue

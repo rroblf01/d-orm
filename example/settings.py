@@ -9,4 +9,4 @@ DATABASES = {
     }
 }
 
-INSTALLED_APPS = ["example", "example.sales"]
+INSTALLED_APPS = ["example", "example.sales", "dorm.contrib.auth"]

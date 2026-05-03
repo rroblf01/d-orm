@@ -73,15 +73,27 @@ def _own_sticky_dict() -> dict[tuple[str, str], float]:
 def _mark_recent_write(model: Any) -> None:
     """Record a write through the router so subsequent reads of the
     same model in the same context return the primary alias for the
-    configured window. Cheap no-op when the window is zero."""
+    configured window. Cheap no-op when the window is zero.
+
+    Non-Model objects (raw ``object()`` instances passed by router-
+    inspection tests / tooling) are skipped — their ``_model_key``
+    derives from ``id()`` reuse, which would let address recycling
+    produce false-positive sticky hits across tests.
+    """
     window = _read_after_write_window()
     if window <= 0:
+        return
+    if getattr(model, "_meta", None) is None:
         return
     mapping = _own_sticky_dict()
     mapping[_model_key(model)] = _stickytime.monotonic() + window
 
 
 def _is_sticky(model: Any) -> bool:
+    if getattr(model, "_meta", None) is None:
+        # Symmetric with ``_mark_recent_write``: only Model classes
+        # were ever registered, so a non-Model lookup can't match.
+        return False
     key = _model_key(model)
     _owner, mapping = _sticky_until.get()
     expires = mapping.get(key)

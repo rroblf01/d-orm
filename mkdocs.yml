@@ -78,6 +78,14 @@ plugins:
             Pydantic interop: Interop con Pydantic
             pgvector: pgvector
             Connection / health: Conexión y health-check
+            Auth (User / Group / tokens): Auth (User / Group / tokens)
+            Async-call guard: Async-call guard
+            Field encryption: Cifrado de campos
+            Prometheus metrics: Métricas Prometheus
+            Observability collectors: Colectores de observabilidad
+            Multi-tenant: Multi-tenant
+            Cache backends: Backends de caché
+            Migration linter: Linter de migraciones
   - mkdocstrings:
       handlers:
         python:
@@ -118,6 +126,14 @@ nav:
       - Pydantic interop: api/pydantic.md
       - pgvector: api/pgvector.md
       - Connection / health: api/connection.md
+      - Auth (User / Group / tokens): api/auth.md
+      - Async-call guard: api/asyncguard.md
+      - Field encryption: api/encrypted.md
+      - Prometheus metrics: api/prometheus.md
+      - Observability collectors: api/observability.md
+      - Multi-tenant: api/tenants.md
+      - Cache backends: api/cache.md
+      - Migration linter: api/migrations_lint.md
 
 markdown_extensions:
   - admonition

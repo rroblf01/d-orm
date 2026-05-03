@@ -6,7 +6,13 @@ readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["orm", "database", "django", "async", "sql"]
+keywords = [
+    "orm", "database", "django", "async", "sql",
+    "postgresql", "sqlite", "libsql", "turso", "mysql", "mariadb",
+    "vector", "pgvector", "embeddings",
+    "fastapi", "litestar", "asgi",
+    "migrations", "auth", "tenants",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -151,7 +157,13 @@ docs = [
 # package. Stays optional because the hot ORM path never imports
 # ``cryptography``; only ``dorm.contrib.encrypted`` does.
 encrypted = ["cryptography>=42.0"]
-all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted]"]
+# MySQL / MariaDB scaffold ships in 3.0 — full backend lands in
+# v3.1. Empty extra keeps ``pip install 'djanorm[mysql]'`` working
+# as a forward-compatible pin: the install succeeds today, picks up
+# real driver pins (``pymysql`` + ``asyncmy``) on the v3.1 bump
+# without changing user requirements files.
+mysql = []
+all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted,mysql]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"

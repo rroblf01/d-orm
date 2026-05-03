@@ -609,7 +609,7 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'dev'", specifier = ">=1.43.1" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.43.1" },
     { name = "cryptography", marker = "extra == 'encrypted'", specifier = ">=42.0" },
-    { name = "djanorm", extras = ["dev", "sqlite", "postgresql", "libsql", "redis", "pydantic", "docs", "otel", "s3", "image", "pgvector", "sqlite-vec", "encrypted"], marker = "extra == 'all'" },
+    { name = "djanorm", extras = ["dev", "sqlite", "postgresql", "libsql", "redis", "pydantic", "docs", "otel", "s3", "image", "pgvector", "sqlite-vec", "encrypted", "mysql"], marker = "extra == 'all'" },
     { name = "djanorm", extras = ["pgvector", "sqlite-vec"], marker = "extra == 'vector'" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -639,7 +639,7 @@ requires-dist = [
     { name = "testcontainers", extras = ["postgres", "minio"], marker = "extra == 'dev'", specifier = ">=4.14.2" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.33" },
 ]
-provides-extras = ["dev", "otel", "sqlite", "postgresql", "s3", "image", "pydantic", "pgvector", "sqlite-vec", "vector", "libsql", "redis", "docs", "encrypted", "all"]
+provides-extras = ["dev", "otel", "sqlite", "postgresql", "s3", "image", "pydantic", "pgvector", "sqlite-vec", "vector", "libsql", "redis", "docs", "encrypted", "mysql", "all"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "fakeredis", specifier = ">=2.35.1" }]
