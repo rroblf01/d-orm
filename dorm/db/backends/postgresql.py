@@ -933,7 +933,19 @@ class PostgreSQLAsyncDatabaseWrapper:
                     try:
                         fut.result(timeout=0.5)
                     except Exception:
-                        pass
+                        # Timeout / loop busy — cancel the future so the
+                        # backing Task doesn't keep the pool alive after
+                        # this function returns. Without the explicit
+                        # ``cancel()``, the Task stays pending on the
+                        # loop, holds a strong reference to ``pool``,
+                        # and the GC eventually finalises the pool on
+                        # an inconsistent loop state under
+                        # ``pytest -n N`` on Python 3.14 (observed
+                        # SIGSEGV taking the xdist worker down).
+                        try:
+                            fut.cancel()
+                        except Exception:
+                            pass
                 except RuntimeError:
                     pass
         if autocommit_conn is not None:
@@ -945,7 +957,16 @@ class PostgreSQLAsyncDatabaseWrapper:
                 pass
             if loop is not None and not loop.is_closed():
                 try:
-                    asyncio.run_coroutine_threadsafe(autocommit_conn.close(), loop)
+                    fut2 = asyncio.run_coroutine_threadsafe(
+                        autocommit_conn.close(), loop
+                    )
+                    try:
+                        fut2.result(timeout=0.5)
+                    except Exception:
+                        try:
+                            fut2.cancel()
+                        except Exception:
+                            pass
                 except RuntimeError:
                     pass
 

@@ -409,7 +409,20 @@ def configure_dorm(db_config):
 
 @pytest.fixture(autouse=True)
 def clean_db(configure_dorm):
-    """Drop and recreate test tables before each test."""
+    """Drop and recreate test tables before each test.
+
+    Per-test teardown also force-closes any async PG / async SQLite pool
+    that the test opened. Without this, async pools live until the
+    *next* test calls ``reset_connections()`` — and on Python 3.14 +
+    ``psycopg_pool``, the GC sometimes reaches the lingering pool
+    BEFORE the next test starts, runs ``__del__`` against an already-
+    closing session loop, and takes the xdist worker down with a
+    SIGSEGV.
+
+    The yield-based shape gives us the post-test hook we need: drain
+    every async pool's libpq sockets synchronously so ``__del__`` is
+    a no-op by the time GC reaches it.
+    """
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
 
@@ -456,6 +469,24 @@ def clean_db(configure_dorm):
         f'  "tag_id" BIGINT NOT NULL REFERENCES "tags"("id")\n'
         f")"
     )
+
+    yield
+
+    # Post-test teardown: force-close every async wrapper opened by the
+    # test. Without this, an async pool can survive into the next test;
+    # on Python 3.14 the GC sometimes reaches it BEFORE
+    # ``reset_connections`` does, finalises against a session loop in an
+    # inconsistent state, and SIGSEGVs the xdist worker.
+    from dorm.db.connection import _async_connections
+
+    for async_conn in list(_async_connections.values()):
+        force = getattr(async_conn, "force_close_sync", None)
+        if force is not None:
+            try:
+                force()
+            except Exception:
+                pass
+    _async_connections.clear()
 
 
 @pytest.fixture
