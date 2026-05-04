@@ -444,9 +444,14 @@ class BaseManager(Generic[_T]):
         return self.get_queryset().get_or_create(defaults=defaults, **kwargs)
 
     def update_or_create(
-        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+        self,
+        defaults: dict[str, Any] | None = None,
+        create_defaults: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> tuple[_T, bool]:
-        return self.get_queryset().update_or_create(defaults=defaults, **kwargs)
+        return self.get_queryset().update_or_create(
+            defaults=defaults, create_defaults=create_defaults, **kwargs
+        )
 
     def update(self, **kwargs: Any) -> int:
         return self.get_queryset().update(**kwargs)
@@ -502,6 +507,17 @@ class BaseManager(Generic[_T]):
     def aiterator(self, chunk_size: int | None = None) -> AsyncIterator[_T]:
         return self.get_queryset().aiterator(chunk_size)
 
+    def explain(
+        self,
+        *,
+        analyze: bool = False,
+        format: str | None = None,
+        verbose: bool = False,
+    ) -> str:
+        return self.get_queryset().explain(
+            analyze=analyze, format=format, verbose=verbose
+        )
+
     # ── Async proxy methods ───────────────────────────────────────────────────
 
     async def avalues(self, *fields: str) -> list[dict[str, Any]]:
@@ -529,9 +545,14 @@ class BaseManager(Generic[_T]):
         return await self.get_queryset().aget_or_create(defaults=defaults, **kwargs)
 
     async def aupdate_or_create(
-        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+        self,
+        defaults: dict[str, Any] | None = None,
+        create_defaults: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> tuple[_T, bool]:
-        return await self.get_queryset().aupdate_or_create(defaults=defaults, **kwargs)
+        return await self.get_queryset().aupdate_or_create(
+            defaults=defaults, create_defaults=create_defaults, **kwargs
+        )
 
     async def aupdate(self, **kwargs: Any) -> int:
         return await self.get_queryset().aupdate(**kwargs)
@@ -582,6 +603,23 @@ class BaseManager(Generic[_T]):
 
     async def aaggregate(self, **kwargs: Any) -> dict[str, Any]:
         return await self.get_queryset().aaggregate(**kwargs)
+
+    async def aexplain(
+        self,
+        *,
+        analyze: bool = False,
+        format: str | None = None,
+        verbose: bool = False,
+    ) -> str:
+        return await self.get_queryset().aexplain(
+            analyze=analyze, format=format, verbose=verbose
+        )
+
+    async def adates(self, field: str, kind: str, order: str = "ASC") -> list:
+        return await self.get_queryset().adates(field, kind, order)
+
+    async def adatetimes(self, field: str, kind: str, order: str = "ASC") -> list:
+        return await self.get_queryset().adatetimes(field, kind, order)
 
     def raw(self, sql: str, params: list[Any] | None = None) -> "RawQuerySet[_T]":
         from .queryset import RawQuerySet

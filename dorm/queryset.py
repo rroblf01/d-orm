@@ -761,6 +761,95 @@ class QuerySet(Generic[_T]):
         seen.sort(reverse=(order.upper() == "DESC"))
         return seen
 
+    async def adates(
+        self, field: str, kind: str, order: str = "ASC"
+    ) -> list:
+        """Async counterpart of :meth:`dates`. Same Python-side
+        truncation + de-duplication; the only async work is the
+        underlying ``avalues_list(...)`` round-trip."""
+        import datetime as _dt
+
+        if kind not in ("day", "week", "month", "year"):
+            raise ValueError(
+                f"adates() kind must be one of "
+                f"['day', 'week', 'month', 'year'], got {kind!r}."
+            )
+        if order.upper() not in ("ASC", "DESC"):
+            raise ValueError("adates() order must be 'ASC' or 'DESC'.")
+
+        def _trunc(value: Any) -> Any:
+            if isinstance(value, _dt.datetime):
+                value = value.date()
+            if not isinstance(value, _dt.date):
+                return value
+            if kind == "day":
+                return value
+            if kind == "week":
+                return value - _dt.timedelta(days=value.weekday())
+            if kind == "month":
+                return value.replace(day=1)
+            return value.replace(month=1, day=1)
+
+        seen: list = []
+        seen_set: set = set()
+        for raw in await self.avalues_list(field, flat=True):
+            if raw is None:
+                continue
+            truncated = _trunc(raw)
+            if truncated in seen_set:
+                continue
+            seen_set.add(truncated)
+            seen.append(truncated)
+        seen.sort(reverse=(order.upper() == "DESC"))
+        return seen
+
+    async def adatetimes(
+        self, field: str, kind: str, order: str = "ASC"
+    ) -> list:
+        """Async counterpart of :meth:`datetimes`."""
+        import datetime as _dt
+
+        kinds = {"second", "minute", "hour", "day", "week", "month", "year"}
+        if kind not in kinds:
+            raise ValueError(
+                f"adatetimes() kind must be one of {sorted(kinds)}, got {kind!r}."
+            )
+        if order.upper() not in ("ASC", "DESC"):
+            raise ValueError("adatetimes() order must be 'ASC' or 'DESC'.")
+
+        def _trunc(value: Any) -> Any:
+            if isinstance(value, _dt.date) and not isinstance(value, _dt.datetime):
+                value = _dt.datetime.combine(value, _dt.time())
+            if not isinstance(value, _dt.datetime):
+                return value
+            if kind == "second":
+                return value.replace(microsecond=0)
+            if kind == "minute":
+                return value.replace(second=0, microsecond=0)
+            if kind == "hour":
+                return value.replace(minute=0, second=0, microsecond=0)
+            base = value.replace(hour=0, minute=0, second=0, microsecond=0)
+            if kind == "day":
+                return base
+            if kind == "week":
+                return base - _dt.timedelta(days=base.weekday())
+            if kind == "month":
+                return base.replace(day=1)
+            return base.replace(month=1, day=1)
+
+        seen: list = []
+        seen_set: set = set()
+        for raw in await self.avalues_list(field, flat=True):
+            if raw is None:
+                continue
+            truncated = _trunc(raw)
+            if truncated in seen_set:
+                continue
+            seen_set.add(truncated)
+            seen.append(truncated)
+        seen.sort(reverse=(order.upper() == "DESC"))
+        return seen
+
     def alias(self, **kwargs: Any) -> QuerySet[_T]:
         """Add named expressions usable in :meth:`filter`, :meth:`exclude`
         and :meth:`order_by` without including them in the ``SELECT`` list.
@@ -2057,42 +2146,85 @@ class QuerySet(Generic[_T]):
             self._do_prefetch_related(instances)
             yield from instances
 
-    def explain(self, *, analyze: bool = False) -> str:
+    def explain(
+        self,
+        *,
+        analyze: bool = False,
+        format: str | None = None,
+        verbose: bool = False,
+    ) -> str:
         """Return the database's query plan for this queryset.
 
         On PostgreSQL, ``analyze=True`` runs the query and includes
-        actual timing / row counts (``EXPLAIN (ANALYZE TRUE, BUFFERS
-        TRUE)``). On SQLite, ``EXPLAIN QUERY PLAN`` is used; the
-        ``analyze`` flag is ignored (SQLite has no equivalent).
+        actual timing / row counts (``ANALYZE TRUE, BUFFERS TRUE``).
+        ``format`` selects the EXPLAIN output dialect — ``"text"``
+        (default), ``"json"``, ``"yaml"``, ``"xml"``. ``verbose=True``
+        adds the ``VERBOSE`` flag, surfacing fully-qualified relation
+        names + output column lists. On SQLite, ``EXPLAIN QUERY PLAN``
+        is used; ``analyze`` / ``format`` / ``verbose`` are ignored
+        (SQLite has no equivalents).
 
         Useful for diagnosing slow production queries::
 
             slow_qs = Author.objects.filter(age__gte=18).select_related("publisher")
             print(slow_qs.explain(analyze=True))
+            print(slow_qs.explain(format="json"))     # for tooling
         """
         connection = self._get_connection()
         query, _, _, _, _ = self._iter_setup()
         sql, params = query.as_select(connection)
-        vendor = getattr(connection, "vendor", "sqlite")
-        if vendor == "postgresql":
-            prefix = "EXPLAIN (ANALYZE TRUE, BUFFERS TRUE)" if analyze else "EXPLAIN"
-        else:
-            prefix = "EXPLAIN QUERY PLAN"
+        prefix = self._build_explain_prefix(connection, analyze, format, verbose)
         rows = connection.execute(f"{prefix} {sql}", params)
         return "\n".join(_explain_row_to_str(r) for r in rows)
 
-    async def aexplain(self, *, analyze: bool = False) -> str:
+    async def aexplain(
+        self,
+        *,
+        analyze: bool = False,
+        format: str | None = None,
+        verbose: bool = False,
+    ) -> str:
         """Async counterpart of :meth:`explain`."""
         connection = self._get_async_connection()
         query, _, _, _, _ = self._iter_setup()
         sql, params = query.as_select(connection)
-        vendor = getattr(connection, "vendor", "sqlite")
-        if vendor == "postgresql":
-            prefix = "EXPLAIN (ANALYZE TRUE, BUFFERS TRUE)" if analyze else "EXPLAIN"
-        else:
-            prefix = "EXPLAIN QUERY PLAN"
+        prefix = self._build_explain_prefix(connection, analyze, format, verbose)
         rows = await connection.execute(f"{prefix} {sql}", params)
         return "\n".join(_explain_row_to_str(r) for r in rows)
+
+    @staticmethod
+    def _build_explain_prefix(
+        connection, analyze: bool, format: str | None, verbose: bool
+    ) -> str:
+        """Compose the ``EXPLAIN [(...)]`` prefix for *connection*'s vendor.
+
+        On PG, options go inside the ``(...)`` block: ``ANALYZE TRUE``,
+        ``BUFFERS TRUE`` (only when ANALYZE is on; otherwise PG warns),
+        ``VERBOSE TRUE``, ``FORMAT JSON|YAML|XML|TEXT``. On SQLite, the
+        kwargs are silently ignored — ``EXPLAIN QUERY PLAN`` doesn't
+        accept them.
+        """
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            return "EXPLAIN QUERY PLAN"
+        opts: list[str] = []
+        if analyze:
+            opts.append("ANALYZE TRUE")
+            opts.append("BUFFERS TRUE")
+        if verbose:
+            opts.append("VERBOSE TRUE")
+        if format is not None:
+            fmt = format.upper()
+            if fmt not in {"TEXT", "JSON", "YAML", "XML"}:
+                raise ValueError(
+                    f"explain(format=…): expected one of "
+                    "'text' / 'json' / 'yaml' / 'xml', got "
+                    f"{format!r}."
+                )
+            opts.append(f"FORMAT {fmt}")
+        if not opts:
+            return "EXPLAIN"
+        return f"EXPLAIN ({', '.join(opts)})"
 
     def iterator(self, chunk_size: int | None = None) -> Iterator[_T]:
         """Stream results one by one without populating the result cache.
@@ -2225,12 +2357,35 @@ class QuerySet(Generic[_T]):
                     return self.get(**kwargs), False
 
     def update_or_create(
-        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+        self,
+        defaults: dict[str, Any] | None = None,
+        create_defaults: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> tuple[_T, bool]:
+        """Look up an object; update it if found, otherwise create it.
+
+        ``defaults`` applies on the **update** branch when an existing
+        row matches *kwargs*. ``create_defaults`` applies on the
+        **create** branch when no row matches. Without
+        ``create_defaults`` (or with it ``None``), Django parity is
+        preserved: ``defaults`` applies on both branches, mirroring
+        the pre-3.3 behaviour.
+
+        ``create_defaults`` (added in Django 5.0) lets callers supply
+        a different value set for new rows than for updates — common
+        when a column has a server-managed default that should NOT
+        be overwritten on update (a ``created_at`` timestamp, for
+        example).
+        """
         from .transaction import atomic
         from .exceptions import IntegrityError
 
         defaults = defaults or {}
+        # ``None`` (vs empty dict) signals "fall back to defaults" —
+        # matches Django's contract so existing call sites keep working.
+        create_defaults_resolved: dict[str, Any] = (
+            dict(defaults) if create_defaults is None else dict(create_defaults)
+        )
         with atomic(using=self._db):
             try:
                 obj = self.get(**kwargs)
@@ -2240,7 +2395,7 @@ class QuerySet(Generic[_T]):
                 return obj, False
             except self.model.DoesNotExist:
                 params = dict(kwargs)
-                params.update(defaults)
+                params.update(create_defaults_resolved)
                 try:
                     return self.create(**params), True
                 except IntegrityError:
@@ -3073,12 +3228,20 @@ class QuerySet(Generic[_T]):
                     return await self.aget(**kwargs), False
 
     async def aupdate_or_create(
-        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+        self,
+        defaults: dict[str, Any] | None = None,
+        create_defaults: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> tuple[_T, bool]:
+        """Async counterpart of :meth:`update_or_create`. Same
+        ``defaults`` / ``create_defaults`` semantics."""
         from .transaction import aatomic
         from .exceptions import IntegrityError
 
         defaults = defaults or {}
+        create_defaults_resolved: dict[str, Any] = (
+            dict(defaults) if create_defaults is None else dict(create_defaults)
+        )
         async with aatomic(using=self._db):
             try:
                 obj = await self.aget(**kwargs)
@@ -3088,7 +3251,7 @@ class QuerySet(Generic[_T]):
                 return obj, False
             except self.model.DoesNotExist:
                 params = dict(kwargs)
-                params.update(defaults)
+                params.update(create_defaults_resolved)
                 try:
                     return await self.acreate(**params), True
                 except IntegrityError:

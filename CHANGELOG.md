@@ -10,9 +10,106 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Minor release. Closes the last Django-ORM parity gaps so dorm
 serves as a framework-agnostic drop-in replacement: filtered
-relations, named tuple rows, retrofit prefetching, and a
-``makemigrations --check`` CI gate. **No breaking changes vs 3.2**:
-every addition is opt-in or zero-cost when unused.
+relations, named tuple rows, retrofit prefetching, ``--check`` CI
+gate, ordered-set aggregates, schema editor, pool warmup, soft-
+delete cascade, and a sweep of async-parity additions.
+**No breaking changes vs 3.2**: every addition is opt-in or
+zero-cost when unused.
+
+### Added — `update_or_create(create_defaults=…)` (Django 5.0 parity)
+
+- New ``create_defaults`` kwarg on
+  :meth:`QuerySet.update_or_create` /
+  :meth:`QuerySet.aupdate_or_create` and the matching Manager
+  proxies. Applies on the **create** branch when no row matches
+  *kwargs*; ``defaults`` keeps applying on the **update** branch.
+  Without ``create_defaults``, ``defaults`` covers both branches
+  (pre-3.3 behaviour preserved).
+- Use case: a column with a server-managed default (a
+  ``created_at`` timestamp, a randomly-generated token) that
+  should not be re-set on every update_or_create call.
+
+### Added — ordered-set aggregates: `Mode`, `PercentileCont`, `PercentileDisc`
+
+- ``Mode("col")`` — most-frequent value in the group; ties go to
+  the first in order. PG only.
+- ``PercentileCont("col", fraction=0.95)`` — continuous percentile
+  with linear interpolation between adjacent values; ``fraction``
+  in ``[0.0, 1.0]``. Validation rejects out-of-range fractions
+  fast at the Python boundary.
+- ``PercentileDisc(...)`` — discrete percentile (returns one of
+  the actual values, no interpolation). Same args as
+  ``PercentileCont``.
+- Backed by a shared ``_OrderedSetAggregate`` base that emits the
+  PG ``FUNC(args) WITHIN GROUP (ORDER BY expr)`` shape uniformly.
+
+### Added — `StringAgg(order_by=...)`
+
+- New ``order_by`` kwarg on :class:`StringAgg`. Renders the
+  ``ORDER BY`` clause inside the aggregate so the joined string is
+  reproducible. Accepts a single column name with optional ``-``
+  prefix for descending order. Without ``order_by``, the aggregate
+  output order is unspecified — always pass it for reproducible
+  joined strings.
+
+### Added — `QuerySet.explain(format=, verbose=)` parity
+
+- ``format`` selects the EXPLAIN output dialect on PostgreSQL:
+  ``"text"`` (default), ``"json"``, ``"yaml"``, ``"xml"``. Useful
+  when piping plans through machine-readable tooling.
+- ``verbose=True`` adds ``VERBOSE TRUE``, surfacing fully-
+  qualified relation names and output column lists.
+- SQLite ignores both kwargs (no equivalent in
+  ``EXPLAIN QUERY PLAN``).
+
+### Added — `SchemaEditor` low-level DDL helper
+
+- New :class:`dorm.migrations.schema.SchemaEditor` exposes the
+  migration ops imperatively. Use for ad-hoc DDL outside a
+  migration file — REPL exploration, fixture loaders, schema-
+  drift repair jobs, ContentType backfills.
+- Methods: ``create_model(model_cls)``, ``delete_model(...)``,
+  ``add_field(...)``, ``remove_field(...)``, ``alter_field(...)``,
+  plus an ``execute(sql, params=)`` escape hatch for vendor-
+  specific DDL.
+- Behaviour matches the equivalent migration op exactly — same
+  SQL, same vendor branching — so the imperative path stays
+  consistent with the migration path.
+
+### Added — `dorm.contrib.pool_autoscale.warmup_pool`
+
+- New :func:`warmup_pool` pre-opens up to *target* connections so
+  the first request after process start doesn't pay connect-and-
+  handshake cost. Returns the count of connections actually
+  opened (capped at ``max_size``).
+- PostgreSQL only — psycopg-pool's ``check`` flag does roughly
+  the same on first checkout, but ``warmup_pool`` lets you front-
+  load it deterministically (FastAPI ``startup`` hook, AWS Lambda
+  init code). SQLite / MySQL return ``0`` (no shared pool).
+
+### Added — `SoftDeleteModel.delete(cascade=True)`
+
+- New ``cascade`` kwarg on :meth:`SoftDeleteModel.delete` /
+  :meth:`adelete`. Walks every reverse-FK / reverse-O2O
+  descriptor and soft-deletes the related rows whose source
+  model is itself a :class:`SoftDeleteModel`. Children whose
+  source isn't soft-delete-aware are skipped (a hard cascade
+  would contradict the "soft" promise).
+- Default stays opt-in (``cascade=False``) so existing call sites
+  keep their previous behaviour: soft-delete the parent only.
+
+### Added — async parity round (`adates`, `adatetimes`, `aexplain`)
+
+- :meth:`QuerySet.adates`, :meth:`QuerySet.adatetimes` —
+  awaitable counterparts of the sync helpers. Same Python-side
+  truncation logic; the only async work is the underlying
+  ``avalues_list`` round-trip.
+- :meth:`Manager.aexplain` — Manager-level proxy for the new
+  ``QuerySet.aexplain`` signature.
+- :meth:`Manager.explain` proxy added too — was missing from the
+  Manager surface before this revision.
+
+### Added — `FilteredRelation` — JOIN with a `Q` condition (Django parity)
 
 ### Added — `FilteredRelation` — JOIN with a `Q` condition (Django parity)
 

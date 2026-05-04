@@ -165,14 +165,20 @@ class Variance(Aggregate):
 
 
 class StringAgg(Aggregate):
-    """``STRING_AGG(expr, separator)`` — concatenate values within a
-    GROUP BY using *separator*. PostgreSQL only.
+    """``STRING_AGG(expr, separator [ORDER BY ...])`` — concatenate
+    values within a GROUP BY using *separator*. PostgreSQL only.
 
-    Example: list every author's books on one row::
+    Example: list every author's books on one row, alphabetically::
 
         Author.objects.annotate(
-            titles=StringAgg("books__title", separator=", ")
+            titles=StringAgg("books__title", separator=", ", order_by="books__title")
         )
+
+    *order_by* (3.3+) accepts a string column name, optionally
+    prefixed with ``-`` for DESC, and renders inside the
+    ``STRING_AGG`` call as ``ORDER BY <col>``. Without it the
+    aggregate output order is unspecified — for reproducible joined
+    strings, always pass ``order_by``.
     """
 
     function = "STRING_AGG"
@@ -185,8 +191,10 @@ class StringAgg(Aggregate):
         distinct: bool = False,
         filter: Any = None,
         output_field: Any = None,
+        order_by: str | None = None,
     ) -> None:
         self.separator = separator
+        self.order_by = order_by
         super().__init__(
             expression,
             distinct=distinct,
@@ -209,7 +217,26 @@ class StringAgg(Aggregate):
         if expr == "pk" and model is not None and model._meta.pk:
             expr = model._meta.pk.column
         col = f'"{table_alias}"."{expr}"' if table_alias else f'"{expr}"'
-        return f"STRING_AGG({distinct}{col}, %s)", [self.separator]
+        order_clause = ""
+        if self.order_by is not None:
+            ob = self.order_by
+            direction = "ASC"
+            if ob.startswith("-"):
+                ob = ob[1:]
+                direction = "DESC"
+            # Validate as identifier — splice into SQL is safe with
+            # the same shape Django uses for ``ordering = ['col']``.
+            from .conf import _validate_identifier
+
+            _validate_identifier(ob, kind="order_by column")
+            order_col = (
+                f'"{table_alias}"."{ob}"' if table_alias else f'"{ob}"'
+            )
+            order_clause = f" ORDER BY {order_col} {direction}"
+        return (
+            f"STRING_AGG({distinct}{col}, %s{order_clause})",
+            [self.separator],
+        )
 
 
 class ArrayAgg(Aggregate):
@@ -266,3 +293,108 @@ class BitAnd(Aggregate):
     notes as :class:`BitOr`."""
 
     function = "BIT_AND"
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Ordered-set aggregates (PostgreSQL only — MODE / PERCENTILE_*)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class _OrderedSetAggregate(Aggregate):
+    """Base for PostgreSQL ordered-set aggregates emitted as
+    ``FUNC(args) WITHIN GROUP (ORDER BY expr)``.
+
+    The aggregated *expression* lives inside the ``WITHIN GROUP``
+    clause, not as the function's positional argument — that's the
+    SQL distinction from a regular aggregate. Parameters that go in
+    the function call (e.g. the percentile fraction) are bound via
+    ``%s`` placeholders so callers can't smuggle expressions there.
+    """
+
+    function: str = ""
+
+    def __init__(
+        self,
+        expression: str,
+        *,
+        filter: Any = None,
+        output_field: Any = None,
+    ) -> None:
+        super().__init__(
+            expression, filter=filter, output_field=output_field
+        )
+
+    # Subclasses fill in the function-arg list (params bound at SQL time).
+    def _func_args(self) -> tuple[str, list]:
+        return "", []
+
+    def as_sql(
+        self,
+        table_alias: str | None = None,
+        *,
+        model: Any = None,
+        **kwargs: Any,
+    ) -> tuple[str, list]:
+        expr = self.expression
+        if expr == "pk" and model is not None and model._meta.pk:
+            expr = model._meta.pk.column
+        col = f'"{table_alias}"."{expr}"' if table_alias else f'"{expr}"'
+        args_sql, params = self._func_args()
+        return (
+            f"{self.function}({args_sql}) WITHIN GROUP (ORDER BY {col})",
+            params,
+        )
+
+
+class Mode(_OrderedSetAggregate):
+    """``MODE() WITHIN GROUP (ORDER BY expr)`` — most-frequent value
+    in the group. Ties resolve to the first one in the order.
+    PostgreSQL only.
+
+    Example: most-popular tag colour::
+
+        Tag.objects.aggregate(top_color=Mode("color"))
+    """
+
+    function = "MODE"
+
+
+class PercentileCont(_OrderedSetAggregate):
+    """``PERCENTILE_CONT(fraction) WITHIN GROUP (ORDER BY expr)`` —
+    *continuous* percentile (interpolates between adjacent values).
+    *fraction* in ``[0.0, 1.0]``. PostgreSQL only.
+
+    ``PercentileCont("response_ms", fraction=0.95)`` reads the p95
+    latency over a group.
+    """
+
+    function = "PERCENTILE_CONT"
+
+    def __init__(
+        self,
+        expression: str,
+        *,
+        fraction: float,
+        filter: Any = None,
+        output_field: Any = None,
+    ) -> None:
+        if not (0.0 <= fraction <= 1.0):
+            raise ValueError(
+                f"PercentileCont(fraction={fraction!r}): fraction must be "
+                "in [0.0, 1.0]."
+            )
+        self.fraction = fraction
+        super().__init__(
+            expression, filter=filter, output_field=output_field
+        )
+
+    def _func_args(self) -> tuple[str, list]:
+        return "%s", [self.fraction]
+
+
+class PercentileDisc(PercentileCont):
+    """``PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY expr)`` —
+    *discrete* percentile (returns one of the actual values, no
+    interpolation). Same args as :class:`PercentileCont`."""
+
+    function = "PERCENTILE_DISC"

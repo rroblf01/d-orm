@@ -202,4 +202,67 @@ def autoscale_pool(
     return current_min, new_max
 
 
-__all__ = ["PoolStats", "autoscale_pool", "read_pool_stats"]
+def warmup_pool(*, target: int | None = None, using: str = "default") -> int:
+    """Pre-open up to *target* connections so the first request after
+    process start doesn't pay connect-and-handshake cost.
+
+    Default *target* is the configured ``MIN_POOL_SIZE`` (or
+    ``min_size`` of the active pool, whichever is set). Returns the
+    number of connections actually opened — capped at the pool's
+    ``max_size``.
+
+    PostgreSQL only — psycopg-pool's ``check`` flag does roughly
+    the same on first checkout, but ``warmup_pool`` lets you front-
+    load it deterministically (e.g. inside a FastAPI ``startup``
+    hook so the first /health probe sees a hot pool). On
+    SQLite / MySQL, returns ``0`` (no shared pool to warm).
+    """
+    from ..db.connection import get_connection
+
+    conn = get_connection(using)
+    pool = getattr(conn, "_pool", None)
+    if pool is None:
+        # Try to materialise the pool. Some PG wrappers are lazy.
+        materialise = getattr(conn, "_get_pool", None)
+        if callable(materialise):
+            try:
+                materialise()
+            except Exception:
+                return 0
+            pool = getattr(conn, "_pool", None)
+    if pool is None:
+        return 0
+
+    stats = read_pool_stats(using)
+    if not stats.open:
+        return 0
+
+    n = target if target is not None else max(stats.min_size, 1)
+    n = min(n, stats.max_size if stats.max_size > 0 else n)
+    if n <= 0:
+        return 0
+
+    opened = 0
+    held: list = []
+    try:
+        for _ in range(n):
+            ctx = pool.connection()
+            try:
+                conn_handle = ctx.__enter__()
+            except Exception:
+                break
+            held.append((ctx, conn_handle))
+            opened += 1
+    finally:
+        # Release every checkout back to the pool. The connections
+        # stay open in the pool's idle deque — that's the warm path.
+        for ctx, _h in reversed(held):
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+    _log.info("warmup_pool(%s): pre-opened %d connection(s)", using, opened)
+    return opened
+
+
+__all__ = ["PoolStats", "autoscale_pool", "read_pool_stats", "warmup_pool"]

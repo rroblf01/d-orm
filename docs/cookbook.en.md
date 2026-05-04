@@ -259,6 +259,77 @@ async def _start_autoscale() -> None:
 `utilization`, `in_use`, `waiting`, etc. for dashboards. PG-only
 live resize (psycopg-pool); SQLite / MySQL no-op silently.
 
+### Pre-open the connection pool at startup (3.3+)
+
+Cold starts pay the connect-and-handshake cost on the first
+request. `warmup_pool` opens up to *target* connections eagerly so
+the first checkout is hot:
+
+```python
+import asyncio
+from dorm.contrib.pool_autoscale import warmup_pool
+
+
+@app.on_event("startup")
+async def _warmup():
+    n = warmup_pool(target=4)
+    print(f"pool warmed up: {n} connection(s) ready")
+```
+
+PostgreSQL only — the helper short-circuits on SQLite / MySQL
+(returns `0`).
+
+### Ad-hoc DDL via `SchemaEditor` (3.3+)
+
+For tooling that needs imperative DDL outside a migration file
+(REPL exploration, fixture loaders, drift-repair scripts):
+
+```python
+import dorm
+from dorm.db.connection import get_connection
+from dorm.migrations.schema import SchemaEditor
+
+
+with SchemaEditor(get_connection()) as se:
+    se.create_model(Article)
+    se.add_field(Article, "summary", dorm.TextField(null=True))
+    se.alter_field(Article, "title", dorm.CharField(max_length=400))
+```
+
+The editor delegates to the same migration ops the executor uses,
+so the imperative path produces identical SQL to a migration file
+running the same operation. Migrations remain the canonical way
+to evolve a schema (file-based history, recorder, dry-run, lint);
+`SchemaEditor` exists for the imperative cases that don't fit a
+migration cleanly.
+
+### Cascading soft delete (3.3+)
+
+`SoftDeleteModel.delete(cascade=True)` walks every reverse-FK
+relation whose source model is also a `SoftDeleteModel` and soft-
+deletes each child:
+
+```python
+from dorm.contrib.softdelete import SoftDeleteModel
+
+
+class Article(SoftDeleteModel):
+    title: str = dorm.CharField(max_length=200)
+
+
+class Comment(SoftDeleteModel):
+    article = dorm.ForeignKey(Article, on_delete=dorm.CASCADE, related_name="comments")
+    body: str = dorm.TextField()
+
+
+art = Article.objects.first()
+art.delete(cascade=True)        # soft-deletes art + its Comments
+```
+
+Children whose source model isn't a `SoftDeleteModel` are skipped
+— a hard cascade would contradict the "soft" promise. Wire it
+yourself when you need a mixed cascade.
+
 ### Async migration executor
 
 For boot-time migrations in async stacks (FastAPI startup,

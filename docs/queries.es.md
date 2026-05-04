@@ -235,6 +235,35 @@ authors = (
 # en el WHERE pero no se devuelve.
 ```
 
+### Agregados ordered-set (3.3+, solo PG)
+
+`Mode`, `PercentileCont`, `PercentileDisc` emiten la forma PG
+`FUNC(args) WITHIN GROUP (ORDER BY expr)` — útil para analítica
+con percentiles de latencia, categorías modales, etc.
+
+```python
+from dorm import Mode, PercentileCont, PercentileDisc
+
+
+# Color de tag más frecuente:
+Tag.objects.aggregate(top_color=Mode("color"))
+
+
+# p50 / p95 latencia, continuo (interpola entre muestras adyacentes):
+Request.objects.aggregate(
+    p50=PercentileCont("response_ms", fraction=0.5),
+    p95=PercentileCont("response_ms", fraction=0.95),
+)
+
+
+# Discreto — devuelve uno de los valores reales, sin interpolar:
+Request.objects.aggregate(p99=PercentileDisc("response_ms", fraction=0.99))
+```
+
+`fraction` se valida contra `[0.0, 1.0]` en la construcción, así un
+typo falla rápido en Python en lugar de generar errores opacos de
+PG a media query.
+
 ### Agregadas PostgreSQL (3.1+)
 
 ```python
@@ -245,6 +274,10 @@ from dorm import (
 
 # Colección String / Array / JSON
 Tag.objects.annotate(article_titles=StringAgg("articles__title", ", "))
+# 3.3+: order_by= para joined strings reproducibles
+Tag.objects.annotate(
+    article_titles=StringAgg("articles__title", ", ", order_by="articles__title"),
+)
 Tag.objects.annotate(article_ids=ArrayAgg("articles__id"))
 Tag.objects.annotate(payload=JSONBAgg("articles__id"))
 

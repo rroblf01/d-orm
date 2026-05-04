@@ -95,26 +95,98 @@ class SoftDeleteModel(Model):
     class Meta:
         abstract = True
 
-    def delete(self, using: str = "default", *, hard: bool = False) -> Any:
+    def delete(
+        self,
+        using: str = "default",
+        *,
+        hard: bool = False,
+        cascade: bool = False,
+    ) -> Any:
         """Mark this row as soft-deleted by setting ``deleted_at`` to
         ``utcnow()``. Pass ``hard=True`` to bypass the soft path and
         delete the row for real (e.g. GDPR purge).
+
+        ``cascade=True`` (3.3+) walks every reverse FK relation whose
+        source model is also a :class:`SoftDeleteModel` and soft-
+        deletes the related rows too. Use when you want a parent's
+        soft delete to imply soft-deletion of its children — opt-in
+        because the default soft path leaves children visible (the
+        per-row default of plain ``delete``).
         """
         if hard:
             return super().delete(using=using)
         if self.deleted_at is None:
             self.deleted_at = _dt.datetime.now(_dt.timezone.utc)
             self.save(using=using)
+            if cascade:
+                self._cascade_soft_delete(using=using)
         return 1, {f"{self._meta.app_label}.{type(self).__name__}": 1}
 
-    async def adelete(self, using: str = "default", *, hard: bool = False) -> Any:
+    async def adelete(
+        self,
+        using: str = "default",
+        *,
+        hard: bool = False,
+        cascade: bool = False,
+    ) -> Any:
         """Async counterpart of :meth:`delete`."""
         if hard:
             return await super().adelete(using=using)
         if self.deleted_at is None:
             self.deleted_at = _dt.datetime.now(_dt.timezone.utc)
             await self.asave(using=using)
+            if cascade:
+                await self._acascade_soft_delete(using=using)
         return 1, {f"{self._meta.app_label}.{type(self).__name__}": 1}
+
+    def _cascade_soft_delete(self, using: str = "default") -> None:
+        """Walk every reverse-FK and reverse-O2O descriptor on this
+        class and soft-delete each related row whose source model is
+        itself a :class:`SoftDeleteModel`. Foreign sources without
+        soft-delete support are skipped (a hard cascade would
+        contradict the "soft" promise; callers can wire that
+        manually if needed)."""
+        from ..related_managers import (
+            ReverseFKDescriptor,
+            ReverseOneToOneDescriptor,
+        )
+
+        cls = type(self)
+        for attr_name in dir(cls):
+            descriptor = getattr(cls, attr_name, None)
+            if not isinstance(
+                descriptor, (ReverseFKDescriptor, ReverseOneToOneDescriptor)
+            ):
+                continue
+            source_model = descriptor.source_model
+            if not issubclass(source_model, SoftDeleteModel):
+                continue
+            now = _dt.datetime.now(_dt.timezone.utc)
+            source_model.all_objects.filter(
+                **{descriptor.fk_field.name: self.pk, "deleted_at__isnull": True}
+            ).update(deleted_at=now)
+
+    async def _acascade_soft_delete(self, using: str = "default") -> None:
+        """Async counterpart of :meth:`_cascade_soft_delete`."""
+        from ..related_managers import (
+            ReverseFKDescriptor,
+            ReverseOneToOneDescriptor,
+        )
+
+        cls = type(self)
+        for attr_name in dir(cls):
+            descriptor = getattr(cls, attr_name, None)
+            if not isinstance(
+                descriptor, (ReverseFKDescriptor, ReverseOneToOneDescriptor)
+            ):
+                continue
+            source_model = descriptor.source_model
+            if not issubclass(source_model, SoftDeleteModel):
+                continue
+            now = _dt.datetime.now(_dt.timezone.utc)
+            await source_model.all_objects.filter(
+                **{descriptor.fk_field.name: self.pk, "deleted_at__isnull": True}
+            ).aupdate(deleted_at=now)
 
     def restore(self, using: str = "default") -> None:
         """Undo a previous soft delete by clearing ``deleted_at``. No-op

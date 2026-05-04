@@ -348,6 +348,36 @@ FR becomes a plain `LEFT OUTER JOIN` that always-matches, useful
 when you want the alias just to avoid duplicating the relation
 name in further chains.
 
+### Ordered-set aggregates (3.3+, PG only)
+
+`Mode`, `PercentileCont`, `PercentileDisc` emit the PostgreSQL
+`FUNC(args) WITHIN GROUP (ORDER BY expr)` shape — useful for
+analytics queries that need percentile latency, modal categories,
+etc.
+
+```python
+from dorm import Mode, PercentileCont, PercentileDisc
+
+
+# Most-frequent tag colour:
+Tag.objects.aggregate(top_color=Mode("color"))
+
+
+# p50 / p95 latency, continuous (interpolates between adjacent samples):
+Request.objects.aggregate(
+    p50=PercentileCont("response_ms", fraction=0.5),
+    p95=PercentileCont("response_ms", fraction=0.95),
+)
+
+
+# Discrete variant — returns one of the actual values, no interpolation:
+Request.objects.aggregate(p99=PercentileDisc("response_ms", fraction=0.99))
+```
+
+`fraction` is validated against `[0.0, 1.0]` at construction time
+so a typo fails fast at the Python boundary instead of producing
+opaque PG syntax errors mid-query.
+
 ### PostgreSQL aggregates (3.1+)
 
 ```python
@@ -358,6 +388,10 @@ from dorm import (
 
 # String / Array / JSON collection
 Tag.objects.annotate(article_titles=StringAgg("articles__title", ", "))
+# 3.3+: order_by= for reproducible joined strings
+Tag.objects.annotate(
+    article_titles=StringAgg("articles__title", ", ", order_by="articles__title"),
+)
 Tag.objects.annotate(article_ids=ArrayAgg("articles__id"))
 Tag.objects.annotate(payload=JSONBAgg("articles__id"))
 
