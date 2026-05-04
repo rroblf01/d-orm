@@ -44,15 +44,24 @@ class MigrationRecorder:
         self.connection = connection
 
     def ensure_table(self):
-        if not self.connection.table_exists(MIGRATIONS_TABLE):
-            vendor = getattr(self.connection, "vendor", "sqlite")
-            if vendor == "postgresql":
-                sql = CREATE_TABLE_SQL_PG
-            elif vendor == "mysql":
-                sql = CREATE_TABLE_SQL_MYSQL
-            else:
-                sql = CREATE_TABLE_SQL
-            self.connection.execute_script(sql)
+        # CREATE TABLE IF NOT EXISTS is already idempotent on every
+        # supported backend, so skip the prior ``table_exists`` probe.
+        # Reason: ``table_exists`` on PostgreSQL queries
+        # ``pg_tables.tablename`` *without* a schema filter — under
+        # per-tenant migration runs (where ``search_path`` is set to a
+        # tenant schema), it would report True because ``public`` already
+        # holds a ``dorm_migrations``, skip CREATE in the tenant schema,
+        # and the next ``SELECT`` from the recorder couldn't resolve the
+        # table. Running CREATE IF NOT EXISTS unconditionally lets each
+        # schema (default + every tenant) own its own recorder table.
+        vendor = getattr(self.connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            sql = CREATE_TABLE_SQL_PG
+        elif vendor == "mysql":
+            sql = CREATE_TABLE_SQL_MYSQL
+        else:
+            sql = CREATE_TABLE_SQL
+        self.connection.execute_script(sql)
 
     def applied_migrations(self) -> set[tuple[str, str]]:
         self.ensure_table()
