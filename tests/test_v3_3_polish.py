@@ -12,21 +12,18 @@
 
 from __future__ import annotations
 
-import datetime as _dt
 
 import pytest
 
 import dorm
 from dorm import (
-    FilteredRelation,
     Mode,
     PercentileCont,
     PercentileDisc,
-    Q,
     StringAgg,
 )
 from dorm.aggregates import _OrderedSetAggregate
-from tests.models import Author, Publisher
+from tests.models import Author
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,9 +149,9 @@ def test_percentile_disc_uses_disc_function_name():
 
 
 def test_string_agg_order_by_renders_clause():
-    sql, params = StringAgg(
-        "name", separator=", ", order_by="name"
-    ).as_sql(table_alias="t")
+    sql, params = StringAgg("name", separator=", ", order_by="name").as_sql(
+        table_alias="t"
+    )
     assert "ORDER BY" in sql
     assert '"t"."name"' in sql
     assert "ASC" in sql
@@ -162,9 +159,7 @@ def test_string_agg_order_by_renders_clause():
 
 
 def test_string_agg_order_by_desc_prefix():
-    sql, _ = StringAgg(
-        "name", separator=",", order_by="-name"
-    ).as_sql(table_alias="t")
+    sql, _ = StringAgg("name", separator=",", order_by="-name").as_sql(table_alias="t")
     assert "DESC" in sql
 
 
@@ -199,9 +194,7 @@ def test_schema_editor_creates_and_drops_table():
 
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
-    conn.execute_script(
-        f'DROP TABLE IF EXISTS "v3_3_schema_editor_adhoc"{cascade}'
-    )
+    conn.execute_script(f'DROP TABLE IF EXISTS "v3_3_schema_editor_adhoc"{cascade}')
     try:
         with SchemaEditor(conn) as se:
             se.create_model(_Adhoc)
@@ -211,9 +204,7 @@ def test_schema_editor_creates_and_drops_table():
             se.delete_model(_Adhoc)
         assert not conn.table_exists("v3_3_schema_editor_adhoc")
     finally:
-        conn.execute_script(
-            f'DROP TABLE IF EXISTS "v3_3_schema_editor_adhoc"{cascade}'
-        )
+        conn.execute_script(f'DROP TABLE IF EXISTS "v3_3_schema_editor_adhoc"{cascade}')
 
 
 def test_schema_editor_add_and_remove_field():
@@ -229,9 +220,7 @@ def test_schema_editor_add_and_remove_field():
 
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
-    conn.execute_script(
-        f'DROP TABLE IF EXISTS "v3_3_schema_editor_col"{cascade}'
-    )
+    conn.execute_script(f'DROP TABLE IF EXISTS "v3_3_schema_editor_col"{cascade}')
     try:
         with SchemaEditor(conn) as se:
             se.create_model(_AdhocCol)
@@ -244,9 +233,7 @@ def test_schema_editor_add_and_remove_field():
         cols = {c["name"] for c in conn.get_table_columns("v3_3_schema_editor_col")}
         assert "rev" not in cols
     finally:
-        conn.execute_script(
-            f'DROP TABLE IF EXISTS "v3_3_schema_editor_col"{cascade}'
-        )
+        conn.execute_script(f'DROP TABLE IF EXISTS "v3_3_schema_editor_col"{cascade}')
 
 
 def test_schema_editor_execute_arbitrary_ddl():
@@ -255,17 +242,13 @@ def test_schema_editor_execute_arbitrary_ddl():
 
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
-    conn.execute_script(
-        f'DROP TABLE IF EXISTS "v3_3_schema_editor_raw"{cascade}'
-    )
+    conn.execute_script(f'DROP TABLE IF EXISTS "v3_3_schema_editor_raw"{cascade}')
     try:
         with SchemaEditor(conn) as se:
             se.execute('CREATE TABLE "v3_3_schema_editor_raw" ("id" INTEGER)')
         assert conn.table_exists("v3_3_schema_editor_raw")
     finally:
-        conn.execute_script(
-            f'DROP TABLE IF EXISTS "v3_3_schema_editor_raw"{cascade}'
-        )
+        conn.execute_script(f'DROP TABLE IF EXISTS "v3_3_schema_editor_raw"{cascade}')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -317,7 +300,9 @@ def test_softdelete_cascade_marks_children():
             app_label = "v3_3_sd"
 
     class _SDChild(SoftDeleteModel):
-        parent = dorm.ForeignKey(_SDParent, on_delete=dorm.CASCADE, related_name="children")
+        parent = dorm.ForeignKey(
+            _SDParent, on_delete=dorm.CASCADE, related_name="children"
+        )
         label = dorm.CharField(max_length=20)
 
         class Meta:
@@ -341,8 +326,8 @@ def test_softdelete_cascade_marks_children():
 
     try:
         p = _SDParent.objects.create(name="parent")
-        c1 = _SDChild.objects.create(parent=p, label="c1")
-        c2 = _SDChild.objects.create(parent=p, label="c2")
+        _SDChild.objects.create(parent=p, label="c1")
+        _SDChild.objects.create(parent=p, label="c2")
 
         p.delete(cascade=True)
 
