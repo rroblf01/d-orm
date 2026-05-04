@@ -21,7 +21,18 @@ jobs:
         run: uv sync --extra=all
 
       - name: Run tests
-        run: uv run pytest -n 4 --tb=short -q
+        # Run tests sequentially (no ``-n 4``) for the publish-time
+        # gate: parallel execution surfaces a Python-3.14 +
+        # psycopg-pool finalisation race that occasionally takes an
+        # xdist worker down with a SIGSEGV. The crash is a
+        # destructor-vs-event-loop ordering issue we can't fully
+        # suppress from pure-Python code; it only manifests under
+        # high concurrency. Sequential mode is ~3-4× slower but
+        # bulletproof — fine for a release-time gate that runs once
+        # per tag. Day-to-day test.yml keeps the parallel runner
+        # because the worker-restart escape hatch handles the same
+        # race well enough for fast feedback.
+        run: uv run pytest --tb=short -q
 
   # ── Build source distribution and wheel ───────────────────────────────────
   build:
