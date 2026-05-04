@@ -92,6 +92,32 @@ class CreateModel(Operation):
         sql = f'CREATE TABLE IF NOT EXISTS "{table}" (\n  {",  ".join(col_defs)}\n)'
         connection.execute_script(sql)
 
+        # ``db_comment`` (3.2+) — column-level comment. PostgreSQL
+        # uses ``COMMENT ON COLUMN``; MySQL has no separate
+        # statement (the comment lands in the column DDL via
+        # ``COMMENT '...'`` inline) — emit the PG form and skip
+        # MySQL silently here, the inline form is added in
+        # ``_field_to_column_sql``.
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            for fname, field in self.fields:
+                comment = getattr(field, "db_comment", None)
+                if not comment:
+                    continue
+                col = getattr(field, "column", None) or fname
+                escaped = str(comment).replace("'", "''")
+                connection.execute_script(
+                    f'COMMENT ON COLUMN "{table}"."{col}" IS \'{escaped}\''
+                )
+            # ``Meta.db_table_comment`` (3.2+) — table-level
+            # comment, same shape.
+            table_comment = self.options.get("db_table_comment")
+            if table_comment:
+                escaped = str(table_comment).replace("'", "''")
+                connection.execute_script(
+                    f'COMMENT ON TABLE "{table}" IS \'{escaped}\''
+                )
+
         # Declared indexes: emit ``CREATE INDEX`` per entry.
         for idx in self.options.get("indexes", []) or []:
             AddIndex(self.name, idx).database_forwards(
@@ -1166,5 +1192,16 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
         # PROTECT is Python-only; use RESTRICT at the DB level
         db_on_delete = "RESTRICT" if on_delete == PROTECT else on_delete
         parts.append(f'REFERENCES "{ref_table}"("{ref_col}") ON DELETE {db_on_delete}')
+
+    # ``db_comment`` (3.2+) — MySQL emits the comment inline on
+    # the column DDL. PostgreSQL handles it via a separate
+    # ``COMMENT ON COLUMN`` statement issued by ``CreateModel``;
+    # SQLite has no comment syntax at all.
+    db_comment = getattr(field, "db_comment", None)
+    if db_comment:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "mysql":
+            escaped = str(db_comment).replace("'", "''")
+            parts.append(f"COMMENT '{escaped}'")
 
     return " ".join(parts)

@@ -70,6 +70,7 @@ class ProjectState:
                 "unique_together": meta.unique_together,
                 "indexes": list(getattr(meta, "indexes", [])),
                 "constraints": list(getattr(meta, "constraints", [])),
+                "db_table_comment": getattr(meta, "db_table_comment", "") or "",
             }
             state.add_model(target_app, model_cls.__name__, fields, options)
         return state

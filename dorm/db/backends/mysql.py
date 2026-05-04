@@ -266,6 +266,27 @@ class MySQLDatabaseWrapper:
                         pass
                 raise _normalize_exception(exc) from exc
 
+    def execute_bulk_insert_returning(
+        self, sql: str, params: list | None = None
+    ) -> list[dict]:
+        """Multi-column ``RETURNING`` is **not** supported on MySQL.
+
+        MySQL itself has no ``RETURNING`` clause on INSERT. MariaDB
+        added it in 10.5+, but pymysql speaks the MySQL wire protocol
+        and the dialects diverge on enough other points (auto-increment
+        contiguity, transactional DDL) that we don't ship a MariaDB
+        backend separately. Callers should drop ``returning=`` and
+        either accept the auto-incremented PKs that ``bulk_create``
+        already returns or re-fetch by ``unique_fields``.
+        """
+        raise NotImplementedError(
+            "bulk_create(returning=…) is not supported on MySQL — "
+            "the wire protocol has no RETURNING on INSERT. Drop "
+            "``returning=`` and re-fetch by primary key (already "
+            "back-filled) or by ``unique_fields`` if you need extra "
+            "DB-side default columns."
+        )
+
     def execute_streaming(
         self, sql: str, params: list | None = None, chunk_size: int = 1000
     ):
@@ -463,6 +484,16 @@ class MySQLAsyncDatabaseWrapper:
             raise _normalize_exception(exc) from exc
         finally:
             await self._release(conn)
+
+    async def execute_bulk_insert_returning(
+        self, sql: str, params: list | None = None
+    ) -> list[dict]:
+        """Async counterpart — same MySQL limitation. See the sync
+        wrapper for the full reasoning."""
+        raise NotImplementedError(
+            "abulk_create(returning=…) is not supported on MySQL — "
+            "the wire protocol has no RETURNING on INSERT."
+        )
 
     async def close(self) -> None:
         if self._pool is not None:

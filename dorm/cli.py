@@ -176,6 +176,58 @@ def cmd_makemigrations(args):
     installed_apps = settings.INSTALLED_APPS
     _load_apps(installed_apps)
 
+    # ── Merge two parallel migration branches ─────────────────────────────────
+    if getattr(args, "merge", False):
+        from .migrations.loader import MigrationLoader
+        from .migrations.writer import write_empty_migration
+        from .db.connection import get_connection
+
+        conn = get_connection()
+        targets = args.apps if args.apps else installed_apps
+        any_merged = False
+        for raw_app in targets:
+            app = _resolve_app_module(raw_app, installed_apps)
+            mig_dir = _find_migrations_dir(app)
+            app_label = _resolve_app_label(app)
+            loader = MigrationLoader(conn)
+            loader.load(mig_dir, app_label)
+            entries = loader.migrations.get(app_label, [])
+            # Find leaves: migrations that no other migration in the
+            # same app declares as a dependency. Two leaves = the
+            # parallel-branch shape ``--merge`` resolves.
+            referenced: set[str] = set()
+            for _num, _name, mod in entries:
+                for dep in getattr(mod, "dependencies", []) or []:
+                    if isinstance(dep, tuple) and len(dep) == 2:
+                        dep_app, dep_name = dep
+                        if dep_app == app_label:
+                            referenced.add(dep_name)
+            leaves = [
+                (num, name)
+                for num, name, _mod in entries
+                if name not in referenced
+            ]
+            if len(leaves) < 2:
+                continue  # nothing to merge for this app
+            any_merged = True
+            next_num = _next_migration_number(mig_dir)
+            path = write_empty_migration(
+                app_label,
+                mig_dir,
+                next_num,
+                name=args.name or "merge",
+                dependencies=[(app_label, leaf_name) for _n, leaf_name in leaves],
+            )
+            print(
+                f"  Merged {len(leaves)} leaves of {app_label!r} into {path}"
+            )
+        if not any_merged:
+            print(
+                "  No migration conflicts detected — every app has at "
+                "most one leaf. Nothing to merge."
+            )
+        return
+
     # ── Empty migration ───────────────────────────────────────────────────────
     if args.empty:
         if not args.apps:
@@ -1390,6 +1442,51 @@ def cmd_loaddata(args):
     print(f"Total: {total} row(s) loaded.")
 
 
+def cmd_migrate_from_django(args):
+    """Auto-port a Django ``models.py`` (or app directory) to a
+    dorm-flavoured equivalent. Routes through
+    :mod:`dorm.contrib.migrate_from_django`."""
+    from pathlib import Path
+
+    from .contrib.migrate_from_django import (
+        convert_app,
+        convert_models_file,
+    )
+
+    target = Path(args.path)
+    if target.is_file():
+        rewritten, todos = convert_models_file(target)
+        if args.dry_run:
+            print(rewritten)
+        else:
+            target.write_text(rewritten, encoding="utf-8")
+            print(f"Converted {target}")
+        if todos:
+            print("\nTODOs flagged:", file=sys.stderr)
+            for t in todos:
+                print(f"  - {t}", file=sys.stderr)
+        return
+
+    if target.is_dir():
+        try:
+            results = convert_app(target, dry_run=args.dry_run)
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        for fname, todos in results.items():
+            verb = "Would convert" if args.dry_run else "Converted"
+            print(f"{verb} {fname}")
+            for t in todos:
+                print(f"  - {t}", file=sys.stderr)
+        return
+
+    print(
+        f"Error: {args.path!r} is neither a file nor a directory.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def cmd_runscript(args):
     """Execute a Python file under the project's settings, with
     ``INSTALLED_APPS`` preloaded. Mirrors Django-extensions
@@ -1622,6 +1719,22 @@ def main():
             "lands in the right migrations directory."
         ),
     )
+    mm.add_argument(
+        "--merge",
+        action="store_true",
+        default=False,
+        help=(
+            "Resolve a merge-conflict between two parallel migration "
+            "branches. When two developers create migrations against "
+            "the same app from different branches, the merged branch "
+            "ends up with two leaf migrations sharing the same "
+            "dependency. ``--merge`` writes a new migration whose "
+            "``dependencies = [...]`` lists every leaf, collapsing the "
+            "fork into a linear graph. The merge migration carries "
+            "no operations (the diverging migrations stay applied "
+            "as-is); it only re-points the migration graph's tip."
+        ),
+    )
     mm.add_argument("--settings", default=None)
     mm.set_defaults(func=cmd_makemigrations)
 
@@ -1761,6 +1874,30 @@ def main():
         help="Extra positional args forwarded as ``sys.argv[1:]``.",
     )
     rs.set_defaults(func=cmd_runscript)
+
+    # migrate-from-django
+    mfd = sub.add_parser(
+        "migrate-from-django",
+        help=(
+            "Auto-port a Django ``models.py`` (or app directory) to a "
+            "dorm-shaped equivalent. Re-run ``dorm makemigrations`` "
+            "afterwards to produce a fresh migration history."
+        ),
+    )
+    mfd.add_argument(
+        "path",
+        help=(
+            "Path to a Django ``models.py`` file OR an app directory "
+            "(containing ``models.py`` or a ``models/`` sub-package)."
+        ),
+    )
+    mfd.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Show the converted output and TODOs without modifying files.",
+    )
+    mfd.set_defaults(func=cmd_migrate_from_django)
 
     # sql — dump CREATE TABLE for given models
     sq2 = sub.add_parser(

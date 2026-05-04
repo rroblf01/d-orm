@@ -2325,6 +2325,7 @@ class QuerySet(Generic[_T]):
         update_conflicts: bool = False,
         update_fields: list[str] | None = None,
         unique_fields: list[str] | None = None,
+        returning: list[str] | None = None,
     ) -> list[_T]:
         """Insert *objs* in batches of ``batch_size``.
 
@@ -2336,6 +2337,17 @@ class QuerySet(Generic[_T]):
         ``update_fields`` is omitted, every non-PK / non-unique column
         is updated, which is almost always what you want for an idempotent
         sync from an external source.
+
+        ``returning=[<field>, …]`` asks the database to send back the
+        listed columns for each newly-inserted row (PG and SQLite ≥ 3.35
+        — ``RETURNING`` clause). The values are written back onto the
+        corresponding objects in *objs*, useful when the column carries
+        a DB-side default (``DEFAULT now()``), is a ``GeneratedField``,
+        or is otherwise computed server-side. MySQL has no ``RETURNING``
+        on INSERT — the call raises :class:`NotImplementedError`. Cannot
+        be combined with ``ignore_conflicts`` / ``update_conflicts``
+        because the row alignment between *objs* and the rows the DB
+        actually wrote is no longer 1:1.
 
         Note: when conflicts are skipped or updated, returned PKs may be
         ``None`` for affected rows (the database doesn't report which
@@ -2356,6 +2368,14 @@ class QuerySet(Generic[_T]):
             raise ValueError(
                 "bulk_create(update_conflicts=True) requires "
                 "unique_fields= to identify the conflict target."
+            )
+        if returning and (ignore_conflicts or update_conflicts):
+            raise ValueError(
+                "bulk_create(returning=…) cannot be combined with "
+                "ignore_conflicts / update_conflicts: returned rows "
+                "no longer align 1:1 with *objs* when conflicts skip "
+                "or update existing rows. Re-fetch by unique_fields "
+                "if you need extra columns back from an upsert."
             )
 
         connection = self._get_connection()
@@ -2383,11 +2403,44 @@ class QuerySet(Generic[_T]):
         # which on bulk_create(100k objs, batch_size=1000) was 100 wasted
         # passes over concrete_fields. Match Django's behaviour: assume all
         # objects in a single bulk_create call have the same PK presence.
+        from .fields import NOT_PROVIDED as _NOT_PROVIDED
+
+        def _skip_for_db_default(f) -> bool:
+            # Skip columns the user left blank when the column DDL has its
+            # own ``DEFAULT …``. Without this, bulk_create would send NULL
+            # for that column and crash any NOT-NULL-with-DEFAULT column —
+            # the DB never gets a chance to apply its db_default.
+            return (
+                getattr(f, "db_default", _NOT_PROVIDED) is not _NOT_PROVIDED
+                and not f.has_default()
+                and objs[0].__dict__.get(f.attname) is None
+            )
+
         fields = [
             f
             for f in concrete_fields
-            if not f.primary_key or objs[0].__dict__.get(f.attname) is not None
+            if (not f.primary_key or objs[0].__dict__.get(f.attname) is not None)
+            and not _skip_for_db_default(f)
         ]
+
+        # Resolve ``returning=[attname,…]`` to (column, attname, field) triples
+        # once. Validates each name against the model up-front so a typo
+        # surfaces here instead of as a SQL error mid-batch.
+        returning_triples: list[tuple[str, str, Any]] = []
+        if returning:
+            for name in returning:
+                try:
+                    f = meta.get_field(name)
+                except Exception as exc:
+                    raise ValueError(
+                        f"bulk_create(returning=…): unknown field {name!r}"
+                    ) from exc
+                if not f.column:
+                    raise ValueError(
+                        f"bulk_create(returning=…): field {name!r} has no DB "
+                        "column to return."
+                    )
+                returning_triples.append((f.column, f.attname, f))
 
         with atomic(using=self._db):
             for i in range(0, len(objs), batch_size):
@@ -2401,6 +2454,22 @@ class QuerySet(Generic[_T]):
                     ]
                     for obj in batch
                 ]
+                if returning_triples:
+                    sql, params = self._query.as_bulk_insert(
+                        fields,
+                        rows_values,
+                        connection,
+                        returning_cols=[col for col, _a, _f in returning_triples],
+                    )
+                    rows = connection.execute_bulk_insert_returning(sql, params)
+                    for obj, row in zip(batch, rows):
+                        for col, attname, f in returning_triples:
+                            val = row.get(col)
+                            from_db = getattr(f, "from_db_value", None)
+                            if callable(from_db):
+                                val = from_db(val)
+                            obj.__dict__[attname] = val
+                    continue
                 sql, params = self._query.as_bulk_insert(
                     fields,
                     rows_values,
@@ -3181,9 +3250,11 @@ class QuerySet(Generic[_T]):
         update_conflicts: bool = False,
         update_fields: list[str] | None = None,
         unique_fields: list[str] | None = None,
+        returning: list[str] | None = None,
     ) -> list[_T]:
         """Async counterpart of :meth:`bulk_create`. See the sync version
-        for ``ignore_conflicts`` / ``update_conflicts`` semantics."""
+        for ``ignore_conflicts`` / ``update_conflicts`` / ``returning``
+        semantics."""
         if not objs:
             return objs
         from .transaction import aatomic
@@ -3198,6 +3269,13 @@ class QuerySet(Generic[_T]):
             raise ValueError(
                 "abulk_create(update_conflicts=True) requires "
                 "unique_fields= to identify the conflict target."
+            )
+        if returning and (ignore_conflicts or update_conflicts):
+            raise ValueError(
+                "abulk_create(returning=…) cannot be combined with "
+                "ignore_conflicts / update_conflicts: returned rows no "
+                "longer align 1:1 with *objs* when conflicts skip or "
+                "update existing rows."
             )
 
         conn = self._get_async_connection()
@@ -3217,11 +3295,37 @@ class QuerySet(Generic[_T]):
 
         # Hoisted: compute the field list once from objs[0]. See the
         # comment in `bulk_create` for the reasoning.
+        from .fields import NOT_PROVIDED as _NOT_PROVIDED
+
+        def _skip_for_db_default(f) -> bool:
+            return (
+                getattr(f, "db_default", _NOT_PROVIDED) is not _NOT_PROVIDED
+                and not f.has_default()
+                and objs[0].__dict__.get(f.attname) is None
+            )
+
         fields = [
             f
             for f in concrete_fields
-            if not f.primary_key or objs[0].__dict__.get(f.attname) is not None
+            if (not f.primary_key or objs[0].__dict__.get(f.attname) is not None)
+            and not _skip_for_db_default(f)
         ]
+
+        returning_triples: list[tuple[str, str, Any]] = []
+        if returning:
+            for name in returning:
+                try:
+                    f = meta.get_field(name)
+                except Exception as exc:
+                    raise ValueError(
+                        f"abulk_create(returning=…): unknown field {name!r}"
+                    ) from exc
+                if not f.column:
+                    raise ValueError(
+                        f"abulk_create(returning=…): field {name!r} has no DB "
+                        "column to return."
+                    )
+                returning_triples.append((f.column, f.attname, f))
 
         async with aatomic(using=self._db):
             for i in range(0, len(objs), batch_size):
@@ -3235,6 +3339,22 @@ class QuerySet(Generic[_T]):
                     ]
                     for obj in batch
                 ]
+                if returning_triples:
+                    sql, params = self._query.as_bulk_insert(
+                        fields,
+                        rows_values,
+                        conn,
+                        returning_cols=[col for col, _a, _f in returning_triples],
+                    )
+                    rows = await conn.execute_bulk_insert_returning(sql, params)
+                    for obj, row in zip(batch, rows):
+                        for col, attname, f in returning_triples:
+                            val = row.get(col)
+                            from_db = getattr(f, "from_db_value", None)
+                            if callable(from_db):
+                                val = from_db(val)
+                            obj.__dict__[attname] = val
+                    continue
                 sql, params = self._query.as_bulk_insert(
                     fields,
                     rows_values,

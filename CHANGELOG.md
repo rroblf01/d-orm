@@ -6,23 +6,137 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Roadmap (not yet shipped)
+> **Active milestone: v3.2.0 (work in progress).** Every entry below
+> ships in 3.2.0. The "Roadmap" sub-section lists items still pending
+> for this milestone (and a couple deferred to v4.0); everything
+> outside Roadmap is already merged on ``main``.
 
-- **Per-tenant migration runner** (slated v3.2).
-- **`dorm migrate-from-django` converter** (slated v3.2). Parses
-  Django ``models.py`` + ``migrations/`` and emits dorm-shaped
-  equivalents.
-- **History / audit trail** ``HistoricalModel`` mixin (slated v3.2).
-- **Connection-pool autoscaling** (slated v3.2).
+### Roadmap — v3.2.0 still pending
+
+- **Per-tenant migration runner**.
+- **Connection-pool autoscaling**.
 - **Async migration executor** ``await executor.amigrate(...)`` for
-  100% async stacks (Lambda, edge runtime) (slated v3.2).
-- **OpenTelemetry per-query traces** (slated v3.2). Metrics
-  exporter ships in 3.0; trace spans land later.
+  100% async stacks (Lambda, edge runtime).
+
+### Roadmap — deferred past v3.2
+
 - **`FilteredRelation`** — JOIN with condition (slated v4.0).
   Significant queryset-compiler lift; defer until the compiler
   refactor lands.
 
-### Added — MySQL / MariaDB backend (real)
+### v3.2.0 — added so far
+
+#### `dorm.contrib.history.track_history` audit trail
+
+- New ``@track_history`` class decorator (and equivalent
+  ``record_history_for`` / ``arecord_history_for`` helpers) wires
+  audit-trail tracking onto any model. Each tracked model gets a
+  sibling ``<Name>Historical`` model auto-built with the same
+  fields plus four audit columns: ``history_id`` (BigAutoField
+  PK), ``history_date`` (UTC timestamp), ``history_type`` (single
+  char — ``+`` insert, ``~`` update, ``-`` delete), and
+  ``history_user_id`` (optional integer attributed via
+  contextvars).
+- Connects to ``post_save`` / ``post_delete`` signals so every
+  ``save()``, ``asave()``, ``delete()`` and ``adelete()`` writes
+  one history row. Sync and async paths each use their matching
+  connection — the sync receiver bails out under a running event
+  loop so async writes don't double-record.
+- ``Model.history`` exposes a ``Manager`` over the history model;
+  ``Article.history.filter(history_type='-')`` lists deleted rows.
+- Per-actor attribution: call ``set_history_user(request.user.id)``
+  from middleware (or any contextvar-aware scope); subsequent
+  history rows carry that id. ``current_history_user()`` reads it
+  back and ``reset_history_user(token)`` restores the previous
+  value.
+- Caveats: the v3.2 mixin tracks instance-level ``save`` /
+  ``delete`` only. Queryset ``.update()``, ``bulk_create``, and
+  ``bulk_update`` don't fire ``post_save`` / ``post_delete`` —
+  call ``record_history_for(instance, kind)`` manually when audit
+  coverage matters on those paths.
+
+#### `bulk_create(returning=[…])`
+
+- New ``returning=`` kwarg on :meth:`QuerySet.bulk_create` /
+  :meth:`abulk_create` / :meth:`Manager.bulk_create` /
+  :meth:`Manager.abulk_create`. Asks the database to send back the
+  named columns for each newly-inserted row (PostgreSQL and
+  SQLite ≥ 3.35 — ``RETURNING`` clause). The returned values are
+  written back onto the corresponding objects in *objs* in a
+  single round-trip.
+- Closes the bulk-insert + DB-side default gap: a column declared
+  with ``db_default=`` (or a ``GeneratedField``, or a server-side
+  trigger) used to require a follow-up ``SELECT`` to learn what
+  the DB wrote. ``returning=['rev', 'created_at']`` now does it
+  inline.
+- Cannot be combined with ``ignore_conflicts`` / ``update_conflicts``
+  — when conflicts skip or update existing rows the returned-row
+  count no longer aligns 1:1 with *objs*. The validator surfaces
+  this as a clear ``ValueError``.
+- MySQL has no ``RETURNING`` on INSERT; the call raises
+  ``NotImplementedError`` there with a hint to fall back to the
+  follow-up ``SELECT``.
+- Bug fix bundled with the feature: ``bulk_create`` no longer sends
+  ``NULL`` for columns the user left unset when the column DDL
+  declares its own ``DEFAULT …``. Such columns are now omitted
+  from the INSERT so the DB applies its own default. Matches
+  Django's behaviour and unblocks ``returning=`` to actually
+  observe the server-applied value.
+
+#### `dorm makemigrations --merge`
+
+- Resolves the parallel-branch shape that appears after merging
+  two feature branches that each landed a migration on top of
+  the same parent. The graph forks: two leaves both reference
+  ``0001_initial`` and neither references the other, so the
+  loader can no longer linearise the application order.
+- ``dorm makemigrations --merge`` writes a new empty migration
+  whose ``dependencies = [...]`` lists every leaf, collapsing
+  the fork back to a linear graph. The merge migration carries
+  no operations — it just re-points the graph's tip.
+- No-op when the graph is already linear (one or zero leaves);
+  prints a friendly "nothing to merge" message.
+- Pair with ``--name foo`` to override the default
+  ``NNNN_merge.py`` filename.
+
+#### `dorm migrate-from-django` converter
+
+- Auto-port Django ``models.py`` files to dorm-flavoured
+  equivalents. Reads via :mod:`ast`, rewrites with regex so the
+  user's formatting + comments survive intact.
+- Maps every supported Django field type
+  (``CharField``, ``ForeignKey``, ``ManyToManyField``,
+  ``JSONField``, ``GeneratedField``, …), every ``on_delete``
+  constant, ``Meta`` options, ``Index`` / ``UniqueConstraint``
+  / ``CheckConstraint`` / ``Q`` / ``F`` / ``Value``.
+- ``from django.db.models import Count, Sum`` → ``from dorm import …``.
+- Flags items the tool can't auto-port (custom Manager,
+  ``django.contrib.auth`` imports, signals imports, unrecognised
+  ``models.<X>`` references) via a TODO banner at the top of the
+  rewritten file.
+- New CLI: ``dorm migrate-from-django <path> [--dry-run]``.
+  Accepts a single ``models.py`` file OR an app directory
+  containing ``models.py`` / a ``models/`` sub-package.
+- Re-run ``dorm makemigrations`` against the converted models
+  for a fresh migration history (the original Django migration
+  files are NOT auto-ported — they encode operation-class
+  internals that don't map 1:1).
+
+#### `Field(db_comment=…)` + `Meta.db_table_comment` DDL emit
+
+- 3.1 stored ``db_comment`` on the field; 3.2 emits the matching
+  DDL: ``COMMENT ON COLUMN "table"."col" IS '…'`` (PostgreSQL,
+  separate statement) and inline ``COMMENT '…'`` (MySQL, on the
+  column DDL). SQLite has no comment syntax — the value stays
+  reachable on ``field.db_comment`` for tooling but no DDL is
+  emitted.
+- New ``Meta.db_table_comment`` option (Django 4.1 parity).
+  Lands as ``COMMENT ON TABLE`` on PostgreSQL; MySQL table-level
+  comment support is deferred to the next iteration.
+- ``Field.deconstruct()`` includes ``db_comment`` so generated
+  migrations round-trip the value.
+
+#### MySQL / MariaDB backend (real)
 
 - 3.1 ships a working MySQL / MariaDB backend backed by
   ``pymysql`` (sync) and ``aiomysql`` (async) — both pure-Python
@@ -42,7 +156,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is supported on MariaDB 10.5+ but not on MySQL; the insert
   path uses ``cursor.lastrowid`` for autoincrement PKs.
 
-### Added — RelatedManager API parity with Django
+#### RelatedManager API parity with Django
 
 - Reverse-FK manager grew ``add(*objs, bulk=)``, ``remove(*objs)``,
   ``clear()``, ``set([objs], clear=)``, ``get_or_create()`` and
@@ -54,7 +168,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Same shape was already shipped for ``ManyRelatedManager`` (M2M);
   3.1 brings reverse-FK to parity.
 
-### Added — `transaction.atomic(durable=True)`
+#### `transaction.atomic(durable=True)`
 
 - New keyword on :func:`atomic` and :func:`aatomic`. When set,
   the block raises :class:`RuntimeError` immediately if it would
@@ -64,14 +178,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   waits on a real fsync). Mirrors Django's
   ``transaction.atomic(durable=True)`` flag added in Django 3.2.
 
-### Added — `Field.register_lookup` extension hook
+#### `Field.register_lookup` extension hook
 
 - :func:`dorm.lookups.register_lookup` lets users plug in custom
   lookup names process-wide. Names collide-check against the
   built-in vocabulary; ``unregister_lookup`` reverses for tests
   and refuses to drop built-ins.
 
-### Added — Argon2 password hasher
+#### Argon2 password hasher
 
 - :func:`dorm.contrib.auth.password.make_password_argon2` produces
   ``argon2$<full-argon2-hash>`` strings; :func:`check_password`
@@ -79,7 +193,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Django emits). PBKDF2 stays the default (stdlib only); Argon2
   is opt-in via ``pip install 'djanorm[auth-argon2]'``.
 
-### Added — `dorm.test.override_settings` + `setUpTestData`
+#### `dorm.test.override_settings` + `setUpTestData`
 
 - :class:`override_settings` is a context manager AND decorator
   (sync + async function aware) that temporarily mutates
@@ -92,7 +206,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Django-style "create rows once, reuse across methods"
   fixtures without inheriting from ``unittest.TestCase``.
 
-### Added — CLI: `migrate --run-syncdb` / `--prune`
+#### CLI: `migrate --run-syncdb` / `--prune`
 
 - ``--run-syncdb`` creates tables for every model whose
   INSTALLED_APPS entry has NO migrations directory. Useful for
@@ -103,7 +217,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ``squashmigrations``). No DDL — only the bookkeeping table
   is touched.
 
-### Added — CLI: `dorm shell_plus` + `dorm runscript`
+#### CLI: `dorm shell_plus` + `dorm runscript`
 
 - ``dorm shell_plus`` is a Django-extensions parity alias for
   ``dorm shell`` (which already auto-imports every model into
@@ -113,14 +227,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Forwards extra positional args as ``sys.argv[1:]`` so scripts
   read CLI args the way they would under a normal interpreter.
 
-### Added — `Field(db_comment=…)`
+#### `Field(db_comment=…)` (storage in 3.1; DDL emit listed above)
 
 - New keyword on every Field for column-level documentation.
   Reachable via ``field.db_comment`` for tooling and DDL
   emission (PostgreSQL ``COMMENT ON COLUMN`` / MySQL
   ``COMMENT '...'`` lands in v3.2's introspection pass).
 
-### Added — CLI: `createsuperuser` / `changepassword` / `flush` / `sqlmigrate`
+#### CLI: `createsuperuser` / `changepassword` / `flush` / `sqlmigrate`
 
 - ``dorm createsuperuser --email X --password Y --username Z``
   mints a contrib.auth ``User`` with ``is_superuser=True``.
@@ -134,7 +248,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - ``dorm sqlmigrate <app> <name> [--backwards]`` prints the SQL
   a migration would run without applying it.
 
-### Added — extended PG aggregates
+#### extended PG aggregates
 
 - :class:`BoolOr`, :class:`BoolAnd`: ``BOOL_OR`` / ``BOOL_AND``
   aggregates over boolean columns.
@@ -142,7 +256,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   group.
 - :class:`JSONBAgg`: ``JSONB_AGG`` for typed-JSON aggregation.
 
-### Added — pg_trgm + unaccent lookups
+#### pg_trgm + unaccent lookups
 
 - New string lookup names that map to PostgreSQL extensions:
   ``__trigram_similar`` (``%`` operator), ``__trigram_word_similar``
@@ -151,18 +265,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ``pg_trgm`` / ``unaccent`` extensions enabled at the database
   level — dorm doesn't auto-CREATE them.
 
-### Added — `dorm.search.SearchHeadline`
+#### `dorm.search.SearchHeadline`
 
 - ``ts_headline(<config>, document, query, options)`` wrapper for
   search-result snippet rendering. Options dict is inlined as
   the standard ``key=value, ...`` literal that PG expects;
   identifier-shape validated to keep user input out of the SQL.
 
-### Added — Window function family extended (recap from 3.1.0 first cut)
+#### Window function family extended (recap from 3.1.0 first cut)
 
 - :class:`NthValue`, :class:`PercentRank`, :class:`CumeDist`.
 
-### Added — `Index(include=[...])` + `UniqueConstraint(deferrable=, include=)`
+#### `Index(include=[...])` + `UniqueConstraint(deferrable=, include=)`
 
 - PostgreSQL covering indexes via ``INCLUDE (col1, col2)``. The
   index returns the included columns alongside the key so the
@@ -173,7 +287,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row-swaps inside a transaction don't trip the unique check
   at statement-end.
 
-### Added — `ExclusionConstraint`
+#### `ExclusionConstraint`
 
 - New :class:`dorm.ExclusionConstraint` mirrors Django's
   ``ExclusionConstraint``. Maps to PG's
@@ -186,7 +300,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   PostgreSQL only — SQLite + MySQL emit the empty string and
   the surrounding ``AddConstraint`` becomes a no-op.
 
-### Added — Migration ops
+#### Migration ops
 
 - :class:`dorm.migrations.operations.SeparateDatabaseAndState` —
   apply a parallel pair of ops (one updates state, the other
@@ -199,7 +313,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is state-only (managers live in Python) and lets dorm read
   Django-shaped migration files without a custom shim.
 
-### Added — `Field.db_default`
+#### `Field.db_default`
 
 - New keyword on every Field that lands in the column DDL as
   ``DEFAULT <literal>``. Distinct from ``default=`` (Python-side,
@@ -210,7 +324,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   specific server-side defaults (``RawSQL("now()")``,
   ``RawSQL("gen_random_uuid()")``).
 
-### Added — `PositiveBigIntegerField` + `FilePathField`
+#### `PositiveBigIntegerField` + `FilePathField`
 
 - :class:`PositiveBigIntegerField`: 64-bit unsigned counterpart
   of :class:`PositiveIntegerField`. Useful for IDs from upstream
@@ -219,7 +333,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - :class:`FilePathField`: ``CharField`` whose value is a file
   path under *path*. Validates ``match`` (regex) at assignment.
 
-### Fixed — registry + CLI MySQL routing message
+#### Fixed — registry + CLI MySQL routing message
 
 - ``dorm.db.connection`` error message for unsupported engines
   now correctly lists ``mysql`` and ``mariadb`` alongside the

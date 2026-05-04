@@ -328,6 +328,29 @@ class SQLiteDatabaseWrapper:
             return []
         return list(range(last - count + 1, last + 1))
 
+    def execute_bulk_insert_returning(self, sql: str, params=None) -> list[dict]:
+        """Run an INSERT whose SQL already carries a ``RETURNING …`` tail
+        and return rows as ``{column_name: value}`` dicts.
+
+        SQLite has supported ``RETURNING`` on INSERT since 3.35 (March
+        2021), which is older than every Python release this project
+        supports. ``sqlite3.Row`` already gives column-name lookups, but
+        we materialise to plain dicts so the caller treats every backend
+        identically.
+        """
+        conn = self.get_connection()
+        with log_query("sqlite", sql, params):
+            try:
+                cursor = conn.execute(self._adapt(sql), params or [])
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+            rows = cursor.fetchall()
+            if self._atomic_depth == 0 and not self._autocommit:
+                conn.commit()
+        cols = [d[0] for d in (cursor.description or [])]
+        return [dict(zip(cols, tuple(r))) for r in rows]
+
     def execute_script(self, sql: str):
         """Run a multi-statement SQL script.
 
@@ -691,6 +714,20 @@ class SQLiteAsyncDatabaseWrapper:
                 except Exception as exc:
                     normalize_db_exception(exc)
                     raise
+
+    async def execute_bulk_insert_returning(self, sql: str, params=None) -> list[dict]:
+        async with self._operation_conn() as conn:
+            with log_query("sqlite", sql, params):
+                try:
+                    cursor = await conn.execute(self._adapt(sql), params or [])
+                    rows = await cursor.fetchall()
+                    if not self._in_atomic() and not self._autocommit:
+                        await conn.commit()
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
+        cols = [d[0] for d in (cursor.description or [])]
+        return [dict(zip(cols, tuple(r))) for r in rows]
 
     async def execute_script(self, sql: str):
         """Async counterpart of :meth:`SQLiteDatabaseWrapper.execute_script`.

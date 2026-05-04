@@ -53,6 +53,11 @@ class Options:
         # readable model name through migrations.
         self.verbose_name: str = ""
         self.verbose_name_plural: str = ""
+        # ``db_table_comment`` (3.2+) — table-level comment string
+        # surfaced in ``CreateModel`` for the PostgreSQL
+        # ``COMMENT ON TABLE`` emit pass. Mirrors Django 4.1's
+        # ``Meta.db_table_comment`` option.
+        self.db_table_comment: str = ""
         self.fields: list = []
         self.pk: Any = None
         self.managers: list = []

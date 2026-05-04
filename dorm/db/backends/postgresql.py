@@ -340,6 +340,34 @@ class PostgreSQLDatabaseWrapper:
 
         return with_transient_retry(_do, in_transaction=in_tx)
 
+    def _exec_bulk_returning(self, conn, sql: str, params) -> list[dict]:
+        # SQL already carries its own ``RETURNING …`` tail (built by
+        # ``SQLQuery.as_bulk_insert(returning_cols=…)``). Don't re-append.
+        with log_query("postgresql", sql, params):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(_to_pyformat(sql), params or [])
+                    return list(cur.fetchall())
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+
+    def execute_bulk_insert_returning(self, sql: str, params=None) -> list[dict]:
+        """Execute a bulk INSERT whose SQL already contains a multi-column
+        ``RETURNING …`` tail and return the rows as dicts. Used by
+        :meth:`QuerySet.bulk_create(returning=…)` to back-fill DB-side
+        defaults / generated columns onto the inserted objects."""
+        in_tx = self._atomic_conn is not None
+
+        def _do() -> list[dict]:
+            conn = self._choose_conn()
+            if conn is not None:
+                return self._exec_bulk_returning(conn, sql, params)
+            with self._get_pool().connection() as c:
+                return self._exec_bulk_returning(c, sql, params)
+
+        return with_transient_retry(_do, in_transaction=in_tx)
+
     def execute_script(self, sql: str):
         # Honour any active atomic() / autocommit() context so DDL run by
         # migrations participates in the surrounding transaction. Before
@@ -712,6 +740,27 @@ class PostgreSQLAsyncDatabaseWrapper:
                 return await self._aexec_bulk(conn, sql, params, pk_col)
             async with (await self._get_pool()).connection() as c:
                 return await self._aexec_bulk(c, sql, params, pk_col)
+
+        return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
+
+    async def _aexec_bulk_returning(self, conn, sql: str, params) -> list[dict]:
+        with log_query("postgresql", sql, params):
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(_to_pyformat(sql), params or [])
+                    rows = await cur.fetchall()
+                    return list(rows)
+            except Exception as exc:
+                normalize_db_exception(exc)
+                raise
+
+    async def execute_bulk_insert_returning(self, sql: str, params=None) -> list[dict]:
+        async def _do() -> list[dict]:
+            conn = await self._choose_conn()
+            if conn is not None:
+                return await self._aexec_bulk_returning(conn, sql, params)
+            async with (await self._get_pool()).connection() as c:
+                return await self._aexec_bulk_returning(c, sql, params)
 
         return await awith_transient_retry(_do, in_transaction=self._in_async_atomic())
 

@@ -587,6 +587,7 @@ class SQLQuery:
         update_conflicts: bool = False,
         update_fields: list[str] | None = None,
         unique_fields: list[str] | None = None,
+        returning_cols: list[str] | None = None,
     ) -> tuple[str, list]:
         """Build a multi-row ``INSERT`` statement.
 
@@ -683,6 +684,14 @@ class SQLQuery:
                     f" ON CONFLICT ({target_cols}) "
                     f"DO UPDATE SET {set_clauses}"
                 )
+
+        if returning_cols:
+            # PG and SQLite (≥ 3.35) accept a multi-column RETURNING tail on
+            # INSERT. Order matters: must come *after* any ON CONFLICT clause.
+            for c in returning_cols:
+                _validate_identifier(c)
+            ret_cols = ", ".join(f'"{c}"' for c in returning_cols)
+            sql += f" RETURNING {ret_cols}"
 
         return self._adapt_placeholders(sql, connection), params
 

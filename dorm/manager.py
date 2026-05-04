@@ -461,6 +461,7 @@ class BaseManager(Generic[_T]):
         update_conflicts: bool = False,
         update_fields: list[str] | None = None,
         unique_fields: list[str] | None = None,
+        returning: list[str] | None = None,
     ) -> list[_T]:
         return self.get_queryset().bulk_create(
             objs,
@@ -469,6 +470,7 @@ class BaseManager(Generic[_T]):
             update_conflicts=update_conflicts,
             update_fields=update_fields,
             unique_fields=unique_fields,
+            returning=returning,
         )
 
     def bulk_update(self, objs: list[_T], fields: list[str], batch_size: int = 1000) -> int:
@@ -552,6 +554,7 @@ class BaseManager(Generic[_T]):
         update_conflicts: bool = False,
         update_fields: list[str] | None = None,
         unique_fields: list[str] | None = None,
+        returning: list[str] | None = None,
     ) -> list[_T]:
         return await self.get_queryset().abulk_create(
             objs,
@@ -560,6 +563,7 @@ class BaseManager(Generic[_T]):
             update_conflicts=update_conflicts,
             update_fields=update_fields,
             unique_fields=unique_fields,
+            returning=returning,
         )
 
     async def abulk_update(
