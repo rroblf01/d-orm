@@ -59,7 +59,16 @@ jobs:
         # ``_backends()`` returns ``["sqlite"]`` (Postgres + MySQL
         # parametrization both gated on env vars). The full suite
         # runs against the SQLite parametrisation only on this job.
-        run: uv run pytest -n 4 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=85
+        # Sequential mode (no ``-n N``): under ``pytest-xdist`` +
+        # Python 3.14, a GC pass that reaches a psycopg-pool
+        # ``AsyncConnectionPool.__del__`` while the underlying event
+        # loop is in tear-down occasionally takes a worker down with
+        # SIGSEGV. The bug is in the destructor / loop ordering, not
+        # in the tests themselves — every test passes on the next
+        # run. Running serially avoids the race entirely. ~3-4× slower
+        # than parallel but bulletproof. Bring ``-n N`` back once the
+        # upstream finalisation race is fixed.
+        run: uv run pytest --tb=short -q --cov=dorm --cov-fail-under=85
 
   # Postgres matrix — pinned PG 16 (LTS-style middle-of-the-road)
   # plus the two flanking majors most production users run. Runs
@@ -142,7 +151,16 @@ jobs:
         # --max-worker-restart lets xdist resurrect a worker the
         # OOM killer took out instead of dropping its coverage data
         # and tanking the whole run.
-        run: uv run pytest -n 4 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=85
+        # Sequential mode (no ``-n N``): under ``pytest-xdist`` +
+        # Python 3.14, a GC pass that reaches a psycopg-pool
+        # ``AsyncConnectionPool.__del__`` while the underlying event
+        # loop is in tear-down occasionally takes a worker down with
+        # SIGSEGV. The bug is in the destructor / loop ordering, not
+        # in the tests themselves — every test passes on the next
+        # run. Running serially avoids the race entirely. ~3-4× slower
+        # than parallel but bulletproof. Bring ``-n N`` back once the
+        # upstream finalisation race is fixed.
+        run: uv run pytest --tb=short -q --cov=dorm --cov-fail-under=85
 
   # Dedicated MySQL job — the 3.1 backend is younger than the PG /
   # SQLite paths and several test files hard-code vendor-specific
