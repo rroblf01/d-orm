@@ -343,6 +343,52 @@ Cuando puede haber filas saltadas por conflicto, las PKs devueltas
 filas escribieron de verdad. Re-fetch por `unique_fields` si
 necesitas el set final de PKs.
 
+### Devolver defaults del lado-BD (`bulk_create(returning=…)`)
+
+```python
+import dorm
+from dorm.expressions import RawSQL
+
+
+class Item(dorm.Model):
+    name: str = dorm.CharField(max_length=80)
+    rev: int = dorm.IntegerField(db_default=1)
+    created_at = dorm.DateTimeField(db_default=RawSQL("now()"))
+
+
+items: list[Item] = [Item(name="a"), Item(name="b")]
+Item.objects.bulk_create(items, returning=["rev", "created_at"])
+
+# Cada obj lleva ya los valores que escribió la BD — sin SELECT extra.
+print(items[0].rev, items[0].created_at)
+```
+
+`returning=[<field>, …]` pide a la base de datos que devuelva las
+columnas listadas para cada fila recién insertada y rellena los
+valores en el objeto correspondiente. Útil cuando la columna lleva
+un default servidor (`db_default=…`), es un `GeneratedField`, o la
+puebla un trigger.
+
+- **PostgreSQL** y **SQLite ≥ 3.35** soportan `RETURNING` en
+  `INSERT`. Ambos ejecutan la feature.
+- **MySQL** no soporta `RETURNING` en `INSERT`; la llamada lanza
+  `NotImplementedError` (haz re-fetch por PK — las PKs ya
+  vienen rellenas).
+- No combinable con `ignore_conflicts` / `update_conflicts`:
+  cuando los conflictos saltan o actualizan filas existentes,
+  las filas devueltas dejan de alinear 1:1 con la lista de
+  entrada. La validación lanza `ValueError` por adelantado para
+  que el modo de fallo sea obvio.
+
+Bug-fix incluido con esta feature: `bulk_create` ya **no** envía
+`NULL` para columnas que el usuario dejó sin asignar cuando el DDL
+declara su propio `DEFAULT …`. La columna se omite del `INSERT`
+para que la BD aplique su default — coincide con el comportamiento
+de Django.
+
+Contraparte async: `await Item.objects.abulk_create(items,
+returning=["rev"])`.
+
 ## get_or_create / update_or_create
 
 ```python

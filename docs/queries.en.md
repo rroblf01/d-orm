@@ -347,6 +347,50 @@ back-filled on the input objects — the database doesn't report which
 rows actually wrote. Re-fetch by `unique_fields` if you need the
 final PK set.
 
+### Returning DB-side defaults (`bulk_create(returning=…)`)
+
+```python
+import dorm
+from dorm.expressions import RawSQL
+
+
+class Item(dorm.Model):
+    name: str = dorm.CharField(max_length=80)
+    rev: int = dorm.IntegerField(db_default=1)
+    created_at = dorm.DateTimeField(db_default=RawSQL("now()"))
+
+
+items: list[Item] = [Item(name="a"), Item(name="b")]
+Item.objects.bulk_create(items, returning=["rev", "created_at"])
+
+# Each obj now carries the values the DB actually wrote — no follow-up SELECT.
+print(items[0].rev, items[0].created_at)
+```
+
+`returning=[<field>, …]` asks the database to send back the listed
+columns for each newly-inserted row and back-fill them on the
+corresponding object. Useful when the column carries a server-side
+default (`db_default=…`), is a `GeneratedField`, or is otherwise
+populated by a trigger.
+
+- **PostgreSQL** and **SQLite ≥ 3.35** support `RETURNING` on
+  `INSERT` — both back the feature.
+- **MySQL** has no `RETURNING` on `INSERT`; the call raises
+  `NotImplementedError` (re-fetch by primary key instead — PKs
+  are already back-filled).
+- Cannot be combined with `ignore_conflicts` / `update_conflicts`:
+  when conflicts skip or update existing rows the returned-row
+  count no longer aligns 1:1 with the input list. Validation
+  raises `ValueError` up-front so the failure mode is obvious.
+
+Bug-fix bundled with this feature: `bulk_create` no longer sends
+`NULL` for columns the user left unset when the column DDL declares
+its own `DEFAULT …`. The column is omitted from the `INSERT` so the
+DB applies its own default — matching Django's behaviour.
+
+Async counterpart: `await Item.objects.abulk_create(items,
+returning=["rev"])`.
+
 ## get_or_create / update_or_create
 
 ```python

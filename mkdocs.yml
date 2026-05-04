@@ -63,6 +63,7 @@ plugins:
             Migrations: Migraciones
             Transactions: Transacciones
             Soft delete: Soft delete
+            Audit trail (history): Auditoría (history)
             FastAPI integration: Integración con FastAPI
             Vector search (pgvector): Búsqueda vectorial (pgvector)
             libsql backend: Backend libsql
@@ -109,6 +110,7 @@ nav:
       - Transactions: transactions.md
       - Signals: signals.md
       - Soft delete: softdelete.md
+      - Audit trail (history): history.md
       - FastAPI integration: fastapi.md
       - Vector search (pgvector): pgvector.md
       - libsql backend: libsql.md

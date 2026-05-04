@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 import dorm
-from dorm.expressions import RawSQL
 
 
 def _ddl_for(model_cls):
@@ -84,8 +83,8 @@ def test_bulk_create_returning_backfills_pk():
     try:
         items = [_Stamped(label="x"), _Stamped(label="y"), _Stamped(label="z")]
         out = _Stamped.objects.bulk_create(items, returning=["id"])
-        assert all(o.id is not None for o in out)
-        assert len({o.id for o in out}) == 3  # unique PKs
+        assert all(o.id is not None for o in out)  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+        assert len({o.id for o in out}) == 3  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     finally:
         conn.execute_script(f'DROP TABLE IF EXISTS "{table}"{cascade}')
 

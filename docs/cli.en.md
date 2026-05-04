@@ -35,7 +35,30 @@ dorm makemigrations --empty --name backfill_slugs blog
 |---|---|
 | `--empty` | create a blank `RunPython` / `RunSQL` template |
 | `--name NAME` | suffix for the file name (default: derived from operations) |
+| `--merge` (3.2+) | resolve a fork in the migration graph by writing a no-op merge migration whose `dependencies = [...]` references every leaf — see below |
+| `--enable-pgvector` | scaffold a migration that enables the pgvector extension |
 | `--settings PATH` | settings module to load |
+
+### Resolving merge conflicts in the migration graph (`--merge`)
+
+Two developers branch off `0001_initial` and each land their own
+`0002_*`. After the merge commit the graph forks: both `0002_a` and
+`0002_b` declare `0001_initial` as their parent and neither
+references the other, so the loader can't linearise apply order.
+
+```bash
+dorm makemigrations --merge                # default name: NNNN_merge.py
+dorm makemigrations --merge --name reconcile_branches
+```
+
+`--merge` writes a new empty migration whose `dependencies = [...]`
+lists every leaf, collapsing the fork back to a linear graph. The
+merge migration carries no operations — it only re-points the
+graph's tip; the diverging migrations stay applied as-is.
+
+No-op when the graph is already linear (zero or one leaf): prints
+`No migration conflicts detected — every app has at most one leaf.
+Nothing to merge.` so it's safe to wire into CI / pre-merge gates.
 
 ## `dorm migrate`
 

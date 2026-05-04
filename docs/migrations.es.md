@@ -160,6 +160,25 @@ Los recuadros con cruz están aplicados; los vacíos están pendientes.
 Útil para detectar migraciones fuera de orden o nunca aplicadas
 después de mergear una rama de larga vida.
 
+## Resolver ramas paralelas (`makemigrations --merge`)
+
+Cuando dos ramas de feature meten cada una su propia migración
+sobre el mismo padre, al mergearlas a `main` queda un grafo
+bifurcado: dos hojas referencian `0001_initial` y ninguna a la
+otra, así que el loader ya no puede linealizar el orden.
+
+```bash
+dorm makemigrations --merge
+# Merged 2 leaves of 'blog' into blog/migrations/0004_merge.py
+```
+
+El archivo nuevo declara `dependencies = [("blog", "0002_branch_a"),
+("blog", "0003_branch_b")]` y no carga operaciones — solo re-apunta
+la punta del grafo. Seguro en CI: no-op cuando el grafo ya es
+lineal (imprime "Nothing to merge."). Ver la
+[referencia CLI](cli.md#dorm-makemigrations) para la lista completa
+de flags.
+
 ## Squash
 
 Después de un año de pequeñas migraciones la cadena se hace larga.

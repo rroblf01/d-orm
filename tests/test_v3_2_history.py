@@ -74,7 +74,7 @@ def test_track_history_builds_sibling_model():
             db_table = "v3_2_hist_build"
             app_label = "v3_2_hist"
 
-    hist = _Article._history_model
+    hist = _Article._history_model  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     field_names = {f.name for f in hist._meta.fields}
     # Source columns mirrored
     assert "title" in field_names and "body" in field_names
@@ -93,9 +93,9 @@ def test_track_history_is_idempotent():
             db_table = "v3_2_hist_once"
             app_label = "v3_2_hist"
 
-    h1 = _Once._history_model
+    h1 = _Once._history_model  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     track_history(_Once)
-    h2 = _Once._history_model
+    h2 = _Once._history_model  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     assert h1 is h2
 
 
@@ -111,7 +111,7 @@ def test_track_history_demotes_pk_on_history_table():
             db_table = "v3_2_hist_demote"
             app_label = "v3_2_hist"
 
-    hist = _Demote._history_model
+    hist = _Demote._history_model  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     src_pk_attname = _Demote._meta.pk.attname
     f = hist._meta.get_field(src_pk_attname)
     assert f.primary_key is False
@@ -135,14 +135,14 @@ def test_save_records_insert_then_update():
     cleanup = _setup_pair(_Post)
     try:
         p = _Post.objects.create(title="hello")
-        rows = list(_Post.history.all())
+        rows = list(_Post.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert len(rows) == 1
         assert rows[0].history_type == "+"
         assert rows[0].title == "hello"
 
         p.title = "hi"
         p.save()
-        kinds = sorted(r.history_type for r in _Post.history.all())
+        kinds = sorted(r.history_type for r in _Post.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert kinds == ["+", "~"]
     finally:
         cleanup()
@@ -161,10 +161,10 @@ def test_delete_records_minus_row():
     try:
         d = _Doomed.objects.create(name="goodbye")
         d.delete()
-        kinds = sorted(r.history_type for r in _Doomed.history.all())
+        kinds = sorted(r.history_type for r in _Doomed.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert kinds == ["+", "-"]
         # The '-' row preserves the field values from before deletion.
-        gone = _Doomed.history.filter(history_type="-").first()
+        gone = _Doomed.history.filter(history_type="-").first()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert gone is not None
         assert gone.name == "goodbye"
     finally:
@@ -192,7 +192,7 @@ def test_history_records_user_id_from_contextvar():
             _Tracked.objects.create(v=1)
         finally:
             reset_history_user(token)
-        row = _Tracked.history.first()
+        row = _Tracked.history.first()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert row is not None
         assert row.history_user_id == 42
     finally:
@@ -222,9 +222,9 @@ def test_record_history_for_writes_arbitrary_kind():
         obj = _Manual.objects.create(v=99)
         # Wipe the auto-created '+' row so the test's assertion is
         # specific to record_history_for's effect.
-        _Manual.history.all().delete()
+        _Manual.history.all().delete()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         record_history_for(obj, "~", user_id=7)
-        rows = list(_Manual.history.all())
+        rows = list(_Manual.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert len(rows) == 1
         assert rows[0].history_type == "~"
         assert rows[0].history_user_id == 7
@@ -282,7 +282,7 @@ async def test_asave_records_history():
     try:
         obj = _Async(v=10)
         await obj.asave()
-        rows = list(_Async.history.all())
+        rows = list(_Async.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert len(rows) == 1
         assert rows[0].history_type == "+"
         assert rows[0].v == 10
@@ -303,9 +303,9 @@ async def test_arecord_history_for_writes_row():
     cleanup = _setup_pair(_AsyncManual)
     try:
         obj = _AsyncManual.objects.create(v=5)
-        _AsyncManual.history.all().delete()
+        _AsyncManual.history.all().delete()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         await arecord_history_for(obj, "-", user_id=11)
-        rows = list(_AsyncManual.history.all())
+        rows = list(_AsyncManual.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
         assert len(rows) == 1
         assert rows[0].history_type == "-"
         assert rows[0].history_user_id == 11

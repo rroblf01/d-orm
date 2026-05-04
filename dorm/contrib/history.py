@@ -95,7 +95,7 @@ def _build_history_model(model_cls: type) -> type:
     registry just like a normal user model — so the migration
     autodetector picks it up.
     """
-    src_meta = model_cls._meta
+    src_meta = model_cls._meta  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     history_attrs: dict[str, Any] = {}
 
     for f in src_meta.fields:
@@ -214,8 +214,8 @@ def track_history(model_cls: type) -> type:
         return model_cls
 
     hist_cls = _build_history_model(model_cls)
-    model_cls._history_model = hist_cls
-    model_cls.history = hist_cls.objects
+    model_cls._history_model = hist_cls  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    model_cls.history = hist_cls.objects  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
 
     def _running_loop() -> bool:
         # Both sync and async receivers fire under ``asend``. To avoid

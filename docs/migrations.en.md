@@ -155,6 +155,25 @@ Crossed boxes are applied; empty boxes are pending. Useful for spotting
 out-of-order or never-applied migrations after a long-lived branch
 merges.
 
+## Resolving parallel branches (`makemigrations --merge`)
+
+When two feature branches each land their own migration on top of
+the same parent, merging them back to `main` produces a forked
+migration graph: two leaves both reference `0001_initial` and
+neither references the other, so the loader can no longer
+linearise application order.
+
+```bash
+dorm makemigrations --merge
+# Merged 2 leaves of 'blog' into blog/migrations/0004_merge.py
+```
+
+The new file declares `dependencies = [("blog", "0002_branch_a"),
+("blog", "0003_branch_b")]` and carries no operations — it only
+re-points the graph's tip. Safe to wire into CI: a no-op when the
+graph is already linear (prints "Nothing to merge."). See the
+[CLI reference](cli.md#dorm-makemigrations) for the full flag list.
+
 ## Squashing
 
 After a year of small migrations the chain gets long. `squashmigrations`
