@@ -6,17 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Active milestone: v3.2.0 (work in progress).** Every entry below
-> ships in 3.2.0. The "Roadmap" sub-section lists items still pending
-> for this milestone (and a couple deferred to v4.0); everything
-> outside Roadmap is already merged on ``main``.
-
-### Roadmap — v3.2.0 still pending
-
-- **Per-tenant migration runner**.
-- **Connection-pool autoscaling**.
-- **Async migration executor** ``await executor.amigrate(...)`` for
-  100% async stacks (Lambda, edge runtime).
+> **Active milestone: v3.2.0 (release-candidate).** Every entry below
+> ships in 3.2.0. The roadmap sub-section now only lists items
+> deferred past 3.2 — the original 3.2 roadmap (per-tenant runner,
+> pool autoscaling, async migration executor) is fully merged.
 
 ### Roadmap — deferred past v3.2
 
@@ -25,6 +18,58 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refactor lands.
 
 ### v3.2.0 — added so far
+
+#### Per-tenant migration runner
+
+- New helpers in ``dorm.contrib.tenants``: ``ensure_schema(name)``
+  runs ``CREATE SCHEMA IF NOT EXISTS``, ``migrate_tenant(name)``
+  applies every INSTALLED_APPS migration against the tenant's
+  schema, ``migrate_all_tenants()`` iterates the registry.
+- New CLI flags on ``dorm migrate``: ``--tenant <name>`` runs
+  one tenant, ``--all-tenants`` walks ``register_tenant`` /
+  ``registered_tenants``. The all-tenants path summarises
+  per-tenant status and exits non-zero on partial failures —
+  CI-friendly.
+- Internally the runner pins a single connection inside an
+  ``atomic()`` block before swapping ``search_path``, so the
+  DDL lands on the same connection the schema switch ran on
+  (the PG pool would otherwise hand out a fresh connection
+  pointing at ``public`` for each ``execute_script`` call).
+- PG-only — ``ensure_schema`` / ``migrate_tenant`` raise
+  ``NotImplementedError`` on SQLite / MySQL where there's no
+  portable equivalent.
+
+#### Connection-pool autoscaling (`dorm.contrib.pool_autoscale`)
+
+- New ``PoolStats`` dataclass exposes a backend-agnostic view:
+  ``min_size``, ``max_size``, ``in_use``, ``available``,
+  ``waiting`` plus a derived ``utilization`` ratio.
+- ``autoscale_pool(target_utilization=0.7, min_floor=2,
+  max_ceiling=20, step=2)`` resizes the pool when utilisation
+  crosses the target band — grows on high utilisation OR queued
+  waiters, shrinks when utilisation < target/2 with no waiters.
+  Returns ``(new_min, new_max)`` after a resize, ``None`` for
+  no-op.
+- Backend support: PG (psycopg-pool ``ConnectionPool.resize``)
+  is the live path; SQLite / MySQL silently no-op (no shared
+  pool to grow). Designed as a building block — callers schedule
+  the call themselves (FastAPI startup task, asyncio loop, cron)
+  because the right cadence depends on traffic shape.
+
+#### Async migration executor (`AsyncMigrationExecutor`)
+
+- New ``dorm.migrations.aexecutor.AsyncMigrationExecutor`` with
+  ``amigrate``, ``arollback``, ``amigrate_to``, and
+  ``ashow_migrations`` coroutines. Targets fully-async stacks
+  (Lambda, edge runtimes, FastAPI startup hooks) where calling
+  the sync executor directly would block the event loop on disk
+  I/O + DB round-trips.
+- Implementation: thin façade that delegates each call to
+  :func:`asyncio.to_thread` against the same sync
+  :class:`MigrationExecutor`. The migration logic stays in one
+  place — same advisory lock, same dry-run capture, same recorder
+  semantics — and the async surface is one thread hop, negligible
+  against the cost of the migration itself.
 
 #### `dorm.contrib.history.track_history` audit trail
 

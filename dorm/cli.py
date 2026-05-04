@@ -389,6 +389,35 @@ def cmd_migrate(args):
     fake_initial = getattr(args, "fake_initial", False)
     run_syncdb = getattr(args, "run_syncdb", False)
     prune = getattr(args, "prune", False)
+    tenant = getattr(args, "tenant", None)
+    all_tenants = getattr(args, "all_tenants", False)
+
+    if tenant or all_tenants:
+        # Per-tenant routing flow: PG-only. The runner switches
+        # ``search_path`` per schema, so the same INSTALLED_APPS gets
+        # migrated independently for every tenant.
+        from .contrib.tenants import migrate_tenant, migrate_all_tenants
+
+        apps_subset: list[str] | None = (
+            [app_label] if app_label else None
+        )
+        if all_tenants:
+            results = migrate_all_tenants(
+                verbosity=args.verbosity, apps=apps_subset
+            )
+            for name, status in results.items():
+                print(f"  [{name}] {status}")
+            failures = [n for n, s in results.items() if not s.startswith("ok")]
+            if failures:
+                print(f"Failed tenants: {failures}")
+                sys.exit(1)
+            return
+        if not isinstance(tenant, str):
+            print("Error: --tenant requires a schema name.")
+            return
+        migrate_tenant(tenant, verbosity=args.verbosity, apps=apps_subset)
+        print(f"  [{tenant}] ok")
+        return
 
     if prune:
         # Walk the recorder, drop rows whose corresponding migration
@@ -1805,6 +1834,28 @@ def main():
         "no longer exist on disk (e.g. after squashmigrations). "
         "No DDL — only the ``dorm_migrations`` bookkeeping is "
         "touched.",
+    )
+    mg.add_argument(
+        "--tenant",
+        default=None,
+        metavar="NAME",
+        help="Run migrations against the named PostgreSQL schema "
+        "(per-tenant routing). Switches ``search_path`` to the "
+        "tenant before applying DDL and restores it afterwards. "
+        "PG-only — other backends raise NotImplementedError. "
+        "Pair with an ``app_label`` positional to limit the run "
+        "to that app within the tenant.",
+    )
+    mg.add_argument(
+        "--all-tenants",
+        action="store_true",
+        default=False,
+        dest="all_tenants",
+        help="Run migrations against every tenant registered via "
+        "``dorm.contrib.tenants.register_tenant``. Each tenant "
+        "is migrated independently — partial failures are "
+        "summarised at the end and the process exits non-zero "
+        "when any tenant fails.",
     )
     mg.add_argument("--settings", default=None)
     mg.set_defaults(func=cmd_migrate)

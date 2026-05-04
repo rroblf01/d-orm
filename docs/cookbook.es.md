@@ -191,6 +191,101 @@ Fija el alias del tenant desde un middleware (web) o un context
 manager (workers) y enruta todo por ahí. Combínalo con un set de
 migraciones aplicado por alias.
 
+### Runner de migraciones por tenant (PG, 3.2+)
+
+PostgreSQL expone la misma base a varios tenants via *schemas*.
+`dorm.contrib.tenants` trae helpers + flags CLI que arrancan el
+schema y aplican cada migración contra él:
+
+```python
+from dorm.contrib.tenants import (
+    register_tenant,
+    migrate_tenant,
+    migrate_all_tenants,
+)
+
+# En el startup — registra cada tenant que conoce la app.
+for name in ("acme", "globex", "initech"):
+    register_tenant(name)
+
+# Bootstrap puntual de un tenant nuevo:
+migrate_tenant("newtenant")
+
+# Paso CI / deploy — migra cada tenant registrado:
+results: dict[str, str] = migrate_all_tenants()
+for tenant, status in results.items():
+    print(tenant, status)
+```
+
+Equivalentes CLI:
+
+```bash
+dorm migrate --tenant acme
+dorm migrate --all-tenants
+```
+
+El runner pinna una sola conexión dentro de un `atomic()` antes de
+cambiar `search_path`, así el DDL aterriza en la misma conexión
+sobre la que se hizo el switch (el pool de PG si no daría una
+conexión nueva apuntando a `public`).
+
+`migrate_all_tenants()` devuelve `{tenant: "ok" | "error: ..."}`
+para que un gate de CI pueda fallar fuerte ante cualquier fallo
+parcial sin abortar el batch a mitad. Solo PG —
+`ensure_schema` / `migrate_tenant` lanzan
+`NotImplementedError` en SQLite / MySQL.
+
+### Autoscaling del connection pool
+
+```python
+import asyncio
+from dorm.contrib.pool_autoscale import autoscale_pool, read_pool_stats
+
+
+async def autoscale_loop() -> None:
+    while True:
+        autoscale_pool(
+            target_utilization=0.7,
+            min_floor=2,
+            max_ceiling=20,
+            step=2,
+        )
+        await asyncio.sleep(10)
+
+
+# En el startup hook de FastAPI:
+@app.on_event("startup")
+async def _start_autoscale() -> None:
+    asyncio.create_task(autoscale_loop())
+```
+
+`read_pool_stats()` devuelve un `PoolStats` con `utilization`,
+`in_use`, `waiting`, etc. para dashboards. Resize en vivo solo
+en PG (psycopg-pool); SQLite / MySQL hacen no-op silenciosamente.
+
+### Executor de migraciones async
+
+Para migraciones de boot en stacks async (startup de FastAPI,
+handler de Lambda, edge runtime) donde el executor sync bloquearía
+el event loop:
+
+```python
+from dorm.db.connection import get_connection
+from dorm.migrations.aexecutor import AsyncMigrationExecutor
+
+
+async def run_startup_migrations() -> None:
+    executor = AsyncMigrationExecutor(get_connection())
+    await executor.amigrate("blog", "blog/migrations")
+    await executor.amigrate("users", "users/migrations")
+```
+
+El wrapper delega cada llamada a `asyncio.to_thread` para que la
+corrección (advisory lock, captura dry-run, semántica de recorder)
+coincida 1-a-1 con la ruta sync. Usa `arollback`,
+`amigrate_to` y `ashow_migrations` para el mismo trato async
+del resto de métodos del executor.
+
 ## Read-after-write con réplica
 
 ```python
