@@ -250,7 +250,13 @@ class Storage:
         attempts = 0
         candidate = name
         while self.exists(candidate):
-            token = secrets.token_urlsafe(6)[:7]
+            # ``token_hex`` produces ``[0-9a-f]`` only — guarantees
+            # the token never starts with ``_`` or ``-`` (the
+            # ``token_urlsafe`` alphabet includes both, and a
+            # leading underscore was leaking through to the
+            # extreme-truncation branch where the stem collapses
+            # to ``""`` and the result becomes ``"_<token>.ext"``).
+            token = secrets.token_hex(4)[:7]
             new_basename = f"{stem}_{token}{ext}"
             if max_length is not None and len(new_basename) > max_length:
                 # Trim the stem (not the extension) to fit. ``cut``

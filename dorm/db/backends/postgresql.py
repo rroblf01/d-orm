@@ -21,6 +21,19 @@ from ..utils import (
 # themselves stay at INFO so ops can still spot boot/shutdown.
 _lifecycle = logging.getLogger("dorm.db.lifecycle.postgresql")
 
+# Module-level graveyard for drained psycopg pools and autocommit
+# connections. ``force_close_sync`` parks drained objects here so
+# their refcount never reaches zero, preventing ``__del__`` from
+# firing during a ``gc.collect()`` pass that lands mid-test under
+# ``pytest -n N`` on Python 3.14. The destructor would otherwise
+# reach for the loop the pool was bound to — by then in tear-down
+# — and SIGSEGV the worker. Per-process lifetime: this list grows
+# by at most one pool per ``reset_connections()`` call and is
+# never cleared. The leak (one pointer-sized object per drained
+# pool) is intentional.
+_drained_pool_graveyard: list = []
+
+
 @functools.lru_cache(maxsize=4096)
 def _to_pyformat(sql: str) -> str:
     """Convert $1, $2, ... placeholders to %s (psycopg3 style), skipping
@@ -893,6 +906,19 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._pool = None
         self._loop = None
         self._autocommit_conn = None
+        # Park drained pools / autocommit conns in a module-level
+        # graveyard so refcount stays > 0 and ``__del__`` never fires.
+        # On Python 3.14 the GC was finalising psycopg-pool's
+        # ``AsyncConnectionPool`` mid-test (different test, same
+        # worker), and the Task / coroutine that ``__del__`` reaches
+        # for landed on a loop in tear-down — SIGSEGV in libpq.
+        # Holding the pool alive forever leaks a pointer-sized
+        # object per worker; that's the trade we accept to keep
+        # ``pytest -n N`` workers from crashing.
+        if pool is not None:
+            _drained_pool_graveyard.append(pool)
+        if autocommit_conn is not None:
+            _drained_pool_graveyard.append(autocommit_conn)
         if pool is not None:
             # Mark the pool closed FIRST so the dispatcher can't hand
             # out an idle connection while we're tearing one down.
@@ -919,35 +945,30 @@ class PostgreSQLAsyncDatabaseWrapper:
                 pool._pool.clear()  # type: ignore[attr-defined]
             except Exception:
                 pass
-            # Schedule the async ``pool.close()`` on the original loop
-            # only if it's alive AND we just drained its connections.
-            # The close() coroutine has nothing to operate on now —
-            # it's a flag-flip and bookkeeping, not network I/O.
-            if loop is not None and not loop.is_closed():
-                try:
-                    fut = asyncio.run_coroutine_threadsafe(pool.close(), loop)
-                    # Brief wait so the close completes on the same
-                    # loop iteration; if the loop is busy elsewhere
-                    # we drop the wait and rely on the sync teardown
-                    # above to have fully released the libpq layer.
-                    try:
-                        fut.result(timeout=0.5)
-                    except Exception:
-                        # Timeout / loop busy — cancel the future so the
-                        # backing Task doesn't keep the pool alive after
-                        # this function returns. Without the explicit
-                        # ``cancel()``, the Task stays pending on the
-                        # loop, holds a strong reference to ``pool``,
-                        # and the GC eventually finalises the pool on
-                        # an inconsistent loop state under
-                        # ``pytest -n N`` on Python 3.14 (observed
-                        # SIGSEGV taking the xdist worker down).
-                        try:
-                            fut.cancel()
-                        except Exception:
-                            pass
-                except RuntimeError:
-                    pass
+            # Skip ``pool.close()`` entirely — we already drained the
+            # libpq sockets above and zero-ed out ``_pool._pool`` /
+            # ``_pool._closed``. Scheduling the coroutine on the
+            # original loop ran into two SIGSEGV paths under
+            # ``pytest -n N`` on Python 3.14:
+            #
+            #   1. ``run_coroutine_threadsafe`` returns a Future whose
+            #      backing Task holds a strong ref to the pool object.
+            #      When ``fut.result(timeout=0.5)`` times out, the Task
+            #      stays pending on the (possibly closing) loop and the
+            #      GC finalises the pool against an inconsistent loop
+            #      state.
+            #
+            #   2. Even with ``fut.cancel()`` after timeout, the cancel
+            #      is queued; the Task only actually cancels when the
+            #      loop processes its next tick. If the worker exits
+            #      first, the Task is destroyed mid-coroutine and
+            #      psycopg-pool's ``__aexit__`` paths reach for handles
+            #      we already finished.
+            #
+            # The synchronous drain above is sufficient — every libpq
+            # socket is closed, ``_pool._pool`` is empty, and
+            # ``_closed`` is True. ``__del__`` on the bare pool object
+            # is now safe.
         if autocommit_conn is not None:
             try:
                 pgconn = getattr(autocommit_conn, "pgconn", None)
@@ -955,20 +976,9 @@ class PostgreSQLAsyncDatabaseWrapper:
                     pgconn.finish()
             except Exception:
                 pass
-            if loop is not None and not loop.is_closed():
-                try:
-                    fut2 = asyncio.run_coroutine_threadsafe(
-                        autocommit_conn.close(), loop
-                    )
-                    try:
-                        fut2.result(timeout=0.5)
-                    except Exception:
-                        try:
-                            fut2.cancel()
-                        except Exception:
-                            pass
-                except RuntimeError:
-                    pass
+            # Same reasoning as the pool path above — pgconn.finish()
+            # is the authoritative shutdown; an extra ``conn.close()``
+            # scheduled on the loop only created teardown races.
 
     async def notify(self, channel: str, payload: str = "") -> None:
         """Send a ``NOTIFY`` to *channel* with optional *payload*.
