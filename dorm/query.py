@@ -126,6 +126,12 @@ class SQLQuery:
         self.for_update_no_wait: bool = False
         self.for_update_of: tuple[str, ...] = ()
         self.joins: list[tuple] = []  # (join_type, table, alias, on_condition)
+        # ``FilteredRelation`` annotations registered via ``QuerySet.annotate``.
+        # Stored separately from ``annotations`` because they don't project
+        # into SELECT — they only emit a LEFT JOIN with a Q condition baked
+        # into the ON clause when their alias is referenced from a
+        # ``filter`` / ``order_by`` / ``annotate`` on the joined columns.
+        self.filtered_relations: dict[str, Any] = {}
         self.group_by_fields: list[str] = []
         self.having_nodes: list = []
         self.select_related_fields: list[str] = []
@@ -179,6 +185,7 @@ class SQLQuery:
         q.for_update_no_wait = self.for_update_no_wait
         q.for_update_of = self.for_update_of
         q.joins = list(self.joins)
+        q.filtered_relations = dict(self.filtered_relations)
         q.group_by_fields = list(self.group_by_fields)
         q.having_nodes = list(self.having_nodes)
         q.select_related_fields = list(self.select_related_fields)
@@ -294,6 +301,18 @@ class SQLQuery:
         return prefix + ", ".join(parts) + " ", params
 
     def as_select(self, connection) -> tuple[str, list]:
+        # Reset per-compile state so a second ``as_select`` on the same
+        # query doesn't accumulate duplicate ``FilteredRelation``
+        # parameters from an earlier compile.
+        self._join_params = []
+        # ``self.joins`` is incremental — accumulated across compile
+        # invocations because ``_resolve_column`` registers FK joins
+        # opportunistically. ``FilteredRelation`` joins live in the
+        # same list; we DON'T reset ``self.joins`` here, but we do
+        # rebuild any FR joins below so a re-compile picks up updated
+        # condition params.
+        self._rebuild_filtered_relations(connection)
+
         table = self.get_table()
         alias = table
         # ``distinct_on_fields`` is set by ``QuerySet.distinct(*fields)``
@@ -370,6 +389,10 @@ class SQLQuery:
         # Compile WHERE first so _resolve_column can populate self.joins via FK traversal
         where_sql, where_params = self._compile_nodes(self.where_nodes, connection)
         params.extend(annotation_params)  # SELECT annotations come after WITH
+        # ``FilteredRelation`` conditions are baked into JOIN ON clauses
+        # — their parameters slot in here, between SELECT and WHERE,
+        # because SQL evaluates ``JOIN ... ON`` before ``WHERE``.
+        params.extend(getattr(self, "_join_params", []))
         params.extend(where_params)
 
         # select_related: build LEFT OUTER JOINs and prefixed columns (supports nested paths)
@@ -1169,6 +1192,133 @@ class SQLQuery:
 
         return any(isinstance(a, Aggregate) for a in self.annotations.values())
 
+    def _rebuild_filtered_relations(self, connection) -> None:
+        """Drop any previously registered :class:`FilteredRelation`
+        joins so the next compile re-registers them with fresh
+        params. Called from :meth:`as_select` so a queryset compiled
+        twice doesn't accumulate stale param bindings on the
+        ``_join_params`` list."""
+        if not self.filtered_relations:
+            return
+        fr_names = set(self.filtered_relations)
+        self.joins = [j for j in self.joins if j[2] not in fr_names]
+
+    def _register_filtered_relation_join(self, fr_name: str, spec) -> Any:
+        """Compile a :class:`FilteredRelation` annotation into a LEFT JOIN
+        with the spec's :class:`Q` condition baked into the ON clause.
+
+        Returns the joined model class so :meth:`_resolve_column` can
+        keep walking ``__``-traversal parts against it. Idempotent: a
+        repeat call for the same ``fr_name`` is a no-op (the alias is
+        already registered with the right ON clause).
+        """
+        from .related_managers import (
+            ReverseFKDescriptor,
+            ReverseOneToOneDescriptor,
+        )
+
+        # Already registered? short-circuit.
+        for jt, jtbl, jalias, _on in self.joins:
+            if jalias == fr_name:
+                # Recover the joined model: forward FK → ``remote_field_to``,
+                # reverse → descriptor.source_model.
+                base_field = self._resolve_relation_field_for_fr(spec.relation_name)
+                return self._resolve_relation_target(spec.relation_name, base_field)
+
+        relation_field = self._resolve_relation_field_for_fr(spec.relation_name)
+        target_model = self._resolve_relation_target(
+            spec.relation_name, relation_field
+        )
+        target_table = target_model._meta.db_table
+        outer_alias = (
+            getattr(self, "_self_alias", None) or self.model._meta.db_table
+        )
+
+        # Build the relational ON clause (forward vs reverse vs reverse-O2O).
+        # The descriptor branch is the same shape used by ``_resolve_column``
+        # for FK traversal — duplicated here so we control the alias
+        # (the FR's name, not ``<outer>_<rel>``) and append the user's
+        # condition to the ON.
+        if hasattr(relation_field, "remote_field_to"):
+            on_base = (
+                f'"{fr_name}"."{target_model._meta.pk.column}" = '
+                f'"{outer_alias}"."{relation_field.column}"'
+            )
+        else:
+            descriptor = relation_field  # already the descriptor
+            assert isinstance(
+                descriptor, (ReverseFKDescriptor, ReverseOneToOneDescriptor)
+            )
+            fk_col = descriptor.fk_field.column
+            on_base = (
+                f'"{fr_name}"."{fk_col}" = '
+                f'"{outer_alias}"."{self.model._meta.pk.column}"'
+            )
+
+        # Register the JOIN with a placeholder ON FIRST so that the
+        # subsequent ``_compile_q`` call sees ``self.joins`` non-empty
+        # and the column qualifier branch in ``_resolve_column``
+        # produces ``"<fr_alias>"."col"`` instead of bare ``"col"``.
+        # The ON clause gets patched in place once the condition SQL
+        # is compiled.
+        join_idx = len(self.joins)
+        self.joins.append(("LEFT OUTER", target_table, fr_name, on_base))
+
+        saved_model = self.model
+        saved_self_alias = getattr(self, "_self_alias", None)
+        try:
+            self.model = target_model
+            self._self_alias = fr_name
+            cond_sql, cond_params = self._compile_q(spec.condition, connection=None)
+        finally:
+            self.model = saved_model
+            self._self_alias = saved_self_alias
+
+        # Stash the params on the query so the WHERE compiler picks them
+        # up alongside the JOIN. Same shape used by other JOIN-time
+        # parameter sources (see ``_join_params``).
+        if not hasattr(self, "_join_params"):
+            self._join_params = []
+        self._join_params.extend(cond_params)
+
+        on_clause = f"{on_base} AND {cond_sql}" if cond_sql else on_base
+        # Patch the placeholder ON clause we registered above.
+        self.joins[join_idx] = ("LEFT OUTER", target_table, fr_name, on_clause)
+        return target_model
+
+    def _resolve_relation_field_for_fr(self, relation_name: str):
+        """Look up the field / descriptor named *relation_name* on
+        ``self.model``. Returns either the forward-FK field (which has
+        ``remote_field_to``) or the reverse-FK descriptor instance.
+        Raises ``ValueError`` for unsupported relation kinds."""
+        from .exceptions import FieldDoesNotExist
+        from .related_managers import (
+            ReverseFKDescriptor,
+            ReverseOneToOneDescriptor,
+        )
+
+        try:
+            field = self.model._meta.get_field(relation_name)
+        except FieldDoesNotExist:
+            field = None
+        if field is not None and hasattr(field, "remote_field_to"):
+            return field
+        descriptor = getattr(self.model, relation_name, None)
+        if isinstance(
+            descriptor, (ReverseFKDescriptor, ReverseOneToOneDescriptor)
+        ):
+            return descriptor
+        raise ValueError(
+            f"FilteredRelation: cannot resolve relation {relation_name!r} on "
+            f"{self.model.__name__}. Only forward FKs and reverse-FK / "
+            "reverse-O2O relations are supported in this revision."
+        )
+
+    def _resolve_relation_target(self, relation_name: str, field_or_descriptor) -> Any:
+        if hasattr(field_or_descriptor, "remote_field_to"):
+            return field_or_descriptor._resolve_related_model()
+        return field_or_descriptor.source_model
+
     def _resolve_column(self, field_parts: list[str], connection: Any = None) -> str:
         from .exceptions import FieldDoesNotExist
 
@@ -1183,6 +1333,19 @@ class SQLQuery:
         # Resolve "pk" alias to the actual primary key column
         if parts[0] == "pk" and model._meta.pk:
             parts[0] = model._meta.pk.column
+
+        # ``FilteredRelation`` annotation referenced from the WHERE / ORDER
+        # BY: emit the LEFT JOIN with the alias the FR was registered
+        # under and bake its Q condition into the ON clause. Done before
+        # the per-step loop so the FR alias becomes the new
+        # ``current_alias`` that subsequent ``__`` parts resolve against.
+        if parts and parts[0] in self.filtered_relations and len(parts) > 1:
+            fr_name = parts.pop(0)
+            spec = self.filtered_relations[fr_name]
+            target_model = self._register_filtered_relation_join(fr_name, spec)
+            model = target_model
+            current_alias = fr_name
+
         while len(parts) > 1:
             fname = parts.pop(0)
             # Catch only "field not declared on this model" — anything else

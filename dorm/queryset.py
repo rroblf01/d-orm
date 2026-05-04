@@ -134,6 +134,43 @@ class Prefetch:
         )
 
 
+def prefetch_related_objects(
+    instances: list, *lookups: "str | Prefetch", using: str = "default"
+) -> None:
+    """Run ``prefetch_related`` against an already-loaded list of model
+    instances (Django parity helper).
+
+    The bulk path :meth:`QuerySet.prefetch_related` handles the common
+    case where the rows come from a fresh queryset. When you've gathered
+    instances from elsewhere — a cache, a manual SELECT, two parallel
+    branches stitched together by hand — Django offers
+    ``prefetch_related_objects(instances, *lookups)`` to retrofit the
+    same prefetch mechanics without re-fetching the source rows. dorm
+    matches the API.
+
+    Mutates each instance in *instances* in place: the related
+    queryset(s) get attached to the same descriptor / ``to_attr`` slot
+    a normal ``prefetch_related`` would populate, so subsequent
+    attribute access reads from the cache instead of hitting the DB.
+
+    No-op when *instances* is empty. All instances must share the same
+    model class — homogeneous lists only, just like Django's helper.
+    """
+    if not instances:
+        return
+    model_cls = type(instances[0])
+    for inst in instances[1:]:
+        if type(inst) is not model_cls:
+            raise ValueError(
+                "prefetch_related_objects(): every instance must share "
+                f"the same model class. Got {model_cls.__name__} and "
+                f"{type(inst).__name__}."
+            )
+    qs = QuerySet(model_cls, using)
+    qs._query.prefetch_related_fields = list(lookups)
+    qs._do_prefetch_related(list(instances))
+
+
 class CursorPage(Generic[_T]):
     """One page of keyset-paginated results returned by
     :meth:`QuerySet.cursor_paginate` / :meth:`QuerySet.acursor_paginate`.
@@ -599,15 +636,22 @@ class QuerySet(Generic[_T]):
         qs._cache_timeout = self._cache_timeout
         return qs
 
-    def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
+    def values_list(
+        self, *fields: str, flat: bool = False, named: bool = False
+    ) -> ValuesListQuerySet:
         if flat and len(fields) != 1:
             raise ValueError(
                 "'flat' is not valid when values_list is called with more than one field."
+            )
+        if flat and named:
+            raise ValueError(
+                "'flat' and 'named' are mutually exclusive — pick one."
             )
         qs = ValuesListQuerySet(self.model, self._db)
         qs._query = self._query.clone()
         qs._query.selected_fields = list(fields) if fields else None
         qs._flat = flat
+        qs._named = named
         qs._fields = list(fields)
         qs._cache_alias = self._cache_alias
         qs._cache_timeout = self._cache_timeout
@@ -767,13 +811,33 @@ class QuerySet(Generic[_T]):
             )
 
         qs = self._clone()
+        # ``FilteredRelation`` is a special annotation that does NOT
+        # project into SELECT — it only emits a LEFT JOIN with a Q
+        # condition baked into the ON clause when its alias is later
+        # referenced from filter / order_by / annotate. Route it
+        # through a dedicated dict so the regular SELECT compilation
+        # path doesn't try to render it as a column expression.
+        from .expressions import FilteredRelation as _FR
+
+        regular: dict[str, Any] = {}
+        for name, value in kwargs.items():
+            if isinstance(value, _FR):
+                qs._query.filtered_relations[name] = value
+                # Keep the name in ``alias_only_names`` so any code
+                # path that walks ``annotations`` for SELECT skips it
+                # (defensive — we don't add it to annotations, but
+                # other compilers may unify the lookup later).
+                qs._query.alias_only_names.add(name)
+            else:
+                regular[name] = value
+
         # If a name was previously declared as alias-only and is now
         # being annotated, promote it to a real SELECT projection
         # (matches Django's behaviour: ``alias().annotate()`` chains
         # turn the alias into a returned column).
-        for name in kwargs:
+        for name in regular:
             qs._query.alias_only_names.discard(name)
-        qs._query.annotations.update(kwargs)
+        qs._query.annotations.update(regular)
         return qs
 
     def _build_aggregate_sql(
@@ -3188,12 +3252,18 @@ class QuerySet(Generic[_T]):
             return [{f: row[f] for f in sf} for row in rows]
         return [dict(zip(sf, row)) for row in rows]
 
-    async def avalues_list(self, *fields: str, flat: bool = False) -> list[Any]:
+    async def avalues_list(
+        self, *fields: str, flat: bool = False, named: bool = False
+    ) -> list[Any]:
         if flat and len(fields) != 1:
             raise ValueError(
                 "'flat' is not valid when values_list is called with more than one field."
             )
-        qs = self.values_list(*fields, flat=flat)
+        if flat and named:
+            raise ValueError(
+                "'flat' and 'named' are mutually exclusive — pick one."
+            )
+        qs = self.values_list(*fields, flat=flat, named=named)
         conn = self._get_async_connection()
         sql, params = qs._query.as_select(conn)
         rows = await conn.execute(sql, params)
@@ -3437,12 +3507,16 @@ class QuerySet(Generic[_T]):
 
 class ValuesListQuerySet(QuerySet[Any]):
     _flat: bool = False
+    _named: bool = False
     _fields: list[str] = []
+    # Cached namedtuple class — built once per (field-tuple, model) pair.
+    _named_cls: type | None = None
 
     def _clone(self) -> ValuesListQuerySet:
         qs = ValuesListQuerySet(self.model, self._db)
         qs._query = self._query.clone()
         qs._flat = self._flat
+        qs._named = self._named
         qs._fields = list(self._fields)
         # Preserve the cache opt-in across the chain — without
         # this, ``qs.cache().values_list("name").filter(...)``
@@ -3455,13 +3529,33 @@ class ValuesListQuerySet(QuerySet[Any]):
     def _resolve_fields(self) -> list[str]:
         return self._fields or [f.column for f in self.model._meta.fields if f.column]
 
+    def _build_named_cls(self, fields: list[str]) -> type:
+        """Build (and cache) the namedtuple class used by ``named=True``.
+
+        The class name is ``Row`` to match Django's
+        ``QuerySet.values_list(named=True)`` output. ``rename=True``
+        lets us keep field names that aren't valid Python identifiers
+        (column-aliased annotations, ``__``-traversal paths) without
+        crashing — collections.namedtuple substitutes ``_N`` for the
+        offending positions.
+        """
+        from collections import namedtuple
+
+        if self._named_cls is None:
+            self._named_cls = namedtuple("Row", fields, rename=True)
+        return self._named_cls
+
     def _extract_row(self, row: Any, fields: list[str]) -> Any:
         values = (
             tuple(row[f] for f in fields)
             if hasattr(row, "keys")
             else tuple(row[: len(fields)])
         )
-        return values[0] if self._flat else values
+        if self._flat:
+            return values[0]
+        if self._named:
+            return self._build_named_cls(fields)(*values)
+        return values
 
     def _iterator(self) -> Iterator[Any]:
         connection = self._get_connection()

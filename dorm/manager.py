@@ -131,8 +131,10 @@ class BaseManager(Generic[_T]):
     def values(self, *fields: str) -> QuerySet[Any]:
         return self.get_queryset().values(*fields)
 
-    def values_list(self, *fields: str, flat: bool = False) -> ValuesListQuerySet:
-        return self.get_queryset().values_list(*fields, flat=flat)
+    def values_list(
+        self, *fields: str, flat: bool = False, named: bool = False
+    ) -> ValuesListQuerySet:
+        return self.get_queryset().values_list(*fields, flat=flat, named=named)
 
     def dates(self, field: str, kind: str, order: str = "ASC") -> list:
         return self.get_queryset().dates(field, kind, order)
@@ -505,8 +507,12 @@ class BaseManager(Generic[_T]):
     async def avalues(self, *fields: str) -> list[dict[str, Any]]:
         return await self.get_queryset().avalues(*fields)
 
-    async def avalues_list(self, *fields: str, flat: bool = False) -> list[Any]:
-        return await self.get_queryset().avalues_list(*fields, flat=flat)
+    async def avalues_list(
+        self, *fields: str, flat: bool = False, named: bool = False
+    ) -> list[Any]:
+        return await self.get_queryset().avalues_list(
+            *fields, flat=flat, named=named
+        )
 
     async def aget(self, *args: Any, **kwargs: Any) -> _T:
         return await self.get_queryset().aget(*args, **kwargs)

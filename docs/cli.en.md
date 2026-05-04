@@ -35,6 +35,7 @@ dorm makemigrations --empty --name backfill_slugs blog
 |---|---|
 | `--empty` | create a blank `RunPython` / `RunSQL` template |
 | `--name NAME` | suffix for the file name (default: derived from operations) |
+| `--check` (3.3+) | exit code 1 when the autodetector would write a migration; nothing is written. Wire into CI to catch model changes that ship without the matching migration |
 | `--merge` (3.2+) | resolve a fork in the migration graph by writing a no-op merge migration whose `dependencies = [...]` references every leaf — see below |
 | `--enable-pgvector` | scaffold a migration that enables the pgvector extension |
 | `--settings PATH` | settings module to load |

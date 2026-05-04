@@ -194,6 +194,16 @@ await Author.objects.values_list("name", flat=True)
 único round-trip; para sets enormes prefiere streaming con
 `aiterator()`.
 
+`values_list(named=True)` (3.3+) devuelve cada fila como un
+`collections.namedtuple` llamado ``Row`` para acceder a los campos
+por atributo en vez de por índice. Mutuamente exclusivo con ``flat``.
+
+```python
+rows: list = Author.objects.values_list("name", "age", named=True)
+for r in rows:
+    print(r.name, r.age)        # acceso por atributo, no [0]/[1]
+```
+
 ## Agregaciones y anotaciones
 
 ```python
@@ -252,6 +262,49 @@ extensión.
 
 Promueve un alias a proyección real volviéndolo a declarar con
 `annotate(name=...)` más adelante en la cadena — paridad con Django.
+
+### `FilteredRelation` — JOIN con condición `Q` (3.3+)
+
+`FilteredRelation` registra un ``LEFT OUTER JOIN`` cuya cláusula
+``ON`` lleva un predicado ``Q``. A diferencia de un
+``filter(rel__col=val)`` plano (que descarta filas externas que no
+tengan filas joineadas), el predicado se hornea en el JOIN —
+las filas externas siempre sobreviven, solo se filtran las
+*filas joineadas*.
+
+```python
+import dorm
+from dorm import Q
+from dorm.expressions import FilteredRelation
+
+
+class Article(dorm.Model):
+    title: str = dorm.CharField(max_length=200)
+    # ... reverse FK desde Comment.article ...
+
+
+# Cada artículo joineado SOLO con sus comentarios aprobados:
+articles = (
+    Article.objects
+    .annotate(
+        approved=FilteredRelation(
+            "comment_set",
+            condition=Q(approved=True),
+        ),
+    )
+    .filter(approved__author="alice")
+)
+```
+
+La anotación nunca aterriza en ``SELECT`` (solo alias). Las
+referencias posteriores en ``filter`` / ``order_by`` vía
+``approved__col`` resuelven a través del alias joineado con la
+condición ya aplicada.
+
+Tipos de relación soportados en esta revisión: forward FK,
+reverse FK y reverse OneToOne. M2M, FKs genéricas y condiciones
+correlacionadas externamente (``OuterRef`` / ``F`` dentro de
+``condition``) quedan deferidas.
 
 ## Funciones BD
 
@@ -426,6 +479,25 @@ for author in Author.objects.prefetch_related("books"):
 
 Para M2M, `prefetch_related` ejecuta un único JOIN contra la tabla
 intermedia (sin el "fetch through y luego fetch targets" en dos pasos).
+
+#### Retrofit prefetch sobre lista hecha a mano (3.3+)
+
+```python
+from dorm import prefetch_related_objects
+
+authors: list = [
+    Author.objects.get(pk=1),
+    Author.objects.get(pk=2),
+]
+prefetch_related_objects(authors, "books", "publisher")
+# Cada instancia ya carga los mismos slots de cache que
+# poblaría una queryset fresca con ``prefetch_related(...)``.
+```
+
+`prefetch_related_objects(instances, *lookups)` mirrorea el helper
+de Django. Útil cuando las instancias vienen de cache, de un
+``raw()`` SELECT manual, o de dos ramas paralelas unidas a mano.
+Todas las instancias deben compartir la misma clase modelo.
 
 #### FKs polimórficas (`GenericForeignKey`)
 

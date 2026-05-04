@@ -280,6 +280,9 @@ def cmd_makemigrations(args):
     else:
         apps = installed_apps
 
+    check_only = bool(getattr(args, "check", False))
+    pending_count = 0
+
     for app in apps:
         print(f"Detecting changes for '{app}'...")
         app_label = _resolve_app_label(app)
@@ -301,10 +304,27 @@ def cmd_makemigrations(args):
             print(f"  No changes detected for '{app}'.")
             continue
 
+        if check_only:
+            # CI gate mode — surface the diff but DON'T write.
+            ops = changes[app_label]
+            print(
+                f"  Pending changes for '{app}': "
+                f"{len(ops)} operation(s) would be written."
+            )
+            pending_count += len(ops)
+            continue
+
         next_num = _next_migration_number(mig_dir)
         ops = changes[app_label]
         path = write_migration(app_label, mig_dir, next_num, ops)
         print(f"  Created migration: {path}")
+
+    if check_only and pending_count > 0:
+        print(
+            f"makemigrations --check: {pending_count} pending operation(s). "
+            "Run ``dorm makemigrations`` and commit the result."
+        )
+        sys.exit(1)
 
 
 def cmd_squashmigrations(args):
@@ -1746,6 +1766,19 @@ def main():
             "Generate a migration that enables the pgvector PostgreSQL "
             "extension. Pair with at least one app label so the file "
             "lands in the right migrations directory."
+        ),
+    )
+    mm.add_argument(
+        "--check",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit non-zero when the autodetector would write a "
+            "migration. Does NOT touch the filesystem — the diff is "
+            "printed for review and the process exits 1 if any "
+            "operations are pending. Use this as a CI gate so PRs "
+            "that change models without committing the matching "
+            "migration get caught before merge."
         ),
     )
     mm.add_argument(

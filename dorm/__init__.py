@@ -199,7 +199,15 @@ from .storage import (
 from .models import Model
 from .manager import Manager
 from .indexes import Index
-from .queryset import CTE, CombinedQuerySet, CursorPage, Prefetch, QuerySet, RawQuerySet
+from .queryset import (
+    CTE,
+    CombinedQuerySet,
+    CursorPage,
+    Prefetch,
+    QuerySet,
+    RawQuerySet,
+    prefetch_related_objects,
+)
 from .validators import (
     EmailValidator,
     MaxLengthValidator,
@@ -210,7 +218,7 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 __all__ = [
     # Config
     "configure",
@@ -237,6 +245,7 @@ __all__ = [
     "CursorPage",
     "CTE",
     "Prefetch",
+    "prefetch_related_objects",
     "RawQuerySet",
     # Fields
     "AutoField",

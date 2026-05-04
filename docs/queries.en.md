@@ -199,6 +199,17 @@ await Author.objects.values_list("name", flat=True)
 `avalues` / `avalues_list` materialize the whole queryset in one
 round-trip; for huge sets prefer streaming via `aiterator()`.
 
+`values_list(named=True)` (3.3+) returns each row as a
+`collections.namedtuple` named ``Row`` so callers read fields by
+attribute instead of positional index. Mutually exclusive with
+``flat``.
+
+```python
+rows: list = Author.objects.values_list("name", "age", named=True)
+for r in rows:
+    print(r.name, r.age)        # attribute access — no [0]/[1] indexing
+```
+
 ## Aggregations & annotations
 
 ```python
@@ -232,6 +243,47 @@ authors = (
 
 Promote an alias to a real projection by re-declaring it via
 `annotate(name=...)` later in the chain — Django parity.
+
+### `FilteredRelation` — JOIN with a `Q` condition (3.3+)
+
+`FilteredRelation` registers a ``LEFT OUTER JOIN`` whose ``ON``
+clause carries a ``Q`` predicate. Unlike a plain
+``filter(rel__col=val)`` (which removes outer rows that have zero
+matching joined rows), the predicate is baked into the JOIN itself
+— outer rows always survive, only the *joined rows* are filtered.
+
+```python
+import dorm
+from dorm import Q
+from dorm.expressions import FilteredRelation
+
+
+class Article(dorm.Model):
+    title: str = dorm.CharField(max_length=200)
+    # ... reverse FK from Comment.article ...
+
+
+# Every article, joined to ONLY its approved comments:
+articles = (
+    Article.objects
+    .annotate(
+        approved=FilteredRelation(
+            "comment_set",
+            condition=Q(approved=True),
+        ),
+    )
+    .filter(approved__author="alice")
+)
+```
+
+The annotation never lands in ``SELECT`` (alias-only).
+Subsequent ``filter`` / ``order_by`` references via
+``approved__col`` resolve through the joined alias with the
+condition already applied.
+
+Supported relation kinds in this revision: forward FK, reverse FK,
+and reverse OneToOne. M2M, generic FKs, and outer-correlated
+conditions (``OuterRef`` / ``F`` inside ``condition``) are deferred.
 
 ### PostgreSQL aggregates (3.1+)
 
@@ -427,6 +479,25 @@ for author in Author.objects.prefetch_related("books"):
 
 For M2M, `prefetch_related` issues a single JOIN against the through
 table (no separate "fetch through then fetch targets" round-trip).
+
+#### Retrofit prefetch on a hand-built list (3.3+)
+
+```python
+from dorm import prefetch_related_objects
+
+authors: list = [
+    Author.objects.get(pk=1),
+    Author.objects.get(pk=2),
+]
+prefetch_related_objects(authors, "books", "publisher")
+# Each instance now carries the same prefetch cache slots a
+# fresh ``prefetch_related(...)`` queryset would have populated.
+```
+
+`prefetch_related_objects(instances, *lookups)` mirrors Django's
+helper. Useful when instances arrive from a cache, manual
+``raw()`` SELECT, or two parallel branches stitched together by
+hand. All instances must share the same model class.
 
 #### Polymorphic FKs (`GenericForeignKey`)
 

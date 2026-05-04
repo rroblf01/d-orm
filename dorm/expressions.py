@@ -245,3 +245,64 @@ class Exists:
     def __repr__(self) -> str:
         prefix = "~" if self.negated else ""
         return f"{prefix}Exists({self.queryset!r})"
+
+
+class FilteredRelation:
+    """Annotation that emits a ``LEFT JOIN`` with a :class:`Q` condition
+    baked into the ``ON`` clause (Django parity, 3.3+).
+
+    Use this when you want to filter the *joined rows* of a relation
+    without filtering the *outer rows*. A plain
+    ``filter(comments__approved=True)`` removes articles that have no
+    approved comments; ``annotate(approved=FilteredRelation('comments',
+    condition=Q(approved=True)))`` keeps every article and joins only
+    the approved comments alongside.
+
+    Usage::
+
+        from dorm import Q
+        from dorm.expressions import FilteredRelation
+
+        articles = (
+            Article.objects
+            .annotate(
+                approved=FilteredRelation(
+                    "comments",
+                    condition=Q(approved=True),
+                ),
+            )
+            .filter(approved__author="alice")
+        )
+
+    Caveats / limitations of the v3.3 cut:
+
+    - The relation must be a single forward FK or reverse FK on the
+      base model (no nested traversal in the relation name).
+    - The ``condition`` Q references columns on the **related** model
+      directly, by their attname. Nested ``__`` traversal inside the
+      condition is allowed (it adds further JOINs anchored on the
+      filtered alias). Outer-correlation via :class:`OuterRef` /
+      :class:`F` is **not** supported in this revision.
+    - The annotation never lands in the SELECT list — same shape as
+      :meth:`QuerySet.alias`.
+    """
+
+    __slots__ = ("relation_name", "condition")
+
+    def __init__(self, relation_name: str, *, condition: Q) -> None:
+        if not isinstance(relation_name, str) or not relation_name:
+            raise ValueError(
+                "FilteredRelation: relation_name must be a non-empty string."
+            )
+        if not isinstance(condition, Q):
+            raise TypeError(
+                "FilteredRelation: condition must be a Q() instance."
+            )
+        self.relation_name = relation_name
+        self.condition = condition
+
+    def __repr__(self) -> str:
+        return (
+            f"FilteredRelation({self.relation_name!r}, "
+            f"condition={self.condition!r})"
+        )

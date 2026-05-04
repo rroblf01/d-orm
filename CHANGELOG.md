@@ -6,11 +6,80 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Roadmap (post-3.2)
+> **Active milestone: v3.3.0 (work in progress).** Focus: close the
+> remaining Django-ORM parity gaps so callers can drop in dorm as a
+> framework-agnostic replacement. Every entry below ships in 3.3.0.
 
-- **`FilteredRelation`** — JOIN with condition (slated v4.0).
-  Significant queryset-compiler lift; defer until the compiler
-  refactor lands.
+### v3.3.0 — added so far
+
+#### `FilteredRelation` — JOIN with a `Q` condition (Django parity)
+
+- New :class:`dorm.expressions.FilteredRelation` annotation. Use
+  inside ``annotate(name=FilteredRelation("relation",
+  condition=Q(...)))`` to register a ``LEFT OUTER JOIN`` whose
+  ``ON`` clause carries the user's ``Q`` predicate alongside the
+  relational join condition. The annotation never lands in
+  ``SELECT`` (alias-only); subsequent ``filter`` / ``order_by``
+  references to ``name__col`` resolve through the joined alias
+  with the predicate already applied.
+- Use case: filter the *joined rows* of a relation without
+  filtering the *outer rows*. Plain
+  ``filter(comments__approved=True)`` drops articles that have no
+  approved comments; ``annotate(approved=FilteredRelation(
+  "comments", condition=Q(approved=True)))`` keeps every article
+  and joins only the approved comments alongside.
+- Supported relation kinds in this revision: forward FK, reverse
+  FK, and reverse OneToOne. M2M, generic FKs, and outer-correlated
+  conditions (``OuterRef`` / ``F`` inside ``condition``) are
+  deferred to a future iteration.
+
+#### `QuerySet.values_list(named=True)` (Django parity)
+
+- New ``named=True`` keyword on
+  :meth:`QuerySet.values_list` / :meth:`QuerySet.avalues_list` /
+  :meth:`Manager.values_list` / :meth:`Manager.avalues_list`.
+  Each row comes back as a :func:`collections.namedtuple` instance
+  named ``Row``, so callers read by attribute (``r.author_id``)
+  instead of positional index. Mutually exclusive with ``flat``.
+- Field names that aren't valid Python identifiers (alias paths
+  with ``__``) get auto-renamed to ``_N`` placeholders via
+  ``namedtuple(rename=True)`` — the row still hydrates instead of
+  crashing the call.
+
+#### `prefetch_related_objects()` (Django parity)
+
+- New module-level helper :func:`dorm.prefetch_related_objects`
+  retrofits prefetch on a list of already-loaded instances. Same
+  shape as Django: pass the instances + lookup name(s) (or
+  :class:`Prefetch` specs), and the function attaches the related
+  rows to the cache slot a normal ``prefetch_related`` would
+  populate. Useful when instances arrive from a cache, manual
+  ``raw()`` SELECT, or two parallel branches stitched together by
+  hand.
+
+#### `dorm makemigrations --check` (CI gate)
+
+- New ``--check`` flag on ``dorm makemigrations``. Runs the
+  autodetector but **does not** write a migration file; instead,
+  prints the pending diff and exits with code 1 when any
+  operations are pending. Wire into a CI step so PRs that change
+  models without committing the matching migration get caught
+  before merge.
+
+#### Fixed — per-tenant migration recorder bootstrap
+
+- ``MigrationRecorder.ensure_table`` no longer skips the
+  ``CREATE TABLE IF NOT EXISTS`` based on a prior
+  ``connection.table_exists`` probe. The previous logic broke under
+  ``dorm migrate --tenant``: PG's ``table_exists`` queries
+  ``pg_tables.tablename`` without a schema filter, so a
+  ``public.dorm_migrations`` made the per-tenant ``ensure_table``
+  skip the create — and the next ``SELECT`` from the recorder
+  inside the tenant's ``search_path`` couldn't resolve the table.
+  ``CREATE TABLE IF NOT EXISTS`` is idempotent on every supported
+  backend, so the optimisation was load-bearing but unsafe; it's
+  now unconditional. Each tenant schema owns its own recorder
+  table.
 
 ## [3.2.0] - 2026-05-04
 
