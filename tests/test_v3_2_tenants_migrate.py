@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import dorm
 from dorm.contrib.tenants import (
     _registered_tenants,
     ensure_schema,
@@ -147,9 +146,10 @@ def pg_tenant_env(tmp_path: Path, monkeypatch):
 
     app_label = "v3_2_tenant_app"
     schema = "v3_2_tenant_test"
-    pkg_dir = _scaffold_app(tmp_path, app_label)
+    _scaffold_app(tmp_path, app_label)
 
     import sys
+
     sys.path.insert(0, str(tmp_path))
 
     # Wire INSTALLED_APPS so migrate_tenant's app loop sees us.
@@ -159,6 +159,7 @@ def pg_tenant_env(tmp_path: Path, monkeypatch):
     settings.INSTALLED_APPS = saved_apps + [app_label]
     # Ensure model is in the registry.
     import importlib
+
     importlib.import_module(f"{app_label}.models")
 
     from dorm.db.connection import get_connection
@@ -184,8 +185,7 @@ def test_migrate_tenant_creates_schema_and_table(pg_tenant_env):
 
     conn = get_connection()
     rows = conn.execute(
-        "SELECT schemaname FROM pg_tables "
-        "WHERE schemaname = %s AND tablename = %s",
+        "SELECT schemaname FROM pg_tables WHERE schemaname = %s AND tablename = %s",
         [schema, f"{app_label}_widget"],
     )
     assert any(r["schemaname"] == schema for r in rows)

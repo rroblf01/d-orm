@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-import dorm
 from dorm.db.connection import get_connection
 from dorm.migrations.aexecutor import AsyncMigrationExecutor
 from dorm.migrations.executor import MigrationExecutor
