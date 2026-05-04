@@ -272,7 +272,15 @@ def test_assert_max_queries_fails_when_over():
             Author.objects.filter(name="x").count()
 
 
-def test_assert_max_queries_factory_async():
+async def test_assert_max_queries_factory_async():
+    """Run on the session-scoped event loop instead of
+    ``asyncio.run()``: the latter spins a fresh loop per call,
+    binds the psycopg async pool to it, then closes it — and the
+    pool's ``__del__`` running on a dead loop has been observed
+    to SIGSEGV under ``pytest -n N`` on Python 3.14 (same crash
+    class as the FastAPI portal-thread one). ``asyncio_mode = "auto"``
+    + ``async def`` runs the test on the session loop, keeping
+    the pool's lifecycle aligned with every other async test."""
     from dorm.test import assertMaxQueriesFactory
     from tests.models import Author
 
@@ -280,7 +288,7 @@ def test_assert_max_queries_factory_async():
     async def acount():
         return await Author.objects.filter(name="x").acount()
 
-    n = asyncio.run(acount())
+    n = await acount()
     assert n == 0
 
 

@@ -372,22 +372,24 @@ def test_pre_post_save_delete_signals():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_async_crud_roundtrip():
+async def test_async_crud_roundtrip():
+    """Run on the session-scoped event loop. ``asyncio.run()``
+    spins a fresh loop per call and binds the psycopg async pool
+    to it; the pool's ``__del__`` then runs after the loop
+    closes and has been observed to SIGSEGV under ``pytest -n N``
+    on Python 3.14."""
     from tests.models import Author
 
-    async def go():
-        a = await Author.objects.acreate(name="ASY", age=2, email="async@e.com")
-        a.name = "ASY2"
-        await a.asave()
-        got = await Author.objects.aget(id=a.id)  # ty:ignore[unresolved-attribute]
-        assert got.name == "ASY2"
-        rows: list[Author] = []
-        async for r in Author.objects.filter(email="async@e.com").aiterator():
-            rows.append(r)
-        assert len(rows) == 1
-        await a.adelete()
-
-    asyncio.run(go())
+    a = await Author.objects.acreate(name="ASY", age=2, email="async@e.com")
+    a.name = "ASY2"
+    await a.asave()
+    got = await Author.objects.aget(id=a.id)  # ty:ignore[unresolved-attribute]
+    assert got.name == "ASY2"
+    rows: list[Author] = []
+    async for r in Author.objects.filter(email="async@e.com").aiterator():
+        rows.append(r)
+    assert len(rows) == 1
+    await a.adelete()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

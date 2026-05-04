@@ -18,40 +18,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Python ${{ matrix.python-version }} / PG 16
+  # SQLite-only matrix — fastest to spin up, runs against every
+  # supported Python version. Doubles as the lint / type-check gate
+  # since those don't depend on a real DB service.
+  sqlite:
+    name: SQLite / Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Cap concurrent matrix legs at 3 — keeps total in-flight
+      # runners under the free-tier comfort window and gives each
+      # leg the memory headroom needed for ``pytest -n 4`` without
+      # tripping the OOM killer.
+      max-parallel: 3
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
-
-    services:
-      # Real Postgres so the postgres-parametrized tests actually run in CI.
-      # Without this the conftest's `_docker_available()` check would skip
-      # them silently on hosted runners that don't expose a docker daemon.
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: dorm_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-
-    env:
-      # Tell conftest to use this service container directly instead of
-      # spawning a testcontainer (faster + more reliable in CI).
-      DORM_TEST_POSTGRES_HOST: localhost
-      DORM_TEST_POSTGRES_PORT: 5432
-      DORM_TEST_POSTGRES_USER: postgres
-      DORM_TEST_POSTGRES_PASSWORD: postgres
-      DORM_TEST_POSTGRES_DB: dorm_test
 
     steps:
       - uses: actions/checkout@v6
@@ -67,53 +48,35 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra=all
 
-      - name: Add swap
-        # Hosted runners ship with 7GB RAM and the suite + PG service
-        # + 2 xdist workers occasionally trip the OOM killer, leaving
-        # `worker 'gwN' crashed` flakes. Swap absorbs the spikes.
-        # Runners already ship with an active /swapfile, so we replace
-        # it with a larger one rather than creating a fresh path.
-        run: |
-          sudo swapoff -a
-          sudo rm -f /mnt/swapfile /swapfile
-          sudo fallocate -l 8G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
-
       - name: Type check
         run: uv run ty check
 
       - name: Lint
         run: uv run ruff check .
 
-      - name: Run tests
-        # --cov-fail-under floors the line-coverage at the current level
-        # so accidental drops break CI. Raise the number whenever you
-        # add tests; never silently lower it.
-        # --max-worker-restart lets xdist resurrect a worker the OOM
-        # killer took out instead of dropping its coverage data and
-        # tanking the whole run.
-        run: uv run pytest -n 2 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=83
+      - name: Run tests (SQLite only)
+        # No ``DORM_TEST_POSTGRES_HOST`` exported → conftest's
+        # ``_backends()`` returns ``["sqlite"]`` (Postgres + MySQL
+        # parametrization both gated on env vars). The full suite
+        # runs against the SQLite parametrisation only on this job.
+        run: uv run pytest -n 4 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=83
 
-  # Catch PG-version-specific behavior (advisory locks, IDENTITY columns,
-  # syntax differences) by running the suite against the supported range.
-  # Latest Python only — Python compat is covered by the matrix above.
-  pg-matrix:
-    name: PG ${{ matrix.postgres-version }}
+  # Postgres matrix — pinned PG 16 (LTS-style middle-of-the-road)
+  # plus the two flanking majors most production users run. Runs
+  # only on Python 3.14 (Python compat is covered by the SQLite
+  # job above).
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Cap concurrent matrix legs at 3 — keeps total in-flight
+      # runners under the free-tier comfort window and gives each
+      # leg the memory headroom needed for ``pytest -n 4`` without
+      # tripping the OOM killer.
+      max-parallel: 3
       matrix:
-        # Cover only the currently-supported Postgres releases — the
-        # main ``test`` job above pins PG 16 (the LTS-style middle
-        # of the road), and this matrix covers the two flanking
-        # majors that real users are likely to be on. Older majors
-        # (13 / 14 / 15) are out of upstream community support and
-        # the matrix grew expensive enough to trip the runner OOM
-        # killer on parallel pytest workers.
-        postgres-version: ["17-alpine", "18-alpine"]
+        postgres-version: ["16-alpine", "17-alpine", "18-alpine"]
 
     services:
       postgres:
@@ -131,6 +94,11 @@ jobs:
           --health-retries 10
 
     env:
+      # ``DORM_TEST_POSTGRES_HOST`` switches conftest's ``_backends()``
+      # to ``["sqlite", "postgres"]`` — every parametrised test runs
+      # twice, once against each backend. The SQLite leg here is
+      # cheap (in-memory file) and catches "broke SQLite while
+      # fixing PG" regressions in the same job.
       DORM_TEST_POSTGRES_HOST: localhost
       DORM_TEST_POSTGRES_PORT: 5432
       DORM_TEST_POSTGRES_USER: postgres
@@ -152,6 +120,12 @@ jobs:
         run: uv sync --extra=all
 
       - name: Add swap
+        # Hosted runners ship with 7GB RAM; the suite + PG service
+        # + 2 xdist workers occasionally trip the OOM killer,
+        # leaving ``worker 'gwN' crashed`` flakes. Swap absorbs the
+        # spikes. Runners already ship with an active /swapfile, so
+        # we replace it with a larger one rather than creating a
+        # fresh path.
         run: |
           sudo swapoff -a
           sudo rm -f /mnt/swapfile /swapfile
@@ -161,11 +135,14 @@ jobs:
           sudo swapon /mnt/swapfile
           free -h
 
-      - name: Run tests
-        # --cov-fail-under floors the line-coverage at the current level
-        # so accidental drops break CI. Raise the number whenever you
-        # add tests; never silently lower it.
-        run: uv run pytest -n 2 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=83
+      - name: Run tests (PG + SQLite parametrised)
+        # --cov-fail-under floors the line-coverage at the current
+        # level so accidental drops break CI. Raise the number
+        # whenever you add tests; never silently lower it.
+        # --max-worker-restart lets xdist resurrect a worker the
+        # OOM killer took out instead of dropping its coverage data
+        # and tanking the whole run.
+        run: uv run pytest -n 4 --max-worker-restart=3 --tb=short -q --cov=dorm --cov-fail-under=83
 
   # Dedicated MySQL job — the 3.1 backend is younger than the PG /
   # SQLite paths and several test files hard-code vendor-specific
@@ -178,6 +155,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Cap concurrent matrix legs at 3 — keeps total in-flight
+      # runners under the free-tier comfort window and gives each
+      # leg the memory headroom needed for ``pytest -n 4`` without
+      # tripping the OOM killer.
+      max-parallel: 3
       matrix:
         mysql-version: ["8.0", "8.4"]
 
@@ -221,12 +203,13 @@ jobs:
         # only the MySQL-aware test files are stable today. The rest
         # of the suite hard-codes vendor DDL (``BIGSERIAL``, etc.)
         # that the autodetector / synthetic models pick up on PG +
-        # SQLite. Until those tests get vendor-aware helpers (planned
-        # for v3.2), gate the MySQL CI run to the focused subset
-        # below — anything failing here is a real backend regression
-        # rather than a pre-existing test-shape mismatch.
+        # SQLite. Until those tests get vendor-aware helpers
+        # (planned for v3.2), gate the MySQL CI run to the focused
+        # subset below — anything failing here is a real backend
+        # regression rather than a pre-existing test-shape
+        # mismatch.
         run: |
-          uv run pytest -n 2 --max-worker-restart=3 --tb=short -q \
+          uv run pytest -n 4 --max-worker-restart=3 --tb=short -q \
             tests/test_v3_1_audit_fixes.py \
             tests/test_v3_1_release.py::test_reverse_fk_filter_emits_left_join \
             tests/test_v3_1_release.py::test_reverse_fk_count_aggregate \

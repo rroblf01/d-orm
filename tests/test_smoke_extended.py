@@ -702,20 +702,20 @@ def test_superuser_short_circuits_perms(_auth_tables_reuse):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_async_aiterator_chunks():
+async def test_async_aiterator_chunks():
+    """Run on the session-scoped event loop. ``asyncio.run()``
+    spins a fresh loop and the psycopg async pool's ``__del__``
+    on a dead loop has been observed to SIGSEGV under ``-n N``."""
     from tests.models import Author
 
-    async def go():
-        for i in range(7):
-            await Author.objects.acreate(
-                name=f"AS{i}", age=i, email=f"as{i}@e.com"
-            )
-        rows: list[Author] = []
-        async for r in Author.objects.all().aiterator(chunk_size=3):
-            rows.append(r)
-        assert len(rows) == 7
-
-    asyncio.run(go())
+    for i in range(7):
+        await Author.objects.acreate(
+            name=f"AS{i}", age=i, email=f"as{i}@e.com"
+        )
+    rows: list[Author] = []
+    async for r in Author.objects.all().aiterator(chunk_size=3):
+        rows.append(r)
+    assert len(rows) == 7
 
 
 # ──────────────────────────────────────────────────────────────────────────────

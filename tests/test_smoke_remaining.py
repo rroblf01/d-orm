@@ -298,24 +298,25 @@ def test_manager_using_unknown_alias_raises():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_atomic_inside_async_coroutine():
+async def test_atomic_inside_async_coroutine():
     """``atomic()`` is sync; calling it from inside an async function
     works because the body of the ``with`` block stays in sync land
-    (no ``await`` is required for the helper itself)."""
+    (no ``await`` is required for the helper itself).
+
+    Run on the session-scoped event loop — ``asyncio.run()`` spins
+    a fresh loop and the psycopg async pool's ``__del__`` on a dead
+    loop has been observed to SIGSEGV under ``pytest -n N``.
+    """
     from dorm.transaction import atomic
     from tests.models import Author
 
-    async def go():
-        try:
-            with atomic():
-                Author.objects.create(name="ATX", age=1, email="atx@e.com")
-                raise RuntimeError("rollback inside async")
-        except RuntimeError:
-            pass
-        # Outer rollback must drop the row.
-        return Author.objects.filter(email="atx@e.com").exists()
-
-    assert asyncio.run(go()) is False
+    try:
+        with atomic():
+            Author.objects.create(name="ATX", age=1, email="atx@e.com")
+            raise RuntimeError("rollback inside async")
+    except RuntimeError:
+        pass
+    assert Author.objects.filter(email="atx@e.com").exists() is False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -323,9 +324,10 @@ def test_atomic_inside_async_coroutine():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_async_signals_fire_on_acreate():
+async def test_async_signals_fire_on_acreate():
     """``post_save`` connected with a sync handler must still fire
-    when the row was created via the async API."""
+    when the row was created via the async API. Run on the
+    session-scoped loop to keep the psycopg async pool aligned."""
     from dorm.signals import post_save
     from tests.models import Author
 
@@ -336,11 +338,7 @@ def test_async_signals_fire_on_acreate():
 
     post_save.connect(on_save, sender=Author)
     try:
-
-        async def go():
-            await Author.objects.acreate(name="ASIG", age=1, email="asig@e.com")
-
-        asyncio.run(go())
+        await Author.objects.acreate(name="ASIG", age=1, email="asig@e.com")
     finally:
         post_save.disconnect(on_save, sender=Author)
     assert captured and captured[0][0] == "ASIG"
