@@ -10,7 +10,6 @@ Index condition, transient-error retry, CLI ``inspectdb`` /
 
 from __future__ import annotations
 
-import asyncio
 import pickle
 import subprocess
 from pathlib import Path

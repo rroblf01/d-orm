@@ -9,7 +9,6 @@ similar contracts that previously had only unit-style coverage.
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import subprocess
 from pathlib import Path

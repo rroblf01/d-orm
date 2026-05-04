@@ -15,7 +15,6 @@ tests reuse the ``_auth_tables`` fixture pattern from
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import time
 
