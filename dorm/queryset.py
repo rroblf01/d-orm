@@ -3527,7 +3527,20 @@ class ValuesListQuerySet(QuerySet[Any]):
         return qs
 
     def _resolve_fields(self) -> list[str]:
-        return self._fields or [f.column for f in self.model._meta.fields if f.column]
+        if not self._fields:
+            return [f.column for f in self.model._meta.fields if f.column]
+        # Map ``"pk"`` to the actual primary-key column so the row
+        # lookup below finds the value the SQL projection emitted.
+        # The SELECT compiler does the same translation in
+        # :meth:`SQLQuery.get_columns`, so the two have to agree.
+        meta = self.model._meta
+        out: list[str] = []
+        for name in self._fields:
+            if name == "pk" and meta.pk:
+                out.append(meta.pk.column)
+            else:
+                out.append(name)
+        return out
 
     def _build_named_cls(self, fields: list[str]) -> type:
         """Build (and cache) the namedtuple class used by ``named=True``.
@@ -3554,7 +3567,14 @@ class ValuesListQuerySet(QuerySet[Any]):
         if self._flat:
             return values[0]
         if self._named:
-            return self._build_named_cls(fields)(*values)
+            # Use the USER-facing field names (``pk``, ``publisher__name``)
+            # for namedtuple attrs so callers read ``r.pk`` even when the
+            # row was looked up via the resolved column ``"id"``. With
+            # ``rename=True``, dotted/double-underscore paths get
+            # auto-rewritten to ``_N`` placeholders so the namedtuple
+            # call doesn't crash on identifiers Python rejects.
+            display_names = self._fields if self._fields else fields
+            return self._build_named_cls(display_names)(*values)
         return values
 
     def _iterator(self) -> Iterator[Any]:

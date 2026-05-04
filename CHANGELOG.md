@@ -6,13 +6,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Active milestone: v3.3.0 (work in progress).** Focus: close the
-> remaining Django-ORM parity gaps so callers can drop in dorm as a
-> framework-agnostic replacement. Every entry below ships in 3.3.0.
+## [3.3.0] - 2026-05-04
 
-### v3.3.0 — added so far
+Minor release. Closes the last Django-ORM parity gaps so dorm
+serves as a framework-agnostic drop-in replacement: filtered
+relations, named tuple rows, retrofit prefetching, and a
+``makemigrations --check`` CI gate. **No breaking changes vs 3.2**:
+every addition is opt-in or zero-cost when unused.
 
-#### `FilteredRelation` — JOIN with a `Q` condition (Django parity)
+### Added — `FilteredRelation` — JOIN with a `Q` condition (Django parity)
 
 - New :class:`dorm.expressions.FilteredRelation` annotation. Use
   inside ``annotate(name=FilteredRelation("relation",
@@ -33,7 +35,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conditions (``OuterRef`` / ``F`` inside ``condition``) are
   deferred to a future iteration.
 
-#### `QuerySet.values_list(named=True)` (Django parity)
+### Added — `QuerySet.values_list(named=True)`
 
 - New ``named=True`` keyword on
   :meth:`QuerySet.values_list` / :meth:`QuerySet.avalues_list` /
@@ -46,7 +48,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ``namedtuple(rename=True)`` — the row still hydrates instead of
   crashing the call.
 
-#### `prefetch_related_objects()` (Django parity)
+### Added — `prefetch_related_objects()`
 
 - New module-level helper :func:`dorm.prefetch_related_objects`
   retrofits prefetch on a list of already-loaded instances. Same
@@ -57,7 +59,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ``raw()`` SELECT, or two parallel branches stitched together by
   hand.
 
-#### `dorm makemigrations --check` (CI gate)
+### Added — `dorm makemigrations --check`
 
 - New ``--check`` flag on ``dorm makemigrations``. Runs the
   autodetector but **does not** write a migration file; instead,
@@ -66,7 +68,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   models without committing the matching migration get caught
   before merge.
 
-#### Fixed — per-tenant migration recorder bootstrap
+### Fixed — per-tenant migration recorder bootstrap
 
 - ``MigrationRecorder.ensure_table`` no longer skips the
   ``CREATE TABLE IF NOT EXISTS`` based on a prior
@@ -80,6 +82,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backend, so the optimisation was load-bearing but unsafe; it's
   now unconditional. Each tenant schema owns its own recorder
   table.
+
+### Fixed — async pool teardown SIGSEGV under `pytest -n N` (Python 3.14)
+
+- ``PostgreSQLAsyncDatabaseWrapper.force_close_sync`` now cancels
+  the ``run_coroutine_threadsafe`` future when its 0.5 s wait
+  times out. Without the explicit ``cancel()``, the backing Task
+  stayed pending on the session loop and held a strong reference
+  to the pool — the GC eventually finalised the pool against an
+  inconsistent loop state under ``pytest -n 4`` on Python 3.14,
+  taking the xdist worker down with a SIGSEGV. Same fix applied
+  to the autocommit-conn close path.
 
 ## [3.2.0] - 2026-05-04
 

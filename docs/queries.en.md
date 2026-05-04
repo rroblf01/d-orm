@@ -246,16 +246,32 @@ Promote an alias to a real projection by re-declaring it via
 
 ### `FilteredRelation` — JOIN with a `Q` condition (3.3+)
 
-`FilteredRelation` registers a ``LEFT OUTER JOIN`` whose ``ON``
-clause carries a ``Q`` predicate. Unlike a plain
-``filter(rel__col=val)`` (which removes outer rows that have zero
-matching joined rows), the predicate is baked into the JOIN itself
-— outer rows always survive, only the *joined rows* are filtered.
+#### What problem does it solve
+
+A plain `filter(rel__col=val)` does two things at once:
+
+1. Adds a `JOIN` between the outer table and the related table.
+2. Adds a `WHERE` clause that drops outer rows whose joined rows
+   don't match.
+
+That coupling is fine for "give me only the articles that have an
+approved comment". It's wrong for "give me **every** article, but
+when I look at its joined comments I want only the approved ones".
+Plain `filter` deletes the article entirely when no joined row
+matches; what you wanted was to keep the article and just narrow
+the joined rows.
+
+`FilteredRelation` decouples the two. The `Q` predicate is baked
+into the `ON` clause of a `LEFT OUTER JOIN` instead of the `WHERE`,
+so outer rows always survive — only the *joined* rows get filtered.
+Subsequent `filter` / `order_by` over the alias references those
+already-narrowed joined rows.
+
+#### Quick example
 
 ```python
 import dorm
-from dorm import Q
-from dorm.expressions import FilteredRelation
+from dorm import FilteredRelation, Q     # FilteredRelation re-exported in 3.3+
 
 
 class Article(dorm.Model):
@@ -276,14 +292,61 @@ articles = (
 )
 ```
 
-The annotation never lands in ``SELECT`` (alias-only).
-Subsequent ``filter`` / ``order_by`` references via
-``approved__col`` resolve through the joined alias with the
+The annotation never lands in `SELECT` (alias-only — same shape as
+`alias()`). Subsequent `filter` / `order_by` references via
+`approved__col` resolve through the joined alias with the
 condition already applied.
 
-Supported relation kinds in this revision: forward FK, reverse FK,
-and reverse OneToOne. M2M, generic FKs, and outer-correlated
-conditions (``OuterRef`` / ``F`` inside ``condition``) are deferred.
+#### Use-case checklist
+
+- **Sort outer rows by a filtered subset of related rows** —
+  `order_by("approved__created_at")` shows articles ordered by
+  their newest *approved* comment, not their newest comment of any
+  status.
+- **Two parallel views over the same relation** — annotate two
+  `FilteredRelation`s on the same source relation with different
+  conditions; each gets its own JOIN alias.
+- **Drop outer rows whose filtered relation is empty** — combine
+  with `filter(approved__isnull=False)` after the FR annotation.
+
+```python
+# Filter articles that have at least one approved comment by Alice:
+qs = (
+    Article.objects
+    .annotate(
+        approved=FilteredRelation("comment_set", condition=Q(approved=True)),
+    )
+    .filter(approved__author="alice")          # both filter ops
+    .filter(approved__isnull=False)            # share the same FR alias
+)
+
+
+# Two FRs, same relation, different conditions:
+authors = (
+    Author.objects
+    .annotate(
+        published=FilteredRelation("book_set", condition=Q(published=True)),
+        drafts=FilteredRelation("book_set", condition=Q(published=False)),
+    )
+    .filter(published__title="Out", drafts__title="In progress")
+)
+```
+
+#### Limits in this revision
+
+- Supported relation kinds: forward FK, reverse FK, reverse
+  OneToOne. **M2M and generic FKs land in a follow-up.**
+- `condition` references columns on the related model directly.
+  Nested traversal inside the condition works on simple paths but
+  isn't fully fuzz-tested yet.
+- **No** `OuterRef` / `F` correlation inside `condition` — those
+  require the queryset compiler's correlated-subquery path, which
+  is out of scope for 3.3.
+
+`condition=Q()` (no kwargs) is the unconditional tautology — the
+FR becomes a plain `LEFT OUTER JOIN` that always-matches, useful
+when you want the alias just to avoid duplicating the relation
+name in further chains.
 
 ### PostgreSQL aggregates (3.1+)
 

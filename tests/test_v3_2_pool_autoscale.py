@@ -246,6 +246,97 @@ def test_autoscale_pool_caps_at_ceiling(monkeypatch):
     assert out is None
 
 
+def test_autoscale_pool_resize_typeerror_fallback(monkeypatch):
+    """Older ``psycopg-pool`` versions accept positional args only;
+    autoscale must retry with positional args after a kwargs ``TypeError``."""
+    from dorm.db import connection as conn_mod
+
+    class _PositionalOnlyPool:
+        def __init__(self):
+            self.calls: list = []
+
+        def resize(self, *args, **kwargs):
+            if kwargs:
+                raise TypeError("only positional accepted")
+            self.calls.append(args)
+
+    fake = _FakeConn(max_size=10, in_use=8, waiting=0)
+    fake._pool = _PositionalOnlyPool()  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+    monkeypatch.setattr(conn_mod, "get_connection", lambda *a, **k: fake)
+
+    out = autoscale_pool(
+        target_utilization=0.7, min_floor=2, max_ceiling=20, step=2
+    )
+    assert out == (1, 12)
+    assert fake._pool.calls == [(1, 12)]  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+
+
+def test_autoscale_pool_resize_exception_returns_none(monkeypatch):
+    """Resize raises a non-TypeError exception — autoscale logs and
+    returns ``None`` instead of bubbling up. Hot-path safety."""
+    from dorm.db import connection as conn_mod
+
+    class _BrokenPool:
+        def resize(self, **kwargs):
+            raise RuntimeError("pool already closed")
+
+    fake = _FakeConn(max_size=10, in_use=8, waiting=0)
+    fake._pool = _BrokenPool()  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+    monkeypatch.setattr(conn_mod, "get_connection", lambda *a, **k: fake)
+
+    out = autoscale_pool(
+        target_utilization=0.7, min_floor=2, max_ceiling=20, step=2
+    )
+    assert out is None
+
+
+def test_autoscale_pool_zero_max_size_skips(monkeypatch):
+    """Pool reports ``max_size=0`` (uninitialised / never opened) —
+    autoscale must no-op rather than divide-by-zero or grow from 0."""
+    from dorm.db import connection as conn_mod
+
+    fake = _FakeConn(max_size=0, in_use=0, waiting=0)
+    monkeypatch.setattr(conn_mod, "get_connection", lambda *a, **k: fake)
+
+    out = autoscale_pool(
+        target_utilization=0.7, min_floor=2, max_ceiling=20, step=2
+    )
+    assert out is None
+
+
+def test_autoscale_pool_skips_when_pool_lacks_resize(monkeypatch):
+    """The wrapper exposes ``_pool`` but the pool object has no
+    ``resize`` callable — autoscale must skip silently."""
+    from dorm.db import connection as conn_mod
+
+    class _NoResizePool:
+        pass
+
+    fake = _FakeConn(max_size=10, in_use=8, waiting=0)
+    fake._pool = _NoResizePool()  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+    monkeypatch.setattr(conn_mod, "get_connection", lambda *a, **k: fake)
+
+    out = autoscale_pool(
+        target_utilization=0.7, min_floor=2, max_ceiling=20, step=2
+    )
+    assert out is None
+
+
+def test_read_pool_stats_when_wrapper_lacks_pool_stats_method(monkeypatch):
+    """Backend wrapper without ``pool_stats`` (sqlite, mysql) returns
+    a closed-shape :class:`PoolStats` rather than raising."""
+    from dorm.db import connection as conn_mod
+
+    class _NoStatsConn:
+        vendor = "mysql"
+        # No ``pool_stats`` attribute at all.
+
+    monkeypatch.setattr(conn_mod, "get_connection", lambda *a, **k: _NoStatsConn())
+    s = read_pool_stats()
+    assert s.open is False
+    assert s.vendor == "mysql"
+
+
 def test_autoscale_pool_partial_grow_to_ceiling(monkeypatch):
     """Utilisation high, room for one step before hitting ceiling — only
     grow by what's available, capped at max_ceiling."""

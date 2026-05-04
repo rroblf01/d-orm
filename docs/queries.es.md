@@ -265,17 +265,32 @@ Promueve un alias a proyección real volviéndolo a declarar con
 
 ### `FilteredRelation` — JOIN con condición `Q` (3.3+)
 
-`FilteredRelation` registra un ``LEFT OUTER JOIN`` cuya cláusula
-``ON`` lleva un predicado ``Q``. A diferencia de un
-``filter(rel__col=val)`` plano (que descarta filas externas que no
-tengan filas joineadas), el predicado se hornea en el JOIN —
-las filas externas siempre sobreviven, solo se filtran las
-*filas joineadas*.
+#### Qué problema resuelve
+
+Un `filter(rel__col=val)` plano hace dos cosas a la vez:
+
+1. Añade un `JOIN` entre la tabla externa y la tabla relacionada.
+2. Añade una cláusula `WHERE` que descarta filas externas cuyas
+   filas joineadas no cumplen.
+
+Ese acoplamiento está bien para "dame solo los artículos que
+tienen un comentario aprobado". Es incorrecto para "dame **cada**
+artículo, pero al mirar sus comentarios joineados quiero solo los
+aprobados". El `filter` plano elimina el artículo entero cuando
+ninguna fila joineada cumple; lo que querías era mantener el
+artículo y solo estrechar las filas joineadas.
+
+`FilteredRelation` desacopla ambos. El predicado `Q` se hornea en
+la cláusula `ON` de un `LEFT OUTER JOIN` en lugar del `WHERE`,
+así las filas externas siempre sobreviven — solo se filtran las
+filas *joineadas*. Los `filter` / `order_by` posteriores sobre el
+alias referencian esas filas joineadas ya estrechadas.
+
+#### Ejemplo rápido
 
 ```python
 import dorm
-from dorm import Q
-from dorm.expressions import FilteredRelation
+from dorm import FilteredRelation, Q     # FilteredRelation re-exportada en 3.3+
 
 
 class Article(dorm.Model):
@@ -296,15 +311,61 @@ articles = (
 )
 ```
 
-La anotación nunca aterriza en ``SELECT`` (solo alias). Las
-referencias posteriores en ``filter`` / ``order_by`` vía
-``approved__col`` resuelven a través del alias joineado con la
+La anotación nunca aterriza en `SELECT` (solo alias — misma forma
+que `alias()`). Los `filter` / `order_by` posteriores vía
+`approved__col` resuelven a través del alias joineado con la
 condición ya aplicada.
 
-Tipos de relación soportados en esta revisión: forward FK,
-reverse FK y reverse OneToOne. M2M, FKs genéricas y condiciones
-correlacionadas externamente (``OuterRef`` / ``F`` dentro de
-``condition``) quedan deferidas.
+#### Casos de uso
+
+- **Ordenar filas externas por un subconjunto filtrado de
+  relacionadas** — `order_by("approved__created_at")` muestra
+  artículos ordenados por su comentario *aprobado* más reciente,
+  no por el más reciente sin importar el estado.
+- **Dos vistas paralelas sobre la misma relación** — anota dos
+  `FilteredRelation`s sobre la misma relación origen con
+  condiciones distintas; cada uno tiene su propio alias de JOIN.
+- **Descartar filas externas cuya relación filtrada está vacía** —
+  combina con `filter(approved__isnull=False)` tras la anotación.
+
+```python
+# Artículos con al menos un comentario aprobado de Alice:
+qs = (
+    Article.objects
+    .annotate(
+        approved=FilteredRelation("comment_set", condition=Q(approved=True)),
+    )
+    .filter(approved__author="alice")          # ambos filter ops
+    .filter(approved__isnull=False)            # comparten el mismo alias FR
+)
+
+
+# Dos FRs, misma relación, condiciones distintas:
+authors = (
+    Author.objects
+    .annotate(
+        published=FilteredRelation("book_set", condition=Q(published=True)),
+        drafts=FilteredRelation("book_set", condition=Q(published=False)),
+    )
+    .filter(published__title="Out", drafts__title="En progreso")
+)
+```
+
+#### Límites en esta revisión
+
+- Tipos de relación soportados: forward FK, reverse FK, reverse
+  OneToOne. **M2M y FKs genéricas llegan en un follow-up.**
+- `condition` referencia columnas del modelo relacionado
+  directamente. Traversal anidado dentro de la condición funciona
+  en paths simples pero no está fully fuzz-tested aún.
+- **Sin** correlación `OuterRef` / `F` dentro de `condition` —
+  requiere la ruta de subqueries correlacionadas del compiler,
+  fuera del scope de 3.3.
+
+`condition=Q()` (sin kwargs) es la tautología incondicional — el
+FR pasa a ser un `LEFT OUTER JOIN` siempre-match, útil cuando
+quieres el alias solo para evitar duplicar el nombre de la
+relación en chains posteriores.
 
 ## Funciones BD
 

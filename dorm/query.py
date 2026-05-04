@@ -257,8 +257,20 @@ class SQLQuery:
                     resolved = self._resolve_column(f.split("__"))
                     parts.append(f'{resolved} AS "{f}"')
                 else:
-                    _validate_identifier(f)
-                    parts.append(f'{ta}"{f}"')
+                    # ``"pk"`` is a logical alias for the model's primary
+                    # key column. Without this resolution the SELECT
+                    # emits a bare ``"pk"`` identifier and PG raises
+                    # ``column "pk" does not exist`` when JOINs force
+                    # qualified references. Resolve early so
+                    # ``values_list("pk", flat=True)`` works on every
+                    # query shape, JOINs or not.
+                    col = (
+                        self.model._meta.pk.column
+                        if f == "pk" and self.model._meta.pk
+                        else f
+                    )
+                    _validate_identifier(col)
+                    parts.append(f'{ta}"{col}"')
             return ", ".join(parts)
         concrete = [f for f in self.model._meta.fields if f.column]
         return ", ".join(f'{ta}"{f.column}"' for f in concrete)
@@ -1547,7 +1559,13 @@ class SQLQuery:
         # column name on multiple tables. A bare ``"name"`` would
         # then trigger ``ambiguous column name`` on PG (and silently
         # pick the wrong table on SQLite).
-        if self.joins or self.select_related_fields:
+        # ``filtered_relations`` is checked too: even if its JOIN
+        # hasn't been materialised yet (``self.joins`` empty at the
+        # moment a leaf compiles), the eventual JOIN is guaranteed to
+        # land before the SQL is emitted, so we must qualify upfront
+        # to avoid ``WHERE "id" = ?`` being ambiguous against the
+        # joined table's ``"id"``.
+        if self.joins or self.select_related_fields or self.filtered_relations:
             return f'"{current_alias}"."{col_name}"'
         return f'"{col_name}"'
 

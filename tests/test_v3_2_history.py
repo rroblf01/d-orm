@@ -263,6 +263,91 @@ def test_record_history_for_rejects_untracked_model():
         record_history_for(obj, "+")
 
 
+def test_track_history_strips_auto_now_flags():
+    """``auto_now`` / ``auto_now_add`` on the source columns get
+    cleared on the history copy — re-stamping them would destroy
+    the audit trail (the snapshot would always read "now")."""
+
+    @track_history
+    class _Stamped(dorm.Model):
+        name = dorm.CharField(max_length=20)
+        created_at = dorm.DateTimeField(auto_now_add=True)
+        updated_at = dorm.DateTimeField(auto_now=True)
+
+        class Meta:
+            db_table = "v3_2_hist_stamped"
+            app_label = "v3_2_hist"
+
+    hist = _Stamped._history_model  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    created_copy = hist._meta.get_field("created_at")
+    updated_copy = hist._meta.get_field("updated_at")
+    assert getattr(created_copy, "auto_now_add", False) is False
+    assert getattr(updated_copy, "auto_now", False) is False
+
+
+@pytest.mark.asyncio
+async def test_arecord_history_for_rejects_invalid_kind():
+    @track_history
+    class _ABadKind(dorm.Model):
+        v = dorm.IntegerField()
+
+        class Meta:
+            db_table = "v3_2_hist_a_bad_kind"
+            app_label = "v3_2_hist"
+
+    cleanup = _setup_pair(_ABadKind)
+    try:
+        obj = _ABadKind.objects.create(v=1)
+        with pytest.raises(ValueError, match=r"kind must"):
+            await arecord_history_for(obj, "X")
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_arecord_history_for_rejects_untracked_model():
+    class _APlain(dorm.Model):
+        v = dorm.IntegerField()
+
+        class Meta:
+            db_table = "v3_2_hist_a_plain"
+            app_label = "v3_2_hist"
+
+    obj = _APlain(v=0)
+    with pytest.raises(TypeError, match="not history-tracked"):
+        await arecord_history_for(obj, "+")
+
+
+@pytest.mark.asyncio
+async def test_adelete_records_minus_row():
+    """Async ``adelete`` triggers the post_delete async receiver and
+    writes the ``-`` history row via the async path."""
+
+    @track_history
+    class _ADel(dorm.Model):
+        name = dorm.CharField(max_length=20)
+
+        class Meta:
+            db_table = "v3_2_hist_a_del"
+            app_label = "v3_2_hist"
+
+    cleanup = _setup_pair(_ADel)
+    try:
+        # Use ``asave`` + ``adelete`` so both async receivers fire.
+        # Inside the asyncio test body, ``objects.create`` would be
+        # detected as "sync inside async loop" and the sync receiver
+        # bails (delegating to the async receiver), but ``send``
+        # never invokes the async receiver — so plain
+        # ``objects.create`` would skip the ``+`` row.
+        obj = _ADel(name="bye")
+        await obj.asave()
+        await obj.adelete()
+        kinds = sorted(r.history_type for r in _ADel.history.all())  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+        assert kinds == ["+", "-"]
+    finally:
+        cleanup()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Async parity
 # ─────────────────────────────────────────────────────────────────────────────

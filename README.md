@@ -2,7 +2,26 @@
 
 A Django-inspired ORM for Python with full **synchronous and asynchronous** support. The same API you know from Django, without depending on the full framework.
 
-Works with **SQLite**, **PostgreSQL** and **libsql / Turso**. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related`), aggregations, DB functions, async-native ORM path, queryset & row caching, and Pydantic interop — all with real static typing (`Field[T]`).
+Works with **SQLite**, **PostgreSQL**, **MySQL / MariaDB** and **libsql / Turso**. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related` / `FilteredRelation`), aggregations, DB functions, async-native ORM path, queryset & row caching, audit-trail tracking (`@track_history`), per-tenant migration runner, and Pydantic interop — all with real static typing (`Field[T]`).
+
+## What's new in 3.3
+
+- **`FilteredRelation`** — `LEFT OUTER JOIN` with a `Q` condition baked into the `ON` clause. Filter the *joined rows* without dropping outer rows. Forward FK / reverse FK / reverse OneToOne supported. Re-exported from `dorm` directly.
+- **`QuerySet.values_list(named=True)`** — namedtuple rows; access fields by attribute (`r.author_id`) instead of positional index.
+- **`prefetch_related_objects(instances, *lookups)`** — retrofit prefetch on a hand-built list of model instances. Same shape as Django's helper.
+- **`dorm makemigrations --check`** — CI gate. Exits non-zero when the autodetector would write a migration; prints the pending diff and writes nothing.
+- **Bug fixes** — `bulk_create` + `db_default` columns no longer send `NULL`; `pk` alias resolves under JOINs; per-tenant recorder bootstraps in its own schema; async pool teardown SIGSEGV under `pytest -n N` on Python 3.14.
+
+## What's new in 3.2
+
+- **Per-tenant migration runner** — `dorm migrate --tenant <name>` / `--all-tenants` (PG-only).
+- **Connection-pool autoscaling** — `dorm.contrib.pool_autoscale` resizes the pool when utilisation crosses a threshold.
+- **Async migration executor** — `AsyncMigrationExecutor` for boot-time migrations in async stacks (Lambda, edge, FastAPI startup).
+- **Audit trail (`@track_history`)** — sibling `<Name>Historical` model auto-built; `+`/`~`/`-` rows on every `save` / `delete`. User attribution via contextvars.
+- **`bulk_create(returning=[…])`** — DB-side default columns back-filled in one round-trip via `RETURNING`.
+- **`dorm makemigrations --merge`** — collapse parallel migration leaves into a no-op merge migration.
+- **`dorm migrate-from-django` converter** — auto-port Django `models.py` to dorm-flavoured equivalents.
+- **MySQL / MariaDB backend** — real implementation via pymysql + aiomysql.
 
 ## What's new in 3.1
 

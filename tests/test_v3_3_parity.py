@@ -162,8 +162,90 @@ def test_filtered_relation_reverse_fk_join():
         )
         .filter(pub_books__title="published-1")
     )
-    pks = list(qs.values_list("id", flat=True))
+    # ``pk`` alias must resolve to the real PK column even with the
+    # FilteredRelation JOIN in flight — regression: previously this
+    # emitted bare ``"pk"`` which PG rejected as ``column "pk" does
+    # not exist`` once any JOIN qualified the SELECT list.
+    pks = list(qs.values_list("pk", flat=True))
     assert a.pk in pks
+
+
+def test_filtered_relation_empty_condition_acts_as_left_join():
+    """``condition=Q()`` with no kwargs is the unconditional tautology
+    (matches Django). The FR alias becomes a plain LEFT JOIN that
+    always-matches — used as a "give me every related row" alias."""
+    a1 = Author.objects.create(name="empty-cond-1", age=20, email="ec1@x.com")
+    a2 = Author.objects.create(name="empty-cond-2", age=21, email="ec2@x.com")
+    Book.objects.create(title="ec-book", author=a1, published=False)
+
+    qs = (
+        Author.objects
+        .filter(name__startswith="empty-cond")
+        .annotate(any_book=FilteredRelation("book_set", condition=Q()))
+        .filter(any_book__title="ec-book")
+    )
+    pks = sorted(o.pk for o in qs)
+    assert pks == [a1.pk]
+    assert a2.pk not in pks
+
+
+def test_filtered_relation_works_with_order_by_through_alias():
+    """Order through the FR alias — the JOIN keeps its rows ordered
+    by a column on the joined model."""
+    a1 = Author.objects.create(name="ord-a", age=99, email="o1@x.com")
+    a2 = Author.objects.create(name="ord-b", age=99, email="o2@x.com")
+    a3 = Author.objects.create(name="ord-c", age=99, email="o3@x.com")
+    Book.objects.create(title="zeta", author=a1, published=True)
+    Book.objects.create(title="alpha", author=a2, published=True)
+    Book.objects.create(title="mu", author=a3, published=True)
+
+    qs = (
+        Author.objects
+        .filter(age=99)
+        .annotate(pub=FilteredRelation("book_set", condition=Q(published=True)))
+        .filter(pub__title__in=["alpha", "mu", "zeta"])
+        .order_by("pub__title")
+    )
+    titles = [o.name for o in qs]
+    # The JOIN brings each author's published-book title alongside;
+    # ordering by ``pub__title`` should sort alpha → mu → zeta.
+    assert titles == ["ord-b", "ord-c", "ord-a"]
+
+
+def test_filtered_relation_two_aliases_same_relation():
+    """Two FRs over the same relation with different conditions —
+    each gets its own JOIN alias."""
+    a = Author.objects.create(name="dual-fr", age=50, email="d@x.com")
+    Book.objects.create(title="published", author=a, published=True)
+    Book.objects.create(title="draft", author=a, published=False)
+
+    qs = (
+        Author.objects
+        .filter(pk=a.pk)
+        .annotate(
+            pub=FilteredRelation("book_set", condition=Q(published=True)),
+            drafts=FilteredRelation("book_set", condition=Q(published=False)),
+        )
+        .filter(pub__title="published", drafts__title="draft")
+    )
+    pks = list(qs.values_list("pk", flat=True))
+    assert pks == [a.pk]
+
+
+def test_filtered_relation_idempotent_on_repeat_compile():
+    """Compile the same FR queryset twice — params must not duplicate
+    on the second :meth:`as_select` call (the per-compile reset
+    in ``as_select`` prevents the build-up)."""
+    Author.objects.create(name="idem", age=10, email="i@x.com")
+    qs = (
+        Author.objects
+        .annotate(here=FilteredRelation("publisher", condition=Q(name="X")))
+        .filter(here__name="X")
+    )
+    sql1, params1 = qs._query.as_select(None)
+    sql2, params2 = qs._query.as_select(None)
+    assert sql1 == sql2
+    assert params1 == params2 == ["X", "X"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

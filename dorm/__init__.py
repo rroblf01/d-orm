@@ -53,7 +53,7 @@ from .exceptions import (
     ProtectedError,
     ValidationError,
 )
-from .expressions import Exists, F, OuterRef, Q, Subquery, Value
+from .expressions import Exists, F, FilteredRelation, OuterRef, Q, Subquery, Value
 from .aggregates import (
     ArrayAgg,
     BitAnd,
@@ -316,6 +316,7 @@ __all__ = [
     "Subquery",
     "Exists",
     "OuterRef",
+    "FilteredRelation",
     # Aggregates
     "Count",
     "Sum",
