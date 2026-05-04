@@ -901,9 +901,13 @@ class PostgreSQLAsyncDatabaseWrapper:
         Never blocks — sync teardown can't await.
         """
         pool = self._pool
-        loop = self._loop
         autocommit_conn = self._autocommit_conn
         self._pool = None
+        # ``self._loop`` is dropped without binding to a local — the
+        # graveyard branch below doesn't need it (we no longer
+        # schedule ``pool.close()`` on the originating loop), and
+        # keeping the attribute populated would just leak a stale
+        # loop reference past ``reset_connections()``.
         self._loop = None
         self._autocommit_conn = None
         # Park drained pools / autocommit conns in a module-level
