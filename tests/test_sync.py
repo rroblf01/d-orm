@@ -368,10 +368,5 @@ def test_full_clean_valid():
     alice.full_clean()  # should not raise
 
 
-def test_invalid_email_rejected_at_construction():
-    """EmailField validates in ``to_python``, so an invalid address fails
-    as soon as ``Author(...)`` runs — full_clean is no longer the
-    gatekeeper for email format."""
-    import dorm as _dorm
-    with pytest.raises(_dorm.ValidationError):
-        Author(name="Alice", age=30, email="not-an-email")
+# ``test_invalid_email_rejected_at_construction`` lives in
+# ``test_tier1.py``.

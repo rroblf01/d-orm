@@ -337,13 +337,9 @@ def test_get_or_create_creates_when_missing():
     assert obj.pk is not None
 
 
-def test_update_or_create_updates_existing():
-    Tag.objects.create(name="uoc-existing")
-    obj, created = Tag.objects.update_or_create(
-        name="uoc-existing", defaults={"name": "uoc-renamed"}
-    )
-    assert created is False
-    assert obj.name == "uoc-renamed"
+# ``test_update_or_create_updates_existing`` lives in
+# ``test_transactions.py`` — same behaviour, more comprehensive
+# assertions there.
 
 
 def test_update_or_create_creates_when_missing():

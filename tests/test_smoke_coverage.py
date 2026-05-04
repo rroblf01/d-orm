@@ -310,20 +310,7 @@ def test_atomic_rollback_on_raise():
     assert not Author.objects.filter(email="tx@e.com").exists()
 
 
-def test_atomic_nested_savepoint():
-    from dorm.transaction import atomic
-    from tests.models import Author
-
-    with atomic():
-        Author.objects.create(name="N1", age=1, email="np1@e.com")
-        try:
-            with atomic():
-                Author.objects.create(name="N2", age=2, email="np2@e.com")
-                raise RuntimeError("inner")
-        except RuntimeError:
-            pass
-    assert Author.objects.filter(email="np1@e.com").exists()
-    assert not Author.objects.filter(email="np2@e.com").exists()
+# ``test_atomic_nested_savepoint`` lives in ``test_transactions.py``.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -420,27 +407,9 @@ def test_assert_num_queries():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_locmem_cache_get_set_delete():
-    from dorm.cache import get_cache, reset_caches
-    from dorm.cache.locmem import LocMemCache
-    from dorm.conf import settings
-
-    prev_caches = getattr(settings, "CACHES", None)
-    settings.CACHES = {"default": {"BACKEND": "dorm.cache.locmem.LocMemCache"}}
-    reset_caches()
-    try:
-        cache = get_cache()
-        assert isinstance(cache, LocMemCache)
-        cache.set("k", b"v", 60)
-        assert cache.get("k") == b"v"
-        cache.delete("k")
-        assert cache.get("k") is None
-    finally:
-        if prev_caches is None:
-            del settings.CACHES
-        else:
-            settings.CACHES = prev_caches
-        reset_caches()
+# ``test_locmem_cache_get_set_delete`` lives in
+# ``test_v2_6_features.py`` — that test exercises the cache directly
+# without the get_cache / settings dance, which is the cleaner shape.
 
 
 # ──────────────────────────────────────────────────────────────────────────────

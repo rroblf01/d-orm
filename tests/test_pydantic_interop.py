@@ -317,14 +317,8 @@ def test_meta_optional_makes_required_field_nullable():
     assert fields["age"].annotation is int
 
 
-def test_meta_fields_and_exclude_are_mutually_exclusive():
-    with pytest.raises(TypeError, match="fields.*exclude"):
-
-        class _Bad(DormSchema):
-            class Meta:
-                model = Author
-                fields = ("name",)
-                exclude = ("id",)
+# ``test_meta_fields_and_exclude_are_mutually_exclusive`` lives in
+# ``test_pydantic_constraints.py`` with a better-anchored regex.
 
 
 def test_meta_requires_model():

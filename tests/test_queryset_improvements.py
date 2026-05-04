@@ -60,14 +60,11 @@ def test_values_list_flat_zero_fields_raises():
 
 
 # ── exists() optimisation ─────────────────────────────────────────────────────
-
-def test_exists_true():
-    _make_author(name="Alice")
-    assert Author.objects.filter(name="Alice").exists() is True
-
-
-def test_exists_false():
-    assert Author.objects.filter(name="NoSuchPerson").exists() is False
+#
+# ``test_exists_true`` / ``test_exists_false`` live in
+# ``test_sync.py`` — that file owns the basic queryset happy-path
+# tests. Below we keep only the variants this file adds (empty
+# queryset, nonempty queryset).
 
 
 def test_exists_empty_qs():

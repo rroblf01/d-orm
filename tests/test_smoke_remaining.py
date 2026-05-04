@@ -474,30 +474,10 @@ def test_with_transient_retry_gives_up_after_attempts_exhausted():
         _RETRY_ATTEMPTS_SETTING.invalidate()
 
 
-def test_with_transient_retry_does_not_retry_non_transient():
-    """Programming errors / integrity errors must NOT be retried."""
-    from dorm.conf import settings
-    from dorm.db.utils import (
-        _RETRY_ATTEMPTS_SETTING,
-        with_transient_retry,
-    )
-    from dorm.exceptions import IntegrityError
-
-    settings.RETRY_ATTEMPTS = 3
-    _RETRY_ATTEMPTS_SETTING.invalidate()
-    try:
-        calls = {"n": 0}
-
-        def integ() -> None:
-            calls["n"] += 1
-            raise IntegrityError("duplicate key")
-
-        with pytest.raises(IntegrityError):
-            with_transient_retry(integ)
-        assert calls["n"] == 1  # tried only once
-    finally:
-        settings.RETRY_ATTEMPTS = 0
-        _RETRY_ATTEMPTS_SETTING.invalidate()
+# ``test_with_transient_retry_does_not_retry_non_transient`` lives in
+# ``test_coverage.py`` — the tests covered the same retry-skip-on-
+# non-transient branch with different exception types; the canonical
+# version stayed in the dedicated coverage file.
 
 
 # ──────────────────────────────────────────────────────────────────────────────

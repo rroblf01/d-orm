@@ -568,14 +568,9 @@ def test_vector_field_db_type_sqlite() -> None:
     assert f.db_type(_Conn()) == "BLOB"
 
 
-def test_vector_field_db_type_libsql() -> None:
-    from dorm.contrib.pgvector.fields import VectorField
-
-    class _Conn:
-        vendor = "libsql"
-
-    f = VectorField(dimensions=384)
-    assert f.db_type(_Conn()) == "F32_BLOB(384)"
+# ``test_vector_field_db_type_libsql`` lives in ``test_libsql_v2_5.py``
+# — that file is the canonical home for libsql-flavoured tests. This
+# coverage file's copy was a duplicate.
 
 
 def test_vector_field_db_type_unknown_vendor_returns_none() -> None:

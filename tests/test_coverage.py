@@ -793,28 +793,9 @@ def test_bulk_update_empty_list_returns_zero():
     assert Author.objects.bulk_update([], fields=["age"]) == 0
 
 
-def test_bulk_update_skips_objects_without_pk():
-    """``bulk_update`` must filter out objects whose pk is None — they
-    can't be addressed in the WHERE clause anyway, and the underlying
-    builder returns ``None`` for an all-None batch. We pass a mix and
-    confirm only the saved row gets touched."""
-    saved = Author.objects.create(name="HasPK", age=30)
-    floating = Author(name="NoPK", age=99)  # never saved → pk is None
-    saved.age = 31
-    n = Author.objects.bulk_update([saved, floating], fields=["age"])
-    # Only the row with a pk was updated.
-    assert n == 1
-    saved.refresh_from_db()
-    assert saved.age == 31
-
-
-def test_bulk_update_unknown_field_raises():
-    """Typo in the ``fields`` list must raise a clear error before any
-    SQL is sent — protect users from a silent partial update where
-    just the recognised columns moved."""
-    a = Author.objects.create(name="bu-typo", age=5)
-    with pytest.raises(ValueError, match="Unknown field"):
-        Author.objects.bulk_update([a], fields=["definitely_not_a_field"])
+# ``test_bulk_update_skips_objects_without_pk`` and
+# ``test_bulk_update_unknown_field_raises`` live in
+# ``test_perf_optimizations.py`` — that file owns bulk_update tests.
 
 
 # ── Reverse-FK prefetch via descriptor scan (sync) ───────────────────────────

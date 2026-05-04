@@ -320,18 +320,8 @@ def test_cache_get_invalidates_after_save(_locmem_caches):
     )
 
 
-def test_cache_get_many_round_trip(_locmem_caches):
-    from tests.models import Author
-
-    a = Author.objects.create(name="A", age=10)
-    b = Author.objects.create(name="B", age=11)
-    out = Author.objects.cache_get_many(pks=[a.pk, b.pk])
-    assert set(out.keys()) == {a.pk, b.pk}
-    assert {x.name for x in out.values()} == {"A", "B"}
-
-    # Hit path on second call.
-    again = Author.objects.cache_get_many(pks=[a.pk, b.pk])
-    assert {x.pk for x in again.values()} == {a.pk, b.pk}
+# ``test_cache_get_many_round_trip`` lives in
+# ``test_v2_6_improvements.py``.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
