@@ -519,8 +519,9 @@ class AddIndex(Operation):
             unique = "UNIQUE " if getattr(self.index, "unique", False) else ""
             cols = ", ".join(f'"{f}"' for f in self.index.fields)
             idx_name = self.index.get_name(self.model_name)
+            if_not_exists = "" if vendor == "mysql" else "IF NOT EXISTS "
             forward = (
-                f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" '
+                f'CREATE {unique}INDEX {if_not_exists}"{idx_name}" '
                 f'ON "{table}" ({cols})'
             )
         if self.concurrently and vendor == "postgresql":
@@ -605,8 +606,10 @@ class RemoveIndex(Operation):
             unique = "UNIQUE " if getattr(self.index, "unique", False) else ""
             cols = ", ".join(f'"{f}"' for f in self.index.fields)
             idx_name = self.index.get_name(self.model_name)
+            vendor = getattr(connection, "vendor", "sqlite")
+            if_not_exists = "" if vendor == "mysql" else "IF NOT EXISTS "
             forward = (
-                f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" '
+                f'CREATE {unique}INDEX {if_not_exists}"{idx_name}" '
                 f'ON "{table}" ({cols})'
             )
         connection.execute_script(forward)

@@ -445,11 +445,13 @@ def test_cli_runscript_executes_file(tmp_path):
     )
 
     # Defer to a subprocess so the script's settings load cleanly.
+    # Inherit pytest's cwd (the repo root in CI; the dev's checkout
+    # locally) — hard-coding a path tied the test to one machine
+    # and broke GitHub Actions with ``FileNotFoundError``.
     out = subprocess.run(
         ["uv", "run", "dorm", "runscript", str(script)],
         capture_output=True,
         text=True,
-        cwd="/home/sheik/Documentos/django-orm",
         timeout=60,
     )
     # Project conftest forces a sqlite-only fixture in pytest; outside

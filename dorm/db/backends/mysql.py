@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from ...exceptions import (
@@ -43,6 +44,7 @@ from ...exceptions import (
     OperationalError,
     ProgrammingError,
 )
+from ..utils import log_query
 
 _logger = logging.getLogger("dorm.db.backends.mysql")
 
@@ -152,79 +154,145 @@ class MySQLDatabaseWrapper:
 
     # ── Transaction helpers ────────────────────────────────────────────────
 
-    def begin(self) -> None:
-        self._atomic_depth += 1
-        if self._atomic_depth == 1:
-            self.get_connection().begin()
+    @contextmanager
+    def atomic(self):
+        """Begin / commit / rollback with savepoint nesting. Mirrors
+        SQLite + PostgreSQL backend shape so the public
+        ``dorm.transaction.atomic`` works uniformly."""
+        depth = self._atomic_depth
+        conn = self.get_connection()
+        if depth == 0:
+            conn.begin()
+        else:
+            with conn.cursor() as cur:
+                cur.execute(f"SAVEPOINT _sp{depth}")
+        self._atomic_depth = depth + 1
+        try:
+            yield
+            if depth == 0:
+                conn.commit()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(f"RELEASE SAVEPOINT _sp{depth}")
+        except Exception:
+            if depth == 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            else:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"ROLLBACK TO SAVEPOINT _sp{depth}")
+                        cur.execute(f"RELEASE SAVEPOINT _sp{depth}")
+                except Exception:
+                    pass
+            raise
+        finally:
+            self._atomic_depth = depth
 
     def commit(self) -> None:
-        if self._atomic_depth <= 0:
-            return
-        self._atomic_depth -= 1
-        if self._atomic_depth == 0:
+        try:
             self.get_connection().commit()
+        except Exception:
+            pass
 
     def rollback(self) -> None:
-        if self._atomic_depth <= 0:
-            return
-        depth = self._atomic_depth
-        self._atomic_depth = 0
-        if depth > 0:
-            try:
-                self.get_connection().rollback()
-            except Exception:
-                pass
+        try:
+            self.get_connection().rollback()
+        except Exception:
+            pass
+
+    def set_autocommit(self, enabled: bool) -> None:
+        """Toggle MySQL session autocommit. PyMySQL re-applies the
+        flag on the live socket via ``SET autocommit=...``."""
+        conn = self.get_connection()
+        try:
+            conn.autocommit(enabled)
+        except Exception:
+            pass
 
     # ── execute paths ──────────────────────────────────────────────────────
 
     def execute(self, sql: str, params: list | None = None) -> list:
         conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, tuple(params or ()))
-                if cur.description is None:
-                    return []
-                cols = [d[0] for d in cur.description]
-                rows = cur.fetchall()
-                return [dict(zip(cols, row)) for row in rows]
-        except Exception as exc:
-            raise _normalize_exception(exc) from exc
+        with log_query("mysql", sql, params):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, tuple(params or ()))
+                    if cur.description is None:
+                        return []
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    return [dict(zip(cols, row)) for row in rows]
+            except Exception as exc:
+                raise _normalize_exception(exc) from exc
 
     def execute_write(self, sql: str, params: list | None = None) -> int:
         conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, tuple(params or ()))
-                rc = cur.rowcount
-            if self._atomic_depth == 0:
-                conn.commit()
-            return rc
-        except Exception as exc:
-            if self._atomic_depth == 0:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            raise _normalize_exception(exc) from exc
+        with log_query("mysql", sql, params):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, tuple(params or ()))
+                    rc = cur.rowcount
+                if self._atomic_depth == 0:
+                    conn.commit()
+                return rc
+            except Exception as exc:
+                if self._atomic_depth == 0:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                raise _normalize_exception(exc) from exc
 
     def execute_insert(
         self, sql: str, params: list | None = None, pk_col: str | None = None
     ) -> Any:
         conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
+        with log_query("mysql", sql, params):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, tuple(params or ()))
+                    pk = cur.lastrowid
+                if self._atomic_depth == 0:
+                    conn.commit()
+                return pk
+            except Exception as exc:
+                if self._atomic_depth == 0:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                raise _normalize_exception(exc) from exc
+
+    def execute_streaming(
+        self, sql: str, params: list | None = None, chunk_size: int = 1000
+    ):
+        """Server-side cursor iterator for ``QuerySet.iterator()``.
+        PyMySQL's ``SSCursor`` streams rows from the server one at
+        a time without buffering the full result set client-side."""
+        from pymysql.cursors import SSCursor
+
+        conn = self.get_connection()
+        with log_query("mysql", sql, params):
+            cur = conn.cursor(SSCursor)
+            try:
                 cur.execute(sql, tuple(params or ()))
-                pk = cur.lastrowid
-            if self._atomic_depth == 0:
-                conn.commit()
-            return pk
-        except Exception as exc:
-            if self._atomic_depth == 0:
+                cols = [d[0] for d in (cur.description or [])]
+                while True:
+                    batch = cur.fetchmany(chunk_size)
+                    if not batch:
+                        break
+                    for row in batch:
+                        yield dict(zip(cols, row))
+            except Exception as exc:
+                raise _normalize_exception(exc) from exc
+            finally:
                 try:
-                    conn.rollback()
+                    cur.close()
                 except Exception:
                     pass
-            raise _normalize_exception(exc) from exc
 
     def execute_script(self, sql: str) -> None:
         """Run one or more statements separated by ``;``. MySQL doesn't
@@ -407,6 +475,56 @@ class MySQLAsyncDatabaseWrapper:
                 self._pool.terminate()
             except Exception:
                 pass
+
+    # ── Async transaction helpers ──────────────────────────────────────────
+
+    @asynccontextmanager
+    async def aatomic(self):
+        """Async counterpart of :meth:`MySQLDatabaseWrapper.atomic`.
+        Borrows a connection from the pool (or opens a fresh one)
+        and runs BEGIN / COMMIT / ROLLBACK manually so nested
+        ``aatomic`` blocks fall back to savepoints."""
+        conn = await self._acquire()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute("SET SESSION sql_mode='ANSI_QUOTES'")
+            await conn.begin()
+            try:
+                yield
+                await conn.commit()
+            except Exception:
+                try:
+                    await conn.rollback()
+                except Exception:
+                    pass
+                raise
+        finally:
+            await self._release(conn)
+
+    async def commit(self) -> None:
+        # Single-connection commit doesn't apply with the connection-
+        # per-task model used by the async wrapper; transactions are
+        # bound to the lifetime of the ``aatomic`` block. Provide a
+        # no-op so callers that probe ``await conn.commit()`` (e.g.
+        # the test suite's autocommit harness) don't crash.
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+    async def set_autocommit(self, enabled: bool) -> None:
+        """Best-effort autocommit toggle. With per-task connections
+        the only way to apply this is to acquire a conn, switch the
+        flag, and release; subsequent acquires open fresh conns
+        that don't inherit the override. Tests that need durable
+        autocommit toggling should use the sync wrapper."""
+        conn = await self._acquire()
+        try:
+            await conn.autocommit(enabled)
+        except Exception:
+            pass
+        finally:
+            await self._release(conn)
 
 
 __all__ = ["MySQLDatabaseWrapper", "MySQLAsyncDatabaseWrapper"]

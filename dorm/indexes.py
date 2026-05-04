@@ -241,11 +241,20 @@ class Index:
             inc_cols = ", ".join(f'"{c}"' for c in self.include)
             include_clause = f" INCLUDE ({inc_cols})"
 
+        # MySQL 8 doesn't support ``CREATE INDEX IF NOT EXISTS``;
+        # the equivalent guard is ``CREATE INDEX <name> ON ...`` and
+        # the migration executor catches the duplicate-name error
+        # via ``IntegrityError``. Drop the clause for MySQL.
+        if_not_exists = "" if vendor == "mysql" else "IF NOT EXISTS "
         forward = (
-            f'CREATE {unique}INDEX IF NOT EXISTS "{idx_name}" ON "{table}"'
+            f'CREATE {unique}INDEX {if_not_exists}"{idx_name}" ON "{table}"'
             f'{method_clause} ({cols}){include_clause}{with_clause}{where_clause}'
         )
-        reverse = f'DROP INDEX IF EXISTS "{idx_name}"'
+        reverse = (
+            f'DROP INDEX "{idx_name}" ON "{table}"'
+            if vendor == "mysql"
+            else f'DROP INDEX IF EXISTS "{idx_name}"'
+        )
         return forward, reverse
 
     def __eq__(self, other: object) -> bool:
