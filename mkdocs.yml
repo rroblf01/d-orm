@@ -92,6 +92,7 @@ plugins:
             Framework-agnostic helpers: Helpers framework-agnósticos
             Release notes: Release notes
             What's new in 4.0: Novedades 4.0
+            Upgrading from 3.3 to 4.0: Subiendo de 3.3 a 4.0
             Sibling packages (mypy / pytest): Paquetes hermanos (mypy / pytest)
             Benchmark vs other ORMs: Benchmark vs otros ORMs
             API Reference: Referencia API
@@ -170,6 +171,7 @@ nav:
       - Framework-agnostic helpers: helpers.md
   - Release notes:
       - What's new in 4.0: v4_0.md
+      - Upgrading from 3.3 to 4.0: upgrading-to-4.0.md
       - Sibling packages (mypy / pytest): sibling-packages.md
       - Benchmark vs other ORMs: bench.md
   - API Reference:

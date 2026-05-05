@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "mypy>=1.13",
-    "djanorm>=3.4",
+    "djanorm>=4.0",
 ]
 
 [project.urls]

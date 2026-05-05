@@ -1,10 +1,20 @@
 # djanorm
 
+[![PyPI version](https://img.shields.io/pypi/v/djanorm.svg)](https://pypi.org/project/djanorm/)
+[![Python versions](https://img.shields.io/pypi/pyversions/djanorm.svg)](https://pypi.org/project/djanorm/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docs](https://img.shields.io/badge/docs-rroblf01.github.io-blue.svg)](https://rroblf01.github.io/d-orm/)
+[![Typing: Typed](https://img.shields.io/badge/typing-PEP%20561-brightgreen.svg)](https://peps.python.org/pep-0561/)
+
 A Django-inspired ORM for Python with full **synchronous and asynchronous** support. The same API you know from Django, without depending on the full framework.
 
-Works with **SQLite**, **PostgreSQL**, **MySQL / MariaDB** and **libsql / Turso**. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related` / `FilteredRelation`), aggregations, DB functions, async-native ORM path, queryset & row caching, audit-trail tracking (`@track_history`), per-tenant migration runner, and Pydantic interop — all with real static typing (`Field[T]`).
+Works with **SQLite**, **PostgreSQL**, **MySQL / MariaDB**, **libsql / Turso** and (4.0+) **DuckDB** for embedded analytics. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related` / `FilteredRelation`), aggregations, DB functions, async-native ORM path, queryset & row caching, audit-trail tracking (`@track_history`), multi-tenancy (schema-level + row-level), recursive CTEs, full-text search, GIS, and Pydantic interop — all with real static typing (`Field[T]`).
 
-Release notes for every version live in [CHANGELOG.md](CHANGELOG.md).
+**Production primitives**: query budget (HTTP SLA), circuit breaker, outbox pattern, hash sharding, idempotency keys, lag-aware read routing, async pool task affinity, online (zero-downtime) migrations, schema drift detection (`dorm diff`).
+
+**Sibling packages**: [`pytest-djanorm`](pytest-djanorm/) (test fixtures) and [`djanorm-mypy`](djanorm-mypy/) (mypy plugin) ship in their own packages so the main wheel never pulls dev tooling.
+
+Release notes for every version live in [CHANGELOG.md](CHANGELOG.md). For the **4.0** highlights see [docs/v4_0.md](docs/v4_0.en.md); upgrading from 3.3 → 4.0 is documented in [docs/upgrading-to-4.0.md](docs/upgrading-to-4.0.en.md).
 
 ## Installation
 
@@ -18,10 +28,17 @@ pip install "djanorm[postgresql]"
 # libsql / Turso (local, embedded replica or remote)
 pip install "djanorm[libsql]"
 
+# DuckDB (embedded analytics, 4.0+)
+pip install "djanorm[duckdb]"
+
 # Optional extras
 pip install "djanorm[redis]"      # queryset + row cache backend
 pip install "djanorm[encrypted]"  # AES-GCM EncryptedCharField/TextField
 pip install "djanorm[pydantic]"   # FastAPI-friendly DormSchema
+pip install "djanorm[s3]"         # FileField on AWS S3 / MinIO / R2 / B2
+
+# Dev tooling (sibling packages)
+pip install pytest-djanorm djanorm-mypy
 ```
 
 ## Quick start

@@ -234,3 +234,89 @@ jobs:
             tests/test_v3_1_release.py::test_manager_using_shortcut_returns_queryset_bound_to_alias \
             tests/test_v3_1_more_features.py::test_reverse_fk_manager_get_or_create_injects_fk \
             tests/test_v3_1_more_features.py::test_reverse_fk_manager_add_bulk_updates_fk_column
+
+  # DuckDB backend (4.0+). Pure Python wheel, no service container —
+  # the engine ships in-process with the ``duckdb`` package.
+  duckdb:
+    name: DuckDB / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --extra=all && uv pip install duckdb
+      - name: Run DuckDB-focused tests
+        run: |
+          uv run pytest --tb=short -q \
+            tests/test_duckdb_backend.py
+
+  # Sibling packages — `djanorm-mypy` and `pytest-djanorm` ship in
+  # subdirectories with their own pyproject.toml. Build + smoke tests
+  # to keep them green alongside the main wheel.
+  siblings:
+    name: Sibling packages (mypy / pytest plugins)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+      - name: Build djanorm-mypy
+        run: |
+          cd djanorm-mypy && uv build
+      - name: Build pytest-djanorm
+        run: |
+          cd pytest-djanorm && uv build
+      - name: Smoke install + import
+        run: |
+          uv pip install ./djanorm-mypy/dist/*.whl ./pytest-djanorm/dist/*.whl ./dist/*.whl 2>/dev/null || true
+          uv run python -c "import djanorm_mypy; import pytest_djanorm; print('siblings ok')"
+
+  # 4.0 release smoke test — confirm wheel build + installed import
+  # surface the right version. Catches release-engineering regressions
+  # before tagging.
+  release-smoke:
+    name: Release smoke (wheel + version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+      - name: Build wheel
+        run: uv build
+      - name: Install wheel into a fresh venv
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/djanorm-*.whl
+          /tmp/smoke/bin/python -c "
+          import dorm
+          assert dorm.__version__.startswith('4.'), dorm.__version__
+          # Surface every 4.0 module so an import-time regression fails CI.
+          from dorm.tree import descendants_cte
+          from dorm.contrib.tenants_row import TenantModel
+          from dorm.contrib.asyncmodel import AsyncModel
+          from dorm.contrib.bulk_copy import bulk_copy_from
+          from dorm.contrib.streaming import stream_jsonl
+          from dorm.contrib.circuit_breaker import circuit_breaker
+          from dorm.contrib.outbox import OutboxEvent
+          from dorm.contrib.sharding import HashShardRouter
+          from dorm.contrib.idempotency import IdempotencyRecord
+          from dorm.contrib.lag_router import LagAwareReadRouter
+          from dorm.contrib.gis import PointField
+          from dorm.budget import BudgetExceeded
+          print('release smoke OK:', dorm.__version__)
+          "

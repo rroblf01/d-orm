@@ -180,6 +180,34 @@ dorm = "dorm.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["dorm"]
 
+[tool.hatch.build.targets.sdist]
+# Exclude every dev / build artefact from the source distribution so
+# `uv build` doesn't try to follow venv / coverage / cache symlinks.
+include = [
+    "dorm/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "SECURITY.md",
+    "pyproject.toml",
+    "docs/**",
+    "tests/**",
+    "bench/**",
+]
+exclude = [
+    "venv/**",
+    ".venv/**",
+    "site/**",
+    "__pycache__/**",
+    "**/*.pyc",
+    "coverage.json",
+    ".coverage",
+    "djanorm-mypy/**",
+    "pytest-djanorm/**",
+    "psycopg/**",
+    "example/**",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -225,4 +253,22 @@ exclude = [
     # imports — the sibling packages run their own ty/mypy in CI.
     "djanorm-mypy/**",
     "pytest-djanorm/**",
+    # DuckDB is an opt-in extra (``djanorm[duckdb]``). When the dev
+    # virtualenv doesn't have ``duckdb`` installed, ty correctly
+    # reports the import as unresolved. Excluding the backend file
+    # keeps ty green for SQLite-only / PG-only contributor setups
+    # without hiding real errors elsewhere. CI installs ``duckdb``
+    # for the dedicated DuckDB job.
+    "dorm/db/backends/duckdb.py",
 ]
+
+[tool.uv.workspace]
+# Without an explicit members list, uv auto-discovers every
+# nested pyproject.toml as a workspace member. The sibling packages
+# ``djanorm-mypy`` and ``pytest-djanorm`` declare their own
+# ``djanorm>=4.0`` dependency; auto-discovery wires them into the
+# main project's resolver and trips a circular constraint with the
+# pypi-published older djanorm. Pinning ``members = ["."]``
+# explicitly keeps the main project as the only workspace member;
+# each sibling publishes independently from its own directory.
+members = ["."]

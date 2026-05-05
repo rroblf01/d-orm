@@ -159,14 +159,77 @@ curl localhost:8000/healthz
   deriva el schema de FastAPI directamente del modelo dorm. Añade un
   campo al modelo y migra; la API lo recoge automáticamente.
 
+## Hardening 4.0 (opcional)
+
+Cuando vayas a producción considera añadir:
+
+```python
+# Modelo async-only — un sync.create() raisea AsyncOnlyError.
+from dorm.contrib.asyncmodel import AsyncModel
+
+class User(AsyncModel):
+    name = dorm.CharField(max_length=100)
+    email = dorm.EmailField(unique=True)
+```
+
+```python
+# Query budget en handlers — protege la SLA HTTP.
+import dorm
+
+@app.get("/users")
+async def list_users():
+    async with dorm.abudget(timeout_ms=200, max_rows=10_000):
+        return [u async for u in User.objects.all()]
+```
+
+```python
+# Streaming response para exports grandes.
+from fastapi.responses import StreamingResponse
+from dorm.contrib.streaming import astream_jsonl
+
+@app.get("/users/export.jsonl")
+async def export():
+    return StreamingResponse(
+        astream_jsonl(User.objects.all()),
+        media_type="application/x-ndjson",
+    )
+```
+
+```python
+# N+1 detector como middleware de dev.
+from dorm.contrib.nplusone import detect
+
+@app.middleware("http")
+async def nplus_one(request, call_next):
+    with detect(raise_on_detect=False) as d:
+        response = await call_next(request)
+    if d.findings:
+        log.warning("N+1 en %s: %s", request.url.path, d.report())
+    return response
+```
+
+```bash
+# Schema drift como gate post-deploy CI:
+dorm diff --apps myapp.models || exit 1
+```
+
 ## Siguientes pasos
 
 - Cambia a PostgreSQL editando `DATABASES["default"]["ENGINE"]` — el
   resto del código no cambia. Ver [Despliegue en producción](production.md)
   para tunear el pool.
+- Para analítica embarcada (dashboards, ETL local), prueba el
+  backend [DuckDB](duckdb.md): `ENGINE = "duckdb"` y a leer
+  Parquet/CSV directamente.
 - Añade una relación uno-a-muchos: `posts = ForeignKey(User, ...)` en
   un modelo nuevo, `dorm makemigrations`, listo.
 - Cablea métricas: conecta a `dorm.post_query` para timings por
-  statement.
+  statement, o `dorm.contrib.otel.instrument()` para traces OTel
+  enriquecidos (4.0+).
 - Para schemas de respuesta anidados (p. ej. `User` con `Post[]`),
   ver la [guía de FastAPI](fastapi.md).
+- Multi-tenancy: [Tenancy fila](tenants-row.md) para SaaS B2B.
+- Migraciones zero-downtime para tablas grandes:
+  [Online migrations](online-migrations.md).
+- Para decidir qué helper usar para qué problema:
+  [Cuándo usar qué](when-to-use-what.md).

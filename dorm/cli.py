@@ -5,6 +5,7 @@ import importlib
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from .conf import _validate_dotted_path
 
@@ -1376,6 +1377,93 @@ def cmd_doctor(args):
                     "avoid sending credentials in cleartext."
                 )
 
+    # 5. (4.0+) Read-only models declared but the table doesn't actually
+    # back any reads — usually a stale migration left a Meta.read_only=True
+    # flag on a model whose source-of-truth got renamed.
+    for label, model in _model_registry.items():
+        if "." in label or getattr(model._meta, "abstract", False):
+            continue
+        if getattr(model._meta, "read_only", False):
+            info.append(
+                f"{model.__name__}: Meta.read_only=True. Confirm reads still "
+                "go through it — typical use is a model backed by a "
+                "materialised view that gets refreshed via "
+                "RefreshMaterializedView."
+            )
+
+    # 6. (4.0+) TenantModel without a paired middleware / context manager
+    # at app-startup. We can't introspect the running framework's
+    # middleware stack, but we can flag every TenantModel subclass so
+    # the user double-checks they wired ``current_tenant()`` somewhere.
+    _tenant_model_cls: Any = None
+    try:
+        from .contrib.tenants_row import TenantModel as _imported_tm
+
+        _tenant_model_cls = _imported_tm
+    except ImportError:
+        _tenant_model_cls = None
+    if _tenant_model_cls is not None:
+        tenant_models = [
+            model.__name__
+            for label, model in _model_registry.items()
+            if "." not in label
+            and not getattr(model._meta, "abstract", False)
+            and isinstance(model, type)
+            and issubclass(model, _tenant_model_cls)
+            and model is not _tenant_model_cls
+        ]
+        if tenant_models:
+            info.append(
+                f"TenantModel subclasses found ({', '.join(tenant_models[:3])}"
+                f"{'…' if len(tenant_models) > 3 else ''}). "
+                "Confirm every request handler / job wraps DB access in "
+                "`with current_tenant(<id>):` — otherwise queries raise "
+                "NoActiveTenantError at runtime."
+            )
+
+    # 7. (4.0+) Models without a primary key declared explicitly. The
+    # auto-PK is fine for most apps, but if the model is sharded or
+    # tenant-scoped, declaring the partition column as part of the PK
+    # avoids cross-shard / cross-tenant unique constraint surprises.
+    # We can't be 100% sure here without the user's intent; we only
+    # warn about TenantModel subclasses + Meta.unique_together that
+    # forgot tenant_id.
+    if _tenant_model_cls is not None:
+        for label, model in _model_registry.items():
+            if "." in label or getattr(model._meta, "abstract", False):
+                continue
+            if not (
+                isinstance(model, type)
+                and issubclass(model, _tenant_model_cls)
+                and model is not _tenant_model_cls
+            ):
+                continue
+            uniques = getattr(model._meta, "unique_together", []) or []
+            for ut in uniques:
+                cols = ut if isinstance(ut, (list, tuple)) else [ut]
+                if "tenant_id" not in cols:
+                    warnings.append(
+                        f"{model.__name__}: unique_together {tuple(cols)} omits "
+                        "'tenant_id'. UNIQUE constraints on a TenantModel must "
+                        "include the tenant column or rows from different "
+                        "tenants will collide."
+                    )
+
+    # 8. (4.0+) Models with very wide bulk_create call sites that should
+    # consider bulk_copy_from. Static check: nothing the doctor can
+    # detect without parsing user code, so we only warn structurally
+    # — flagging models with NO db_index on the FK columns the way
+    # ETL workloads typically need.
+    # (No-op placeholder for now.)
+
+    # 9. (4.0+) Settings sanity for production primitives.
+    if getattr(settings, "READ_AFTER_WRITE_WINDOW", 3.0) == 0:
+        info.append(
+            "READ_AFTER_WRITE_WINDOW=0 — sticky read-after-write disabled. "
+            "Replicas may serve stale data right after a write. Default "
+            "(3s) is a safer baseline unless you have a reason to disable."
+        )
+
     # ── Output
     print(f"dorm doctor — {len(warnings)} warning(s), {len(info)} note(s)")
     print()
@@ -2162,6 +2250,15 @@ def main():
     parser = argparse.ArgumentParser(
         prog="dorm",
         description="djanorm management commands",
+    )
+    # Surface the package version via ``dorm --version`` so installed
+    # users can confirm the release without diving into Python.
+    from . import __version__ as _dorm_version
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"djanorm {_dorm_version}",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

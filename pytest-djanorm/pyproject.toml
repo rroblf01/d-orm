@@ -17,7 +17,7 @@ classifiers = [
 ]
 dependencies = [
     "pytest>=8.0",
-    "djanorm>=3.4",
+    "djanorm>=4.0",
 ]
 
 [project.urls]
