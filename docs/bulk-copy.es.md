@@ -108,5 +108,5 @@ oculto sin avisarte. Mejor falla rápido y claro.
 
 ## Más
 
-- [Avanzado](advanced.md#copy-frompostgresql)
+- [Avanzado](bulk-copy.md)
 - API: `dorm.contrib.bulk_copy`

@@ -106,5 +106,5 @@ without warning. Better to fail fast and clearly.
 
 ## More
 
-- [Advanced](advanced.md#copy-frompostgresql)
+- [Advanced](bulk-copy.md)
 - API: `dorm.contrib.bulk_copy`

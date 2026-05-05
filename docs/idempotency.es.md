@@ -130,6 +130,6 @@ protección.
 
 ## Más
 
-- [Helpers](helpers.md#idempotency-outbox-primitive)
+- [Helpers](idempotency.md)
 - [Outbox pattern](outbox.md) — comparable, distinto problema
 - API: `dorm.contrib.idempotency`

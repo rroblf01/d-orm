@@ -122,5 +122,5 @@ async def create_order(body):
 ## Más
 
 - [Helpers](helpers.md#lag-aware-read-router)
-- [Producción: réplicas](production.md#réplicas-de-lectura)
+- [Producción: réplicas](production.md)
 - API: `dorm.contrib.lag_router`

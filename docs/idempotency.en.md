@@ -128,6 +128,6 @@ retries-after-days. Trade-off: table size vs. protection window.
 
 ## More
 
-- [Helpers](helpers.md#idempotency-outbox-primitive)
+- [Helpers](idempotency.md)
 - [Outbox pattern](outbox.md) — comparable, different problem
 - API: `dorm.contrib.idempotency`

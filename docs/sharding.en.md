@@ -147,6 +147,6 @@ Vitess if you need it.
 
 ## More
 
-- [Helpers](helpers.md#hash-based-horizontal-sharding)
+- [Helpers](sharding.md)
 - [Row-level multi-tenancy](tenants-row.md) — natural pairing
 - API: `dorm.contrib.sharding`

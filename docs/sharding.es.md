@@ -147,6 +147,6 @@ considera Citus o Vitess si lo necesitas.
 
 ## Más
 
-- [Helpers](helpers.md#hash-based-horizontal-sharding)
+- [Helpers](sharding.md)
 - [Multi-tenancy fila](tenants-row.md) — combinación natural
 - API: `dorm.contrib.sharding`

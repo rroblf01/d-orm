@@ -175,6 +175,6 @@ with current_tenant(tenant_id), with_shard_key(tenant_id):
 ## Más
 
 - [Schema-level tenants](https://github.com/rroblf01/d-orm) — `dorm.contrib.tenants`
-- [Sharding](helpers.md#hash-based-horizontal-sharding) —
+- [Sharding](sharding.md) —
   combinación con multi-tenancy
 - [Cuándo usar qué](when-to-use-what.md) — schema-level vs row-level

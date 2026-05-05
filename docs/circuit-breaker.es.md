@@ -119,5 +119,5 @@ async def get_user(pk: int):
 
 ## Más
 
-- [Helpers](helpers.md#circuit-breaker)
+- [Helpers](circuit-breaker.md)
 - API: `dorm.contrib.circuit_breaker`

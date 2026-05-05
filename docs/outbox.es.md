@@ -151,6 +151,6 @@ if __name__ == "__main__":
 
 ## Más
 
-- [Helpers](helpers.md#outbox-pattern)
+- [Helpers](outbox.md)
 - [Idempotency keys](idempotency.md) — primitivo relacionado
 - API: `dorm.contrib.outbox`

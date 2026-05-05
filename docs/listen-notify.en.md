@@ -100,5 +100,5 @@ concurrent WebSockets, switch to a dedicated broker.
 
 ## More
 
-- [Helpers](helpers.md#listen-notify-async-helper)
+- [Helpers](listen-notify.md)
 - API: `dorm.contrib.listen_notify`
