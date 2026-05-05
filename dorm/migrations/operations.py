@@ -1079,6 +1079,383 @@ class AlterModelManagers(Operation):
         return f"Alter {self.name} managers"
 
 
+# ── Materialised views ─────────────────────────────────────────────────────────
+
+
+class CreateMaterializedView(Operation):
+    """Create a PostgreSQL materialised view as a migration step.
+
+    Materialised views cache a query's result set as a physical
+    relation. ``REFRESH MATERIALIZED VIEW`` re-runs the underlying
+    SELECT and replaces the cached rows. Unlike a regular view, the
+    cached data survives connection drops and can be indexed — making
+    them the canonical PostgreSQL answer to denormalised reporting
+    aggregates.
+
+    Example::
+
+        CreateMaterializedView(
+            "active_authors",
+            'SELECT id, name FROM "authors" WHERE is_active = true',
+        )
+
+    Use :class:`RefreshMaterializedView` to re-run the query, and
+    :class:`DropMaterializedView` to remove the view. The reverse
+    operation drops the view automatically.
+
+    PostgreSQL-only — other vendors raise NotImplementedError at
+    apply time. SQLite has no materialised view support; MySQL has
+    ``CREATE TABLE ... AS SELECT`` but no automatic refresh primitive.
+    """
+
+    reversible = True
+
+    def __init__(
+        self,
+        name: str,
+        sql: str,
+        *,
+        with_data: bool = True,
+        if_not_exists: bool = False,
+    ) -> None:
+        self.name = name
+        self.sql = sql
+        self.with_data = with_data
+        self.if_not_exists = if_not_exists
+
+    def state_forwards(self, app_label: str, state):
+        # Materialised views live outside the model graph — there's no
+        # state to mutate. The state-forwards method exists so the
+        # operation slots cleanly into ``executor.apply``.
+        pass
+
+    def _ensure_pg(self, connection) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"CreateMaterializedView: not supported on {vendor!r}. "
+                "Materialised views are PostgreSQL-only."
+            )
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        ifne = " IF NOT EXISTS" if self.if_not_exists else ""
+        data = " WITH NO DATA" if not self.with_data else ""
+        connection.execute_script(
+            f'CREATE MATERIALIZED VIEW{ifne} "{self.name}" AS {self.sql}{data}'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(f'DROP MATERIALIZED VIEW IF EXISTS "{self.name}"')
+
+    def describe(self) -> str:
+        return f"Create materialized view {self.name}"
+
+    def __repr__(self) -> str:
+        return f"CreateMaterializedView(name={self.name!r}, sql={self.sql!r})"
+
+
+class DropMaterializedView(Operation):
+    """Drop a PostgreSQL materialised view. Reverse direction recreates
+    it from *sql*; pass ``reverse_sql=""`` to make it irreversible."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        reverse_sql: str = "",
+        if_exists: bool = True,
+    ) -> None:
+        self.name = name
+        self.reverse_sql = reverse_sql
+        self.if_exists = if_exists
+        self.reversible = bool(reverse_sql)
+
+    def state_forwards(self, app_label: str, state):
+        pass
+
+    def _ensure_pg(self, connection) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"DropMaterializedView: not supported on {vendor!r}."
+            )
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        ifex = " IF EXISTS" if self.if_exists else ""
+        connection.execute_script(f'DROP MATERIALIZED VIEW{ifex} "{self.name}"')
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        if not self.reverse_sql:
+            raise NotImplementedError(
+                f"DropMaterializedView({self.name!r}) is irreversible: "
+                "no reverse_sql was provided."
+            )
+        connection.execute_script(
+            f'CREATE MATERIALIZED VIEW "{self.name}" AS {self.reverse_sql}'
+        )
+
+    def describe(self) -> str:
+        return f"Drop materialized view {self.name}"
+
+
+class RefreshMaterializedView(Operation):
+    """Issue ``REFRESH MATERIALIZED VIEW`` against an existing view.
+
+    Pass ``concurrently=True`` to use ``REFRESH MATERIALIZED VIEW
+    CONCURRENTLY`` — non-blocking refresh that lets readers keep
+    using the stale data while the new snapshot builds. Requires a
+    unique index on the view (PostgreSQL constraint, not ours).
+
+    The reverse direction is a no-op — refreshes don't have an
+    inverse, and rolling back a refresh would be meaningless.
+    """
+
+    reversible = True
+
+    def __init__(self, name: str, *, concurrently: bool = False) -> None:
+        self.name = name
+        self.concurrently = concurrently
+
+    def state_forwards(self, app_label: str, state):
+        pass
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"RefreshMaterializedView: not supported on {vendor!r}."
+            )
+        conc = " CONCURRENTLY" if self.concurrently else ""
+        connection.execute_script(f'REFRESH MATERIALIZED VIEW{conc} "{self.name}"')
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        # Refresh has no inverse; skipping is the right behaviour on
+        # rollback. The state isn't actually wrong because a later
+        # forward will refresh again anyway.
+        pass
+
+    def describe(self) -> str:
+        return f"Refresh materialized view {self.name}"
+
+
+# ── PostgreSQL native partitioning ─────────────────────────────────────────────
+
+
+class CreatePartitionedTable(Operation):
+    """Create a PostgreSQL partitioned parent table.
+
+    Partitioning splits a logical table into physical sub-tables
+    keyed by a value (``RANGE``), discrete enum (``LIST``), or hash
+    bucket (``HASH``). Queries hit the parent table; PG routes them
+    to the right partition automatically.
+
+    Example::
+
+        CreatePartitionedTable(
+            "events",
+            columns_sql='id BIGSERIAL, occurred_at TIMESTAMP NOT NULL, payload JSONB',
+            method="RANGE",
+            key="occurred_at",
+        )
+        AttachPartition(
+            parent="events",
+            child="events_2025_q1",
+            for_values_in="FROM ('2025-01-01') TO ('2025-04-01')",
+        )
+
+    For an end-to-end example see ``docs/partitioning.es.md``. PG-only.
+    """
+
+    reversible = True
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        columns_sql: str,
+        method: str,
+        key: str,
+        if_not_exists: bool = False,
+    ) -> None:
+        method_u = method.upper()
+        if method_u not in ("RANGE", "LIST", "HASH"):
+            raise ValueError(
+                "CreatePartitionedTable.method must be one of "
+                f"'RANGE'/'LIST'/'HASH'; got {method!r}."
+            )
+        self.name = name
+        self.columns_sql = columns_sql
+        self.method = method_u
+        self.key = key
+        self.if_not_exists = if_not_exists
+
+    def state_forwards(self, app_label: str, state):
+        pass
+
+    def _ensure_pg(self, connection) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"CreatePartitionedTable: not supported on {vendor!r}. "
+                "Native declarative partitioning is PostgreSQL-only."
+            )
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        ifne = "IF NOT EXISTS " if self.if_not_exists else ""
+        connection.execute_script(
+            f'CREATE TABLE {ifne}"{self.name}" ({self.columns_sql}) '
+            f'PARTITION BY {self.method} ("{self.key}")'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(f'DROP TABLE IF EXISTS "{self.name}"')
+
+    def describe(self) -> str:
+        return f"Create partitioned table {self.name} BY {self.method}({self.key})"
+
+
+class CreatePartition(Operation):
+    """Create a partition table and attach it to a parent in one step.
+
+    *for_values* is the partition bound expression that follows
+    ``FOR VALUES`` in the DDL. Examples by method:
+
+    - ``RANGE``: ``"FROM ('2025-01-01') TO ('2025-04-01')"``
+    - ``LIST``:  ``"IN ('eu-west-1', 'eu-central-1')"``
+    - ``HASH``:  ``"WITH (MODULUS 4, REMAINDER 0)"``
+
+    The partition's column set is inherited from the parent — this op
+    only emits the wrapping DDL. Indexes/constraints on the parent
+    cascade automatically (PG ≥ 11).
+    """
+
+    reversible = True
+
+    def __init__(
+        self,
+        parent: str,
+        name: str,
+        *,
+        for_values: str,
+        if_not_exists: bool = False,
+    ) -> None:
+        self.parent = parent
+        self.name = name
+        self.for_values = for_values
+        self.if_not_exists = if_not_exists
+
+    def state_forwards(self, app_label: str, state):
+        pass
+
+    def _ensure_pg(self, connection) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"CreatePartition: not supported on {vendor!r}."
+            )
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        ifne = "IF NOT EXISTS " if self.if_not_exists else ""
+        connection.execute_script(
+            f'CREATE TABLE {ifne}"{self.name}" '
+            f'PARTITION OF "{self.parent}" FOR VALUES {self.for_values}'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(f'DROP TABLE IF EXISTS "{self.name}"')
+
+    def describe(self) -> str:
+        return f"Create partition {self.name} of {self.parent}"
+
+
+class AttachPartition(Operation):
+    """Attach an existing standalone table as a partition of *parent*.
+
+    Useful when migrating an unpartitioned table to a partitioned
+    layout: build the new parent, copy data into a child table, then
+    ``ATTACH PARTITION``. The reverse direction detaches.
+    """
+
+    reversible = True
+
+    def __init__(self, parent: str, name: str, *, for_values: str) -> None:
+        self.parent = parent
+        self.name = name
+        self.for_values = for_values
+
+    def state_forwards(self, app_label: str, state):
+        pass
+
+    def _ensure_pg(self, connection) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"AttachPartition: not supported on {vendor!r}."
+            )
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(
+            f'ALTER TABLE "{self.parent}" ATTACH PARTITION "{self.name}" '
+            f'FOR VALUES {self.for_values}'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(
+            f'ALTER TABLE "{self.parent}" DETACH PARTITION "{self.name}"'
+        )
+
+    def describe(self) -> str:
+        return f"Attach partition {self.name} to {self.parent}"
+
+
+class DetachPartition(Operation):
+    """Detach a partition from its parent without dropping the rows.
+    Reverse direction re-attaches with the same *for_values* clause."""
+
+    reversible = True
+
+    def __init__(self, parent: str, name: str, *, for_values: str) -> None:
+        self.parent = parent
+        self.name = name
+        self.for_values = for_values
+
+    def state_forwards(self, app_label: str, state):
+        pass
+
+    def _ensure_pg(self, connection) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor != "postgresql":
+            raise NotImplementedError(
+                f"DetachPartition: not supported on {vendor!r}."
+            )
+
+    def database_forwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(
+            f'ALTER TABLE "{self.parent}" DETACH PARTITION "{self.name}"'
+        )
+
+    def database_backwards(self, app_label: str, connection, from_state, to_state):
+        self._ensure_pg(connection)
+        connection.execute_script(
+            f'ALTER TABLE "{self.parent}" ATTACH PARTITION "{self.name}" '
+            f'FOR VALUES {self.for_values}'
+        )
+
+    def describe(self) -> str:
+        return f"Detach partition {self.name} from {self.parent}"
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 

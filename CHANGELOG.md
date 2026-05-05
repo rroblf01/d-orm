@@ -6,6 +6,188 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-05-05
+
+Minor release. Production-grade helpers for high-throughput PostgreSQL
+deployments (COPY-based ETL, materialised views, declarative
+partitioning, LISTEN/NOTIFY pub-sub) plus operational primitives that
+sit one layer above the ORM (circuit breaker, outbox pattern,
+hash-based horizontal sharding, async pool task-affinity). Third-party
+backends become first-class citizens via entry-points, and a new
+side-by-side benchmark runner ships against Django ORM, SQLAlchemy 2.0
+and Tortoise ORM.
+
+**No breaking changes vs 3.3**: every addition is opt-in via
+``dorm.contrib.*`` or zero-cost when unused. ``ENGINE`` resolution still
+prefers built-in backends — entry-point lookup only fires when the
+ENGINE string doesn't match any of them.
+
+### Added — PostgreSQL `COPY FROM` / `COPY TO`
+
+- ``dorm.contrib.bulk_copy.bulk_copy_from(model, objs)`` /
+  ``abulk_copy_from(...)`` — bulk ingestion via
+  ``COPY <table> FROM STDIN``. Accepts model instances, dicts keyed
+  by ``attname`` / column name, or pre-prepared tuples. Field values
+  pass through ``get_db_prep_value`` automatically. ``binary=True``
+  switches to PG's binary protocol for type-strict, slightly-faster
+  loads. **10-100× faster than `bulk_create`** on tens-of-thousands
+  of rows.
+- ``copy_to(sql)`` / ``acopy_to(sql)`` — wrap an arbitrary
+  ``SELECT`` in ``COPY (...) TO STDOUT`` and yield rows lazily.
+  Ideal for full-table exports without buffering the result set in
+  Python.
+- PG-only: non-PG backends raise ``NotImplementedError`` rather than
+  silently degrading to ``bulk_create`` (the call site asked for
+  COPY explicitly — silent downgrades would mislead capacity
+  planning).
+
+### Added — Materialised-view migration operations
+
+- ``CreateMaterializedView(name, sql, *, with_data=True,
+  if_not_exists=False)`` — emits ``CREATE MATERIALIZED VIEW`` as part
+  of a migration. Reverse direction drops the view automatically.
+- ``RefreshMaterializedView(name, *, concurrently=False)`` —
+  ``REFRESH MATERIALIZED VIEW [CONCURRENTLY]``. Reverse direction is
+  a no-op (refreshes have no inverse).
+- ``DropMaterializedView(name, *, reverse_sql="", if_exists=True)`` —
+  drop the view; ``reverse_sql`` makes it reversible.
+- All three PG-only.
+
+### Added — Declarative partitioning ops (PG ≥ 11)
+
+- ``CreatePartitionedTable(name, *, columns_sql, method, key,
+  if_not_exists=False)`` — emits the parent
+  ``CREATE TABLE ... PARTITION BY <RANGE|LIST|HASH> (key)``. Method
+  validation rejects typos at construction time.
+- ``CreatePartition(parent, name, *, for_values, if_not_exists=False)``
+  / ``AttachPartition(parent, name, *, for_values)`` /
+  ``DetachPartition(parent, name, *, for_values)``. Reverse direction
+  on each is the natural inverse (DROP / DETACH / re-ATTACH).
+
+### Added — `LISTEN` / `NOTIFY` async helper
+
+- ``dorm.contrib.listen_notify`` ships ``async with listen("ch")
+  as channel: async for n in channel: ...`` with a dedicated PG
+  connection pinned for the block lifetime. ``Notification``
+  exposes ``channel``, ``payload`` and ``pid``.
+- ``notify(channel, payload)`` / ``anotify(channel, payload)`` for
+  the publish side. Implemented via ``SELECT pg_notify(%s, %s)`` so
+  payloads pass through psycopg's parameter binding instead of
+  string-formatting; channel names are double-quoted as identifiers.
+- PostgreSQL-only.
+
+### Added — Concurrency-safety primitives
+
+- **End-to-end test for `SELECT ... FOR UPDATE SKIP LOCKED`** —
+  ``tests/test_skip_locked_queue.py`` runs two real threads against
+  PG and asserts they between them claim every row exactly once,
+  proving the worker-queue invariants. The feature itself shipped
+  earlier; the test is new.
+- **`dorm.contrib.task_pool.pinned_connection()`** — async context
+  manager that pins one pool connection to the calling
+  ``asyncio.Task`` for the duration of the block, so a request-
+  scoped handler reuses one checkout across every query it emits.
+  Composes with ``aatomic()`` (transactions still win). PG-only;
+  no-op on other backends so caller code stays portable.
+- **`assert_no_concurrent_gather()`** — runtime guard that detects
+  the antipattern of two ``asyncio.gather()`` siblings sharing the
+  same pinned connection. psycopg async connections serialise
+  concurrent awaits, but the resulting interleaving silently
+  corrupts cursor state — detecting it loudly is a strict
+  improvement over the silent wedge.
+
+### Added — Circuit breaker
+
+- ``dorm.contrib.circuit_breaker.CircuitBreaker`` plus
+  ``circuit_breaker(name, failure_threshold=5, open_window_s=30.0)``
+  factory. Three-state machine ``CLOSED → OPEN → HALF_OPEN``;
+  configurable threshold and cooldown; sync (``with cb:``) and async
+  (``async with cb.aprotect():``) context-manager forms.
+- ``CircuitOpenError`` subclasses ``DatabaseError`` so callers that
+  already catch generic DB errors degrade gracefully.
+- ``get_state(name)`` exposes a snapshot for Prometheus / dashboard
+  use; ``reset_circuit_breakers()`` keeps tests hermetic.
+
+### Added — Transactional outbox pattern
+
+- ``dorm.contrib.outbox.OutboxEvent`` — abstract base model with
+  ``event_type``, ``payload`` (JSON), ``status``, ``attempts``,
+  ``last_error``, ``created_at`` / ``published_at`` columns. Subclass
+  with a concrete ``Meta.db_table`` to materialise.
+- ``record_event(model, event_type, payload)`` /
+  ``arecord_event(...)`` — write a row inside the active
+  ``atomic()`` block so the business write and the outbox insert
+  share a transaction. Logs a warning when called outside a
+  transaction (defeats the dual-write guarantee).
+- ``OutboxRelay`` — polling worker that drains pending rows. Uses
+  ``SELECT ... FOR UPDATE SKIP LOCKED`` on PG so multiple relay
+  processes pick disjoint rows without coordination; falls back to
+  plain ``SELECT`` on backends without ``SKIP LOCKED``. Failed
+  events bump ``attempts``; rows that hit ``max_attempts`` are
+  promoted to ``status='dead'`` for manual inspection.
+  ``run(handler)`` blocks with SIGTERM/SIGINT hooks for clean
+  shutdown between batches; ``drain_once(handler)`` exposes a
+  single-shot variant for tests / external schedulers.
+
+### Added — Hash-based horizontal sharding
+
+- ``dorm.contrib.sharding.HashShardRouter`` — Django-style
+  ``DATABASE_ROUTERS`` entry that maps sharded models to shard
+  aliases (default naming ``shard_0`` … ``shard_<N-1>``; custom
+  alias list accepted).
+- ``with_shard_key(key)`` — context manager that pins the active
+  shard key for the surrounding block. The router consults the
+  contextvar instead of reaching for an ambient request object.
+- ``shard_for(key, num_shards, *, aliases=None, salt=...)`` — pure
+  routing function. Hash is **deterministic across processes** —
+  uses ``hashlib.blake2b`` with a configurable salt rather than
+  Python's randomised built-in ``hash()`` (which would put the same
+  row on different shards in different workers).
+- ``for_each_shard(fn, num_shards=N)`` — fan-out helper that runs
+  ``fn(alias)`` against every shard sequentially.
+
+### Added — Backend plugin entry-points
+
+- Third-party engines register via two entry-point groups:
+  ``[project.entry-points."djanorm.backends"]`` for sync wrappers
+  and ``djanorm.async_backends`` for async ones.
+- ``_load_external_backend`` caches the lookup so reimports are
+  free; ``reset_backend_cache()`` clears it (useful in tests that
+  monkeypatch ``importlib.metadata.entry_points``).
+- ``ImproperlyConfigured`` error messages now list the registered
+  engines (built-in + entry-point-discovered) so a typo in
+  ``ENGINE=`` reports the available options.
+
+### Added — Comparative bench runner
+
+- ``python -m bench.compare --runs 5 --ops 1000`` measures dorm,
+  Django ORM, SQLAlchemy 2.0 and Tortoise ORM side-by-side on the
+  same five scenarios (``insert_one``, ``bulk_insert``, ``get_by_pk``,
+  ``filter_count``, ``list_first_n``) over in-process SQLite. ORMs
+  that aren't installed are reported as ``skipped:`` and don't
+  break the run.
+- Output as fixed-width table by default; ``--json`` for machine-
+  readable median + best-of-runs numbers.
+- Documented results: dorm wins 4/5 scenarios on Python 3.14
+  / Linux x86_64 with the package versions listed in
+  ``docs/bench.md``.
+
+### Added — Documentation
+
+- ``docs/advanced.{en,es}.md`` — recipes for every helper above.
+- ``docs/bench.{en,es}.md`` — comparative benchmark page with the
+  reproduce command, scenario table, results, and per-category
+  analysis.
+- mkdocs nav updated under **Guides → Advanced features (3.4)**
+  and **Guides → Benchmark vs other ORMs**.
+
+### Validated
+
+- ``ruff check``: clean.
+- ``ty check``: clean.
+- ``pytest tests/``: 5980 passed, 124 skipped (no failures, no
+  regressions vs 3.3).
+
 ## [3.3.0] - 2026-05-04
 
 Minor release. Closes the last Django-ORM parity gaps so dorm

@@ -431,6 +431,90 @@ class PostgreSQLDatabaseWrapper:
                     for row in cur:
                         yield row
 
+    def copy_from(
+        self,
+        table: str,
+        columns: list[str],
+        rows,
+        *,
+        binary: bool = False,
+    ) -> int:
+        """Bulk-load *rows* into *table* via PostgreSQL ``COPY ... FROM STDIN``.
+
+        Each item in *rows* is a sequence of values aligned with *columns*.
+        Returns the number of rows written. With ``binary=True`` the COPY
+        runs in binary mode — faster but every value must already be the
+        right Python type for the column (psycopg's adapter handles the
+        encoding).
+
+        Honours the active atomic() block / autocommit connection.
+        """
+        in_tx = self._atomic_conn is not None
+
+        col_list = ", ".join(f'"{c}"' for c in columns)
+        suffix = " (FORMAT BINARY)" if binary else ""
+        sql = f'COPY "{table}" ({col_list}) FROM STDIN{suffix}'
+
+        def _do() -> int:
+            conn = self._choose_conn()
+            n = 0
+            with log_query("postgresql", sql, None):
+                try:
+                    if conn is not None:
+                        with conn.cursor() as cur, cur.copy(sql) as cp:
+                            for row in rows:
+                                cp.write_row(row)
+                                n += 1
+                    else:
+                        with self._get_pool().connection() as c, c.cursor() as cur, cur.copy(sql) as cp:
+                            for row in rows:
+                                cp.write_row(row)
+                                n += 1
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
+            return n
+
+        return with_transient_retry(_do, in_transaction=in_tx)
+
+    def copy_to(
+        self,
+        sql: str,
+        params=None,
+        *,
+        binary: bool = False,
+    ):
+        """Yield rows from a ``COPY (<query>) TO STDOUT`` stream.
+
+        *sql* is a plain ``SELECT``; the wrapper builds the surrounding
+        ``COPY (...) TO STDOUT`` envelope. Each yielded element is a tuple
+        of values when ``binary=True`` (typed via psycopg adapters), or
+        a tuple of strings in text mode.
+
+        Refuses to run inside an ``atomic()`` block: COPY TO holds a server
+        cursor open and silently materialising it would defeat the purpose.
+        Move the export outside the atomic() block.
+        """
+        if self._atomic_conn is not None:
+            raise RuntimeError(
+                "copy_to() cannot be used inside an atomic() block: "
+                "COPY TO holds a server-side stream open. Move the call "
+                "outside the atomic() block."
+            )
+        sql_adapted = _to_pyformat(sql)
+        suffix = " WITH (FORMAT BINARY)" if binary else ""
+        copy_sql = f"COPY ({sql_adapted}) TO STDOUT{suffix}"
+        with log_query("postgresql", copy_sql, params):
+            with self._get_pool().connection() as conn:
+                with conn.cursor() as cur:
+                    try:
+                        with cur.copy(copy_sql, params or []) as cp:
+                            for row in cp.rows():
+                                yield row
+                    except Exception as exc:
+                        normalize_db_exception(exc)
+                        raise
+
     def table_exists(self, table_name: str) -> bool:
         rows = self.execute(
             "SELECT tablename FROM pg_tables WHERE tablename = %s",
@@ -692,10 +776,27 @@ class PostgreSQLAsyncDatabaseWrapper:
         return self._autocommit_conn
 
     async def _choose_conn(self):
-        """Return atomic conn or autocommit persistent conn, or None (use pool)."""
+        """Return atomic conn, pinned conn, autocommit persistent conn,
+        or None (use pool). Resolution order:
+
+        1. Active ``aatomic()`` block — transactions always win.
+        2. ``dorm.contrib.task_pool.pinned_connection()`` — task-local
+           pinning honoured next, so request-scoped helpers reuse one
+           checkout across all queries in the task.
+        3. Autocommit persistent connection.
+        4. ``None`` → checkout per call from the pool.
+        """
         state = ASYNC_ATOMIC_STATE.get()
         if state is not None and state[0] is self:
             return state[1]
+        # Task-local pin is opt-in (only set by users of
+        # ``dorm.contrib.task_pool.pinned_connection``); the import
+        # is local so the contrib module isn't loaded for every
+        # ORM call.
+        from dorm.contrib.task_pool import get_pinned_connection
+        pinned = get_pinned_connection()
+        if pinned is not None:
+            return pinned
         if self._autocommit:
             return await self._get_autocommit_conn()
         return None
@@ -815,6 +916,81 @@ class PostgreSQLAsyncDatabaseWrapper:
                         raise
                     async for row in cur:
                         yield row
+
+    async def copy_from(
+        self,
+        table: str,
+        columns: list[str],
+        rows,
+        *,
+        binary: bool = False,
+    ) -> int:
+        """Async ``COPY ... FROM STDIN``. *rows* may be a sync iterable
+        or an ``AsyncIterable`` — both are accepted, the loop adapts
+        automatically. See the sync wrapper for the rest of the contract."""
+        col_list = ", ".join(f'"{c}"' for c in columns)
+        suffix = " (FORMAT BINARY)" if binary else ""
+        sql = f'COPY "{table}" ({col_list}) FROM STDIN{suffix}'
+        in_tx = self._in_async_atomic()
+
+        async def _do() -> int:
+            conn = await self._choose_conn()
+            n = 0
+            with log_query("postgresql", sql, None):
+                try:
+                    async def _drain(cp):
+                        nonlocal n
+                        if hasattr(rows, "__aiter__"):
+                            async for row in rows:
+                                await cp.write_row(row)
+                                n += 1
+                        else:
+                            for row in rows:
+                                await cp.write_row(row)
+                                n += 1
+
+                    if conn is not None:
+                        async with conn.cursor() as cur, cur.copy(sql) as cp:
+                            await _drain(cp)
+                    else:
+                        async with (await self._get_pool()).connection() as c:
+                            async with c.cursor() as cur, cur.copy(sql) as cp:
+                                await _drain(cp)
+                except Exception as exc:
+                    normalize_db_exception(exc)
+                    raise
+            return n
+
+        return await awith_transient_retry(_do, in_transaction=in_tx)
+
+    async def copy_to(
+        self,
+        sql: str,
+        params=None,
+        *,
+        binary: bool = False,
+    ):
+        """Async generator over ``COPY (<query>) TO STDOUT``. See the
+        sync wrapper for semantics. Refuses to run inside ``aatomic()``."""
+        if self._in_async_atomic():
+            raise RuntimeError(
+                "copy_to() cannot be used inside an aatomic() block: "
+                "COPY TO holds a server-side stream open. Move the call "
+                "outside the aatomic() block."
+            )
+        sql_adapted = _to_pyformat(sql)
+        suffix = " WITH (FORMAT BINARY)" if binary else ""
+        copy_sql = f"COPY ({sql_adapted}) TO STDOUT{suffix}"
+        with log_query("postgresql", copy_sql, params):
+            async with (await self._get_pool()).connection() as conn:
+                async with conn.cursor() as cur:
+                    try:
+                        async with cur.copy(copy_sql, params or []) as cp:
+                            async for row in cp.rows():
+                                yield row
+                    except Exception as exc:
+                        normalize_db_exception(exc)
+                        raise
 
     async def table_exists(self, table_name: str) -> bool:
         rows = await self.execute(

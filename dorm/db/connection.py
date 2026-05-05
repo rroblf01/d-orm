@@ -182,6 +182,60 @@ def _get_settings(alias: str = "default") -> dict:
     return settings.DATABASES[alias]
 
 
+def _load_external_backend(engine: str, kind: str):
+    """Resolve a third-party backend registered via ``entry_points``.
+
+    Two groups are honoured:
+
+    - ``djanorm.backends`` — the entry point's value is a callable
+      that returns the *sync* wrapper.
+    - ``djanorm.async_backends`` — same but for the async wrapper.
+
+    Either group may be empty. The function returns the loaded
+    callable when *engine* matches an entry-point name (case-
+    insensitive), or ``None`` when there is no match.
+
+    Wrappers are loaded once and cached in module state — re-importing
+    a third-party plugin per connection would be needlessly costly.
+    """
+    cache = _BACKEND_CACHE if kind == "sync" else _ASYNC_BACKEND_CACHE
+    group = "djanorm.backends" if kind == "sync" else "djanorm.async_backends"
+    if cache is None:
+        from importlib.metadata import entry_points
+
+        loaded: dict[str, Any] = {}
+        try:
+            eps = entry_points(group=group)
+        except TypeError:
+            # Older importlib.metadata API (pre-3.10) returned a dict.
+            eps = entry_points().get(group, [])
+        for ep in eps:
+            loaded[ep.name.lower()] = ep
+        if kind == "sync":
+            globals()["_BACKEND_CACHE"] = loaded
+        else:
+            globals()["_ASYNC_BACKEND_CACHE"] = loaded
+        cache = loaded
+    ep = cache.get(engine)
+    if ep is None:
+        return None
+    return ep.load()
+
+
+# Lazy entry-point caches — populated on first lookup.
+_BACKEND_CACHE: dict[str, Any] | None = None
+_ASYNC_BACKEND_CACHE: dict[str, Any] | None = None
+
+
+def _supported_engines() -> str:
+    """List built-in + entry-point-registered engines for error messages."""
+    builtin = ["sqlite", "postgresql", "libsql", "mysql", "mariadb"]
+    extra: list[str] = []
+    if _BACKEND_CACHE:
+        extra.extend(sorted(_BACKEND_CACHE.keys()))
+    return ", ".join(f"'{e}'" for e in builtin + extra)
+
+
 def _create_sync_connection(alias: str, db_settings: dict):
     engine = db_settings.get("ENGINE", "sqlite").lower()
 
@@ -204,9 +258,15 @@ def _create_sync_connection(alias: str, db_settings: dict):
         from .backends.mysql import MySQLDatabaseWrapper
         return MySQLDatabaseWrapper(db_settings, alias)
 
+    factory = _load_external_backend(engine, "sync")
+    if factory is not None:
+        return factory(db_settings)
+
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql', 'libsql', 'mysql', 'mariadb'."
+        f"Supported: {_supported_engines()}. "
+        "Register a custom backend via the 'djanorm.backends' "
+        "entry-point group."
     )
 
 
@@ -226,10 +286,25 @@ def _create_async_connection(alias: str, db_settings: dict):
         from .backends.mysql import MySQLAsyncDatabaseWrapper
         return MySQLAsyncDatabaseWrapper(db_settings, alias)
 
+    factory = _load_external_backend(engine, "async")
+    if factory is not None:
+        return factory(db_settings)
+
     raise ImproperlyConfigured(
         f"Unsupported database engine: '{engine}'. "
-        "Supported: 'sqlite', 'postgresql', 'libsql', 'mysql', 'mariadb'."
+        f"Supported: {_supported_engines()}. "
+        "Register a custom backend via the 'djanorm.async_backends' "
+        "entry-point group."
     )
+
+
+def reset_backend_cache() -> None:
+    """Drop the cached entry-point lookup so a freshly-installed
+    third-party backend is observed on the next connection. Useful
+    in tests that monkeypatch ``importlib.metadata.entry_points``."""
+    global _BACKEND_CACHE, _ASYNC_BACKEND_CACHE
+    _BACKEND_CACHE = None
+    _ASYNC_BACKEND_CACHE = None
 
 
 def get_connection(alias: str = "default"):

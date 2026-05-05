@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "3.3.0"
+version = "3.4.0"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -209,4 +209,7 @@ timeout_method = "thread"
 [tool.ty.src]
 # `example/` ships demo / FastAPI code that imports optional packages
 # (fastapi, uvicorn) that aren't part of djanorm's runtime extras. Skip it.
-exclude = ["example/**"]
+# `bench/compare.py` imports Django / SQLAlchemy / Tortoise on demand to
+# benchmark them side-by-side; those packages are dev-tools, not runtime
+# deps of djanorm itself, so the type-checker would always complain.
+exclude = ["example/**", "bench/compare.py"]

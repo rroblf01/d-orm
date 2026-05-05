@@ -221,7 +221,7 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "3.3.0"
+__version__ = "3.4.0"
 __all__ = [
     # Config
     "configure",
