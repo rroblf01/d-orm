@@ -124,11 +124,22 @@ class LagAwareReadRouter:
 
     # ── Internals ────────────────────────────────────────────────────────────
     def _is_healthy(self, alias: str) -> bool:
+        # Cache lookup under the same lock as the eventual write —
+        # otherwise two threads could race the probe + write and end
+        # up issuing duplicate probes against the replica.
         now = _time.monotonic()
-        cached = self._state.get(alias)
-        if cached is not None and (now - cached.last_check_at) < self.cache_seconds:
-            return cached.healthy
+        with self._lock:
+            cached = self._state.get(alias)
+            if (
+                cached is not None
+                and (now - cached.last_check_at) < self.cache_seconds
+            ):
+                return cached.healthy
 
+        # Probe outside the lock — the network call can take tens of
+        # milliseconds and we don't want to serialise every reader on
+        # it. Worst case under contention: two callers both probe
+        # concurrently and only the second's write wins. Acceptable.
         lag = self._measure_lag(alias)
         with self._lock:
             healthy = lag is not None and lag <= self.max_lag_seconds

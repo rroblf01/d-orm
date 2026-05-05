@@ -365,10 +365,24 @@ def _run_tortoise(ops: int, runs: int) -> dict:
     path = _new_sqlite_path()
 
     async def _setup():
-        await Tortoise.init(
-            db_url=f"sqlite:///{path}",
-            modules={"models": ["bench.compare"]},
-        )
+        # Silence ``RuntimeWarning: Module "bench.compare" has no
+        # models`` — Tortoise scans the module for ``Model`` subclasses
+        # at import time but our ``_TortoiseWidget`` is bound inside
+        # the function scope's import. Filter the warning to keep the
+        # bench output clean; functionally Tortoise still picks up
+        # the model via the explicit name list below.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message='Module "bench.compare" has no models',
+                category=RuntimeWarning,
+            )
+            await Tortoise.init(
+                db_url=f"sqlite:///{path}",
+                modules={"models": ["bench.compare"]},
+            )
         await Tortoise.generate_schemas()
 
     async def _wipe():

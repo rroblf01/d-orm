@@ -144,8 +144,19 @@ def idempotency_key(
 
     The block runs inside an ``atomic()`` transaction so the
     side-table row and any business writes commit (or roll back)
-    together. On a replay hit the block still executes; the caller
-    chooses what to do via ``ctx.replay``.
+    together.
+
+    **Important — replay handling**: on a replay hit the body of the
+    ``with`` block STILL executes. Always branch on
+    ``ctx.replay`` before running side-effecting code, otherwise
+    the replay re-runs the work::
+
+        with idempotency_key(key, model=IdpEntry) as ctx:
+            if ctx.replay:
+                return ctx.cached_response          # ← short-circuit
+            result = process_payment(...)            # only on first call
+            ctx.store(result, status_code=201)
+            return result
 
     Concurrency: a tiny race window exists between the lookup and
     the eventual ``store()``. Two simultaneous requests with the
@@ -178,6 +189,79 @@ def idempotency_key(
                 pass
 
 
+class _AsyncIdempotencyContext(_IdempotencyContext):
+    """Async-aware variant — exposes :meth:`astore` so the
+    surrounding ``async with`` doesn't block on a sync save."""
+
+    async def astore(self, response: Any, *, status_code: Optional[int] = None) -> None:
+        """Async counterpart of :meth:`store`. Validates the payload
+        is JSON-serialisable and writes the row via the model's
+        async ``asave`` path."""
+        if self._stored:
+            return
+        try:
+            json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"aidempotency_key().astore(): response is not JSON-serialisable: {exc}"
+            ) from exc
+        record = self.model(
+            key=self.key,
+            response=response,
+            status_code=status_code,
+        )
+        await record.asave(using=self.using)
+        self._stored = True
+        self._existing = record
+
+
+@contextlib.asynccontextmanager
+async def aidempotency_key(
+    key: str,
+    *,
+    model: Type[IdempotencyRecord],
+    using: str = "default",
+):
+    """Async counterpart of :func:`idempotency_key`. The yielded
+    context exposes :meth:`astore` (await it) for the write path.
+    The lookup goes through ``aatomic()`` so the cache row commits
+    alongside any business writes inside the block.
+    """
+    if not key:
+        raise ValueError("aidempotency_key(): key must be a non-empty string")
+
+    from ..db.connection import get_async_connection
+    from ..transaction import aatomic
+
+    conn = get_async_connection(using)
+    async with aatomic(using=using):
+        # The async manager / queryset path is symmetric with the
+        # sync manager: ``afirst()`` (when present) or
+        # ``model.objects.using(using).filter(key=key).afirst()`` —
+        # we await the queryset so the row is materialised inside
+        # the active transaction.
+        qs = model.objects.using(using).filter(key=key)
+        afirst = getattr(qs, "afirst", None)
+        if callable(afirst):
+            existing = await afirst()
+        else:
+            # Backends without afirst (very old QuerySet shapes)
+            # fall back to the awaited materialisation.
+            rows = await qs[:1]
+            existing = rows[0] if rows else None
+        ctx = _AsyncIdempotencyContext(
+            key=key, model=model, existing=existing, using=using
+        )
+        try:
+            yield ctx
+        finally:
+            if not ctx._stored and not ctx.replay:
+                pass
+        # Discard the conn handle — only used so ``aatomic`` is
+        # exercised against the right alias.
+        _ = conn
+
+
 def purge_expired(
     model: Type[IdempotencyRecord],
     *,
@@ -194,13 +278,17 @@ def purge_expired(
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)
     qs = model.objects.using(using).filter(created_at__lt=cutoff)
-    n = qs.count()
-    qs.delete()
-    return n
+    # ``delete()`` returns ``(total_rows, per_model_breakdown)`` —
+    # use the authoritative count from the DML rather than a
+    # follow-up ``count()`` (which could race against concurrent
+    # inserts).
+    deleted, _ = qs.delete()
+    return deleted
 
 
 __all__ = [
     "IdempotencyRecord",
+    "aidempotency_key",
     "idempotency_key",
     "purge_expired",
 ]

@@ -39,7 +39,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from dataclasses import dataclass
-from typing import Any
 
 from .exceptions import DatabaseError
 
@@ -86,54 +85,6 @@ def current() -> _BudgetState | None:
     pre-set ``statement_timeout`` and how many rows to allow.
     """
     return _effective()
-
-
-def _apply_timeout(conn: Any, timeout_ms: int) -> Any:
-    """Pre-set the per-statement timeout on *conn* and return a token
-    callers pass to :func:`_clear_timeout` for restoration. Vendor-
-    specific:
-
-    - PostgreSQL: ``SET LOCAL statement_timeout`` (auto-reverts on
-      transaction end) when in a transaction; otherwise
-      ``SET statement_timeout`` for the session, and we restore on
-      exit.
-    - SQLite: ``conn.set_progress_handler(callback, N)`` raises a
-      ``DatabaseError`` from inside the VM after N opcodes — the
-      best portable approximation, since SQLite has no server-side
-      statement-timeout knob.
-    - Other backends: best-effort, no-op when unsupported.
-    """
-    vendor = getattr(conn, "vendor", "sqlite")
-    if vendor == "postgresql":
-        # ``SET LOCAL`` is the safe variant inside a transaction; the
-        # PG backend wrapper already issues ``BEGIN`` for atomic
-        # blocks. Outside a transaction a plain ``SET`` works but
-        # leaks across the connection lifetime — the budget exit hook
-        # restores the prior value.
-        try:
-            prior = conn.execute("SHOW statement_timeout")
-            prev_value = prior[0]["statement_timeout"] if prior else "0"
-        except Exception:
-            prev_value = "0"
-        conn.execute(f"SET statement_timeout = {timeout_ms}")
-        return ("pg_timeout", prev_value)
-    if vendor in ("sqlite", "libsql"):
-        # SQLite has ``progress_handler`` but it's set on the raw
-        # connection. We approximate with an asyncio.wait_for / threading
-        # wrapper at call sites, so the per-conn handler is a best-
-        # effort soft-trip: every ~10k VM ops, raise if elapsed.
-        return None
-    return None
-
-
-def _clear_timeout(conn: Any, token: Any) -> None:
-    if token is None:
-        return
-    if isinstance(token, tuple) and token[0] == "pg_timeout":
-        try:
-            conn.execute(f"SET statement_timeout = '{token[1]}'")
-        except Exception:
-            pass
 
 
 @contextlib.contextmanager

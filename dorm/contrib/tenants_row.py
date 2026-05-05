@@ -81,13 +81,27 @@ class TenantManager(Manager):
     """Manager that filters every queryset by the active tenant.
 
     On each call to :meth:`get_queryset` we read the active tenant
-    from the contextvar and inject ``filter(tenant_id=...)``. When
-    no tenant is active the manager raises
+    from the contextvar and inject ``filter(<tenant_field>=...)``.
+    When no tenant is active the manager raises
     :class:`NoActiveTenantError` rather than silently returning rows
     from every tenant.
+
+    The column name used for the filter is read from the model's
+    ``Meta.tenant_field`` if present (default ``"tenant_id"``), so
+    user code that overrides the column doesn't have to subclass the
+    manager too.
     """
 
+    # Class-level fallback — overridable on the instance or via
+    # ``Meta.tenant_field``. The instance / Meta wins at call time.
     tenant_field: str = "tenant_id"
+
+    def _resolved_field(self) -> str:
+        if self.model is not None:
+            meta_field = getattr(self.model._meta, "tenant_field", None)
+            if isinstance(meta_field, str) and meta_field:
+                return meta_field
+        return self.tenant_field
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -102,7 +116,7 @@ class TenantManager(Manager):
                 f"`{model_name}.unscoped` for a deliberate "
                 f"cross-tenant query."
             )
-        return qs.filter(**{self.tenant_field: tenant})
+        return qs.filter(**{self._resolved_field(): tenant})
 
 
 class _UnscopedManager(Manager):
@@ -110,6 +124,44 @@ class _UnscopedManager(Manager):
 
     Bound at ``TenantModel.unscoped`` so admin / cross-tenant call
     sites are textually obvious in the diff."""
+
+
+def make_async_tenant_manager() -> type:
+    """Build an ``AsyncOnlyManager`` + ``TenantManager`` composite.
+
+    Use when a model needs **both** strict async-only semantics
+    (sync calls raise ``AsyncOnlyError``) **and** row-level tenant
+    scoping. The plain ``class Foo(TenantModel, AsyncModel)`` MRO
+    picks the first manager it finds (TenantManager) and silently
+    drops AsyncOnlyManager's enforcement, so the helper here gives
+    callers a single explicit class that mixes both behaviours.
+
+    Example::
+
+        from dorm.contrib.asyncmodel import AsyncModel
+        from dorm.contrib.tenants_row import (
+            TenantModel, make_async_tenant_manager,
+        )
+
+        class Order(TenantModel, AsyncModel):
+            title = dorm.CharField(max_length=200)
+
+            objects = make_async_tenant_manager()()
+    """
+    from .asyncmodel import AsyncOnlyManager
+
+    class AsyncTenantManager(TenantManager, AsyncOnlyManager):
+        """TenantManager that also rejects sync ORM calls.
+
+        Resolution order: AsyncOnlyManager's ``__getattribute__``
+        runs first (most-derived MRO entry), so sync method names
+        in ``_SYNC_FORBIDDEN`` raise before the tenant filter ever
+        runs. Async paths fall through to ``TenantManager``'s
+        ``get_queryset`` which scopes the queryset to the active
+        tenant.
+        """
+
+    return AsyncTenantManager
 
 
 class TenantModel(Model):
@@ -138,7 +190,12 @@ class TenantModel(Model):
         abstract = True
 
     def _autofill_tenant(self) -> None:
-        if getattr(self, "tenant_id", None):
+        # Honour ``Meta.tenant_field`` so subclasses that renamed the
+        # column to ``org_id`` / ``account_id`` don't have to re-
+        # implement save / asave. Default ``"tenant_id"`` matches the
+        # built-in field declared above.
+        field_name = getattr(self._meta, "tenant_field", "tenant_id") or "tenant_id"
+        if getattr(self, field_name, None):
             return
         tenant = _ACTIVE_TENANT.get()
         if tenant is None:
@@ -147,7 +204,7 @@ class TenantModel(Model):
                 f"active tenant. Wrap the call in "
                 f"`with current_tenant(<tenant_id>):`."
             )
-        self.tenant_id = tenant
+        setattr(self, field_name, tenant)
 
     def save(self, *args: Any, **kwargs: Any) -> None:
         self._autofill_tenant()
@@ -164,4 +221,5 @@ __all__ = [
     "TenantModel",
     "current_tenant",
     "get_active_tenant",
+    "make_async_tenant_manager",
 ]

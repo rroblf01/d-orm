@@ -140,19 +140,27 @@ def test_field_from_db_value_passes_through_geom():
 
 
 def test_lookup_intersects_returns_sql():
+    """v4.0 audit fix: WKT travels as a bound parameter rather than
+    inline. The compiled SQL exposes a placeholder; the WKT string
+    lands in ``params``."""
     sql, params = SPATIAL_LOOKUPS["intersects"]("zone", Geom.point(1, 2))
     assert "ST_Intersects" in sql
-    assert "POINT(1 2)" in sql
-    assert params == []
+    assert "ST_GeomFromText(%s, %s)" in sql
+    assert params == ["POINT(1 2)", 4326]
 
 
 def test_lookup_distance_lte_includes_threshold():
-    sql, _ = SPATIAL_LOOKUPS["distance_lte"]("zone", Geom.point(0, 0), 100.0)
+    sql, params = SPATIAL_LOOKUPS["distance_lte"]("zone", Geom.point(0, 0), 100.0)
     assert "ST_Distance" in sql
-    assert "100.0" in sql or "100" in sql
+    # Threshold is the last bound parameter — not inlined.
+    assert sql.endswith("<= %s")
+    assert params[-1] == 100.0
 
 
 def test_lookup_within():
-    sql, _ = SPATIAL_LOOKUPS["within"]("zone", Geom.polygon([[[0, 0], [1, 0], [1, 1], [0, 0]]]))
+    sql, params = SPATIAL_LOOKUPS["within"](
+        "zone", Geom.polygon([[[0, 0], [1, 0], [1, 1], [0, 0]]])
+    )
     assert "ST_Within" in sql
-    assert "POLYGON" in sql
+    assert "ST_GeomFromText(%s, %s)" in sql
+    assert "POLYGON" in params[0]

@@ -102,15 +102,24 @@ class AsyncOnlyManager(Manager):
         # ``__getattribute__`` is called for every attr access, so we
         # need to short-circuit the dunders / private internals to
         # avoid a recursion explosion when the parent class's own
-        # methods walk our attribute set.
-        if name.startswith("_") or name.startswith("a") or name in (
+        # methods walk our attribute set. Dunders + leading-underscore
+        # attrs always pass through.
+        if name.startswith("_"):
+            return super().__getattribute__(name)
+        # Forbidden sync API names are checked **before** the broader
+        # "starts with 'a'" allowlist — otherwise sync ``all()``,
+        # ``aggregate()`` etc. (which both happen to start with 'a')
+        # would silently bypass the guard.
+        if name in _SYNC_FORBIDDEN:
+            raise AsyncOnlyError(name)
+        # Async API (``acreate``, ``afilter``, ``aget``, ...) and
+        # legitimate manager plumbing pass through.
+        if name.startswith("a") or name in (
             "model", "name", "creation_counter", "auto_created",
             "use_in_migrations", "contribute_to_class", "db_manager",
             "using", "get_queryset", "from_queryset",
         ):
             return super().__getattribute__(name)
-        if name in _SYNC_FORBIDDEN:
-            raise AsyncOnlyError(name)
         return super().__getattribute__(name)
 
 

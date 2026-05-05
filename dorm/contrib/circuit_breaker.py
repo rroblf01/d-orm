@@ -151,14 +151,22 @@ class CircuitBreaker:
             self._failures = 0
             self._opened_at = None
 
+    def _snapshot_for_message(self) -> tuple[int, float]:
+        """Take a consistent (failures, opened_at) snapshot under
+        the lock so the OPEN error message reports a self-consistent
+        view even under concurrent ``record_failure`` calls."""
+        with self._lock:
+            return self._failures, (self._opened_at or 0.0)
+
     # ── Context-manager wrapper ────────────────────────────────────────────────
     def __enter__(self) -> "CircuitBreaker":
         if not self.allow():
+            failures, opened_at = self._snapshot_for_message()
             raise CircuitOpenError(
                 f"Circuit '{self.name}' is OPEN — "
-                f"{self._failures} consecutive failures, "
+                f"{failures} consecutive failures, "
                 f"cooldown ends in "
-                f"{max(0.0, self.open_window_s - (self._clock() - (self._opened_at or 0))):.1f}s"
+                f"{max(0.0, self.open_window_s - (self._clock() - opened_at)):.1f}s"
             )
         return self
 
@@ -178,17 +186,28 @@ class CircuitBreaker:
 
         Awaits nothing inside the wrapper itself — exists so async code
         can use the same breaker without juggling sync/async boundary
-        helpers."""
+        helpers.
+
+        Notable nuance: ``asyncio.CancelledError`` is **not** counted
+        as a breaker failure. Cancellation usually comes from a client
+        disconnect or a task timeout, neither of which signals a DB
+        problem; counting them would prematurely trip the breaker
+        under heavy graceful-shutdown traffic.
+        """
         if not self.allow():
+            failures, _ = self._snapshot_for_message()
             raise CircuitOpenError(
                 f"Circuit '{self.name}' is OPEN — "
-                f"{self._failures} consecutive failures."
+                f"{failures} consecutive failures."
             )
         try:
             yield self
         except CircuitOpenError:
             raise
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
+            # Cancellation propagates without being counted.
+            raise
+        except Exception:
             self.record_failure()
             raise
         else:

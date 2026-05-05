@@ -26,10 +26,10 @@ any iterable / async iterable of dicts. They route through
 
 Example::
 
-    from dorm.contrib.streaming import stream_jsonl
+    from dorm.contrib.streaming import astream_jsonl
 
     async def export(qs):
-        async for chunk in stream_jsonl(qs, chunk_size=1000):
+        async for chunk in astream_jsonl(qs, chunk_size=1000):
             yield chunk  # bytes — pass to StreamingResponse / send_bytes
 
 The helpers are framework-agnostic. They never import FastAPI,
@@ -106,17 +106,41 @@ def _dump(obj: Any, *, indent: int | None = None) -> str:
 # ── Sync primitives ─────────────────────────────────────────────────────────
 
 
+def _iterator_accepts_chunk_size(it: Any) -> bool:
+    """Return True when ``it`` is an ``iterator()`` method that
+    accepts a ``chunk_size`` kwarg.
+
+    Inspecting the signature instead of catching a blanket
+    ``TypeError`` from a failed call avoids swallowing real errors
+    that happen *inside* the iterator body (a misbehaving
+    ``__next__`` bubbling ``TypeError`` would otherwise be silently
+    retried with no chunk size and either succeed differently or
+    fail with a different message)."""
+    import inspect
+
+    try:
+        sig = inspect.signature(it)
+    except (TypeError, ValueError):
+        return False
+    if "chunk_size" in sig.parameters:
+        return True
+    # ``**kwargs`` accepts anything — assume yes.
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        for p in sig.parameters.values()
+    )
+
+
 def _iter_rows(source: Any, chunk_size: int) -> Iterator[Any]:
     """Adapter that pulls rows out of *source*: either a QuerySet
     (calls ``iterator(chunk_size)``) or any iterable."""
     iterator = getattr(source, "iterator", None)
     if callable(iterator):
-        try:
+        if _iterator_accepts_chunk_size(iterator):
             yield from iterator(chunk_size=chunk_size)
-            return
-        except TypeError:
+        else:
             yield from iterator()
-            return
+        return
     yield from iter(source)
 
 
@@ -220,14 +244,13 @@ def stream_bytes(source: Iterable[bytes]) -> Iterator[bytes]:
 async def _aiter_rows(source: Any, chunk_size: int) -> AsyncIterator[Any]:
     aiterator = getattr(source, "aiterator", None)
     if callable(aiterator):
-        try:
+        if _iterator_accepts_chunk_size(aiterator):
             async for row in aiterator(chunk_size=chunk_size):
                 yield row
-            return
-        except TypeError:
+        else:
             async for row in aiterator():
                 yield row
-            return
+        return
     if hasattr(source, "__aiter__"):
         async for row in source:
             yield row

@@ -1523,6 +1523,8 @@ class AddFieldOnline(Operation):
     def database_forwards(
         self, app_label: str, connection, from_state, to_state
     ) -> None:
+        import copy as _copy
+
         vendor = getattr(connection, "vendor", "sqlite")
         table = self._resolve_table(app_label, to_state)
 
@@ -1530,12 +1532,17 @@ class AddFieldOnline(Operation):
         # eventual ``null=`` value. Forces no rewrite on PG and is
         # the only form SQLite accepts at all (``ALTER TABLE ... ADD
         # COLUMN NOT NULL`` is rejected without a DEFAULT).
+        #
+        # Work on a shallow copy of the field so concurrent
+        # migrations against different aliases (typical multi-tenant
+        # rollout) don't race on the shared field instance's ``null``
+        # attribute. Pre-fix the op temporarily flipped
+        # ``self.field.null`` to ``True``; under parallel rollouts
+        # the second call could observe the first's transient state.
+        field_copy = _copy.copy(self.field)
         original_null = getattr(self.field, "null", False)
-        try:
-            self.field.null = True
-            col_sql = _field_to_column_sql(self.name, self.field, connection)
-        finally:
-            self.field.null = original_null
+        field_copy.null = True
+        col_sql = _field_to_column_sql(self.name, field_copy, connection)
         connection.execute_script(
             f'ALTER TABLE "{table}" ADD COLUMN {col_sql}'
         )

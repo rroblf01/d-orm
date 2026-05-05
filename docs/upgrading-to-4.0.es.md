@@ -75,7 +75,7 @@ Si algo falla, abre issue — no debería romperse nada.
 | Streaming exports JSONL/CSV | [Helpers](helpers.md#streaming-primitives) |
 | Query budget (HTTP SLA) | [Helpers](helpers.md#query-budget) |
 | Geometrías / GIS | [GIS](gis.md) |
-| HStore / ENUM nativo PG | [v4.0](v4_0.md#7-hstorefield--pg-enum-nativo) |
+| HStore / ENUM nativo PG | [v4.0](v4_0.md#7-hstorefield-pg-enum-nativo) |
 | Search full-text + trigram | [v4.0](v4_0.md#1-full-text-search-ampliado) |
 | OTel traces enriquecidos | [v4.0](v4_0.md#3-opentelemetry-enriquecido) |
 | Mypy validar `filter()` kwargs | [Sibling packages](sibling-packages.md) |

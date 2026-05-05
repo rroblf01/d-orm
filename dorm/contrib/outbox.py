@@ -118,8 +118,26 @@ async def arecord_event(
     *,
     using: str | None = None,
 ) -> OutboxEvent:
-    """Async counterpart of :func:`record_event`."""
+    """Async counterpart of :func:`record_event`.
+
+    Mirrors the sync version's tx-detection: logs a warning when
+    called outside an active ``aatomic()`` block so the dual-write
+    invariant isn't silently broken.
+    """
+    from ..db.utils import ASYNC_ATOMIC_STATE
+    from ..db.connection import get_async_connection
+
     alias = using or "default"
+    state = ASYNC_ATOMIC_STATE.get()
+    aconn = get_async_connection(alias)
+    in_atomic = state is not None and state[0] is aconn
+    if not in_atomic:
+        _log.warning(
+            "arecord_event(%s) called outside an aatomic() block; the "
+            "outbox row will commit independently of any business write "
+            "— defeats the dual-write guarantee.",
+            event_type,
+        )
     obj = model(event_type=event_type, payload=payload or {})
     await obj.asave(using=alias)
     return obj
@@ -265,6 +283,93 @@ class OutboxRelay:
         finally:
             signal.signal(signal.SIGTERM, prev_term)
             signal.signal(signal.SIGINT, prev_int)
+
+    async def _aprocess_one(self, row, handler: Callable[[Any], Any]) -> bool:
+        """Async counterpart of :meth:`_process_one`.
+
+        Accepts both sync and async handlers — when *handler* returns
+        a coroutine we await it; otherwise we treat the return value
+        as the success flag the same way the sync path does.
+        """
+        import inspect
+
+        try:
+            result = handler(row)
+            if inspect.iscoroutine(result):
+                ok = await result
+            else:
+                ok = result
+        except Exception as exc:
+            row.attempts += 1
+            row.last_error = f"{type(exc).__name__}: {exc}"[:1024]
+            if row.attempts >= self.max_attempts:
+                row.status = "dead"
+            await row.asave(using=self.using)
+            _log.warning(
+                "outbox handler raised on event %s (%s/%s attempts): %s",
+                row.id,
+                row.attempts,
+                self.max_attempts,
+                exc,
+            )
+            return False
+        if ok:
+            from datetime import datetime, timezone
+
+            row.status = "published"
+            row.published_at = datetime.now(timezone.utc)
+            row.last_error = None
+            await row.asave(using=self.using)
+            return True
+        row.attempts += 1
+        if row.attempts >= self.max_attempts:
+            row.status = "dead"
+        await row.asave(using=self.using)
+        return False
+
+    async def adrain_once(self, handler: Callable[[Any], Any]) -> int:
+        """Async equivalent of :meth:`drain_once`. Drains a single
+        batch via the async ORM path; await the handler when it is
+        a coroutine function."""
+        from ..db.connection import get_async_connection
+        from ..transaction import aatomic
+
+        conn = get_async_connection(self.using)
+        supports_skip = getattr(conn, "vendor", "sqlite") == "postgresql"
+
+        published = 0
+        async with aatomic(using=self.using):
+            base = (
+                self.model.objects.using(self.using)
+                .filter(status="pending")
+                .order_by("created_at")
+            )
+            if supports_skip:
+                qs = base.select_for_update(skip_locked=True)[: self.batch_size]
+            else:
+                qs = base[: self.batch_size]
+            rows = [row async for row in qs]
+            for row in rows:
+                if await self._aprocess_one(row, handler):
+                    published += 1
+        return published
+
+    async def arun(self, handler: Callable[[Any], Any]) -> None:
+        """Async equivalent of :meth:`run`. Loops via
+        :meth:`adrain_once`, sleeping between empty batches.
+
+        Stop with ``self.stop()`` from another task — there is no
+        SIGTERM hook here because async stacks typically register
+        their own; mirroring the sync helper would surprise FastAPI
+        / Litestar / aiohttp users that already wired a graceful-
+        shutdown lifespan.
+        """
+        import asyncio
+
+        while not self._stop:
+            published = await self.adrain_once(handler)
+            if published == 0:
+                await asyncio.sleep(self.poll_interval_s)
 
 
 def serialize_payload(payload: Any) -> str:

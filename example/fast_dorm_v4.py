@@ -33,7 +33,9 @@ from dorm.contrib.idempotency import IdempotencyRecord, idempotency_key
 from dorm.contrib.listen_notify import anotify, listen
 from dorm.contrib.nplusone import detect as nplus_one_detect
 from dorm.contrib.streaming import astream_jsonl
-from dorm.contrib.tenants_row import TenantModel, current_tenant
+from dorm.contrib.tenants_row import (
+    TenantModel, current_tenant, make_async_tenant_manager,
+)
 
 log = logging.getLogger("fast_dorm_v4")
 
@@ -44,12 +46,20 @@ log = logging.getLogger("fast_dorm_v4")
 class Order(TenantModel, AsyncModel):
     """Tenant-scoped, async-only Order. Sync access raises
     `AsyncOnlyError`; reads/writes auto-filter on the active
-    tenant_id pinned via the middleware below."""
+    tenant_id pinned via the middleware below.
+
+    The combined manager (``make_async_tenant_manager()``) ensures
+    that the AsyncOnly enforcement isn't dropped by MRO order — the
+    naive ``class Foo(TenantModel, AsyncModel)`` picks
+    ``TenantManager`` and silently loses the async-only guard.
+    """
 
     title = dorm.CharField(max_length=200)
     amount = dorm.IntegerField()
     status = dorm.CharField(max_length=20, default="pending")
     created_at = dorm.DateTimeField(auto_now_add=True)
+
+    objects = make_async_tenant_manager()()
 
     class Meta:
         db_table = "orders"

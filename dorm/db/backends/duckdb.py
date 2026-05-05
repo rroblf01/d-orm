@@ -170,17 +170,47 @@ class DuckDBDatabaseWrapper:
 
         return with_transient_retry(_do, in_transaction=in_tx)
 
+    @staticmethod
+    def _safe_pk_col(pk_col: str) -> str:
+        """Reject anything that isn't a plain identifier so a caller-
+        supplied ``pk_col`` cannot smuggle SQL through the
+        ``RETURNING`` slot."""
+        import re
+
+        if not isinstance(pk_col, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", pk_col):
+            raise ValueError(
+                f"DuckDB execute_insert: invalid pk_col {pk_col!r}. "
+                "Identifiers must match [A-Za-z_][A-Za-z0-9_]*."
+            )
+        return pk_col
+
+    @staticmethod
+    def _maybe_append_returning(sql: str, pk_col: str) -> str:
+        """Append ``RETURNING "<pk_col>"`` to *sql* unless the caller
+        already added one. Avoids a double-RETURNING parser error
+        when the user-supplied SQL already carries the clause."""
+        # Cheap textual check — we only look at the tail. False
+        # negatives (a string literal containing "returning") are
+        # acceptable: the worst case is an extra ``RETURNING`` clause
+        # that DuckDB rejects loudly, which is what would have
+        # happened pre-fix anyway.
+        if "RETURNING" in sql.upper():
+            return sql
+        return sql + f' RETURNING "{pk_col}"'
+
     def execute_insert(self, sql: str, params=None, pk_col: str = "id"):
         # DuckDB's auto-incrementing PKs are produced via sequences
         # explicitly; emulate ``RETURNING`` by issuing it inline.
-        appended_returning = sql + f' RETURNING "{pk_col}"'
+        pk_col = self._safe_pk_col(pk_col)
+        appended_returning = self._maybe_append_returning(sql, pk_col)
         rows = self.execute(appended_returning, params)
         if not rows:
             return None
         return rows[0].get(pk_col)
 
     def execute_bulk_insert(self, sql: str, params=None, pk_col: str = "id", count: int = 1) -> list[int]:
-        appended = sql + f' RETURNING "{pk_col}"'
+        pk_col = self._safe_pk_col(pk_col)
+        appended = self._maybe_append_returning(sql, pk_col)
         rows = self.execute(appended, params)
         return [r.get(pk_col) for r in rows]
 
