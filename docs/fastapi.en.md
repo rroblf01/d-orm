@@ -395,8 +395,145 @@ transaction; on exception, FastAPI's exception handler still fires
   Each request handler should fetch its own.
 - **Block on sync ORM calls in async routes** — `Author.objects.all()`
   in an `async def` is fine for tiny dev work but ties up the event
-  loop on every query. Use the `a*` variants in production.
+  loop on every query. Use the `a*` variants in production. Or
+  enforce the pattern at the model level with
+  `dorm.contrib.asyncmodel.AsyncModel` — sync calls raise
+  `AsyncOnlyError` directly.
 - **`response_model` validation cost** — Pydantic re-validates on
   output. For very high-throughput endpoints, set
   `response_model_exclude_unset=True` or skip `response_model` and
   return `JSONResponse` directly.
+
+## Streaming exports — direct `StreamingResponse` (4.0+)
+
+For exporting large querysets without materialising them:
+
+```python
+from fastapi.responses import StreamingResponse
+from dorm.contrib.streaming import astream_jsonl, astream_csv
+
+@app.get("/orders/export.jsonl")
+async def export_jsonl():
+    qs = Order.objects.afilter(status="completed")
+    return StreamingResponse(
+        astream_jsonl(qs, chunk_size=1000),
+        media_type="application/x-ndjson",
+    )
+
+@app.get("/orders/export.csv")
+async def export_csv():
+    qs = Order.objects.afilter(status="completed").values(
+        "id", "amount", "currency", "created_at"
+    )
+    return StreamingResponse(
+        astream_csv(qs),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="orders.csv"'},
+    )
+```
+
+Memory-bounded — 10M rows export with ~50 MB RSS. Special types
+(datetime, Decimal, UUID, Enum, bytes) serialise cleanly.
+
+## Query budget — protect SLA (4.0+)
+
+```python
+import dorm
+
+@app.get("/heavy")
+async def heavy_handler():
+    async with dorm.abudget(timeout_ms=200, max_rows=10_000):
+        rows = await Order.objects.afilter(status="pending")
+    return {"orders": [r.id for r in rows]}
+```
+
+`timeout_ms` aborts via `statement_timeout`; `max_rows` aborts
+client-side. Trade-off: the block becomes an implicit `aatomic()`
+on PG.
+
+## N+1 detector as middleware (4.0+)
+
+```python
+from dorm.contrib.nplusone import detect
+
+@app.middleware("http")
+async def nplus_one_middleware(request, call_next):
+    with detect(raise_on_detect=False) as d:
+        response = await call_next(request)
+    if d.findings:
+        log.warning("N+1 detected on %s: %s", request.url.path, d.report())
+    return response
+```
+
+`raise_on_detect=True` for strict test mode.
+
+## Idempotency keys (4.0+)
+
+Client retries with the same `Idempotency-Key` → respond with the
+cached body:
+
+```python
+from fastapi import Header
+from dorm.contrib.idempotency import IdempotencyRecord, idempotency_key
+
+class IdpEntry(IdempotencyRecord):
+    class Meta:
+        db_table = "idempotency_entries"
+
+@app.post("/payments")
+async def create_payment(
+    body: PaymentIn,
+    idempotency_key_header: str = Header(alias="Idempotency-Key"),
+):
+    with idempotency_key(idempotency_key_header, model=IdpEntry) as ctx:
+        if ctx.replay:
+            return JSONResponse(
+                ctx.cached_response,
+                status_code=ctx.cached_status_code or 200,
+            )
+        result = process_payment(body)
+        ctx.store(result, status_code=201)
+        return JSONResponse(result, status_code=201)
+```
+
+The block runs in `atomic()` — outbox row + business write commit
+together.
+
+## Real-time via LISTEN/NOTIFY + WebSocket (4.0+)
+
+```python
+from fastapi import WebSocket
+from dorm.contrib.listen_notify import listen, anotify
+
+@app.websocket("/orders/stream")
+async def stream_orders(ws: WebSocket):
+    await ws.accept()
+    async with listen("orders") as channel:
+        async for n in channel:
+            await ws.send_text(n.payload)
+
+@app.post("/orders")
+async def create_order(body: OrderIn):
+    order = await Order.objects.acreate(**body.dict())
+    await anotify("orders", order.json())
+    return order
+```
+
+PostgreSQL-only.
+
+## Multi-tenancy middleware (4.0+)
+
+```python
+from dorm.contrib.tenants_row import current_tenant
+
+@app.middleware("http")
+async def tenant_middleware(request, call_next):
+    tenant = request.headers.get("X-Tenant-ID")
+    if not tenant:
+        return JSONResponse({"detail": "missing tenant"}, status_code=400)
+    with current_tenant(tenant):
+        return await call_next(request)
+```
+
+Any ORM query inside the handler picks up the tenant
+automatically.

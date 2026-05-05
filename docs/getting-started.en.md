@@ -171,11 +171,40 @@ on MariaDB 10.5+ but not on MySQL; the insert path uses
 `ANSI_QUOTES` mode so dorm's double-quoted identifiers parse the
 same as PostgreSQL / SQLite.
 
+## 9. DuckDB for embedded analytics (4.0+)
+
+When the workload is analytical (dashboards, local ETL, ML feature
+stores) instead of OLTP, the DuckDB backend runs columnar vectorised
+queries in-process, no server.
+
+```bash
+pip install 'djanorm[duckdb]'
+```
+
+```python title="settings.py"
+DATABASES = {
+    "default": {
+        "ENGINE": "duckdb",
+        "NAME": "analytics.duckdb",   # file on disk; ":memory:" works too
+    }
+}
+```
+
+Your code stays identical — `Author.objects.filter(...)`,
+`bulk_create`, aggregations. Caveat: DuckDB has no `SAVEPOINT`, so
+nested `atomic()` blocks degrade to no-op boundaries; the outer
+rollback discards everything. See [DuckDB](duckdb.md) for details.
+
+For serious OLTP keep PostgreSQL — DuckDB shines on bulk vectorised
+reads, not on concurrent writes.
+
 ## What next?
 
 - [Models & fields](models.md) — every field type and their options
 - [Querying](queries.md) — filter, exclude, Q, F, aggregations
 - [Async patterns](async.md) — `acreate`, `aiterator`, `aatomic`
 - [Tutorial](tutorial.md) — wire it up with FastAPI
+- [What's new in 4.0](v4_0.md) — overview of the 4.0 features
+- [DuckDB](duckdb.md) — embedded OLAP backend
 - [File uploads with `FileField`](models.md#files) — local disk by
   default, switch to S3 / MinIO / R2 with a `STORAGES` change

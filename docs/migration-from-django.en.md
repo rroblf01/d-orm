@@ -194,8 +194,123 @@ async calls stay silent.
 - **Async pool** with retry on transient errors and slow-query
   detection — works with FastAPI / Starlette out of the box.
 - **`Field[T]` generics** — your IDE knows `user.name` is `str` and
-  flags `user.naem`.
+  flags `user.naem`. The `djanorm-mypy` plugin extends this to
+  `filter()` kwargs and lookup suffixes at compile time.
 - **`DormSchema`** for FastAPI — single-source-of-truth schemas with
   `class Meta: model = User`, including nested relations.
 - **Tiny dependency footprint**: `psycopg` + `aiosqlite`, optionally
   `pydantic`. No Django.
+- **Production hardening built in** — circuit breaker, query
+  budget, lag-aware routing, outbox, sharding, idempotency keys.
+
+## Quick equivalence table (4.0)
+
+### Everyday imports
+
+| Django | dorm |
+|---|---|
+| `from django.db import models` | `import dorm` |
+| `models.Model` | `dorm.Model` |
+| `models.CharField` / `IntegerField` / etc. | `dorm.CharField` / etc. |
+| `models.Q`, `models.F`, `models.Subquery`, `models.Exists` | `dorm.Q`, `dorm.F`, `dorm.Subquery`, `dorm.Exists` |
+| `models.Count`, `Sum`, `Avg`, ... | `dorm.Count`, `dorm.Sum`, `dorm.Avg`, ... |
+| `models.OuterRef` | `dorm.OuterRef` |
+| `models.FilteredRelation` | `dorm.FilteredRelation` |
+| `models.UniqueConstraint`, `CheckConstraint` | `dorm.UniqueConstraint`, `dorm.CheckConstraint` |
+| `models.Index` | `dorm.Index` |
+| `from django.db import transaction` | `from dorm import transaction` |
+| `transaction.atomic()` | `dorm.transaction.atomic()` |
+| `from django.db import connection` | `from dorm.db.connection import get_connection` |
+
+### `contrib.postgres`
+
+| Django | dorm |
+|---|---|
+| `contrib.postgres.fields.ArrayField` | `dorm.ArrayField` |
+| `contrib.postgres.fields.JSONField` | `dorm.JSONField` (also on SQLite) |
+| `contrib.postgres.fields.HStoreField` | `dorm.HStoreField` (4.0+; TEXT fallback on SQLite) |
+| `contrib.postgres.fields.RangeField` | `dorm.RangeField` and subclasses |
+| `contrib.postgres.search.SearchVector` | `dorm.search.SearchVector` |
+| `contrib.postgres.search.SearchQuery` | `dorm.search.SearchQuery` |
+| `contrib.postgres.search.SearchRank` | `dorm.search.SearchRank` |
+| `contrib.postgres.search.SearchHeadline` | `dorm.search.SearchHeadline` |
+| `contrib.postgres.search.TrigramSimilarity` | `dorm.search.TrigramSimilarity` (4.0+) |
+| `contrib.postgres.aggregates.StringAgg` | `dorm.StringAgg` |
+| `contrib.postgres.aggregates.ArrayAgg` | `dorm.ArrayAgg` |
+| `contrib.postgres.aggregates.BoolAnd/BoolOr` | `dorm.BoolAnd` / `dorm.BoolOr` |
+
+### `Choices` / Enums
+
+```python
+# Django
+class Status(models.TextChoices):
+    ACTIVE = "active", "Active"
+    ARCHIVED = "archived", "Archived"
+
+class Article(models.Model):
+    status = models.CharField(max_length=10, choices=Status.choices)
+
+# dorm — use enum.Enum + EnumField
+import enum
+
+class Status(enum.Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+class Article(dorm.Model):
+    status = dorm.EnumField(Status, default=Status.ACTIVE)
+    # Or PG native ENUM (4.0+):
+    # status = dorm.EnumField(Status, native=True, type_name="article_status")
+```
+
+### Forms
+
+Django ships `ModelForm`. dorm **does not ship forms** by design —
+the target is 99% FastAPI / Litestar / aiohttp where validation
+flows through Pydantic. For input/output schemas use
+`dorm.contrib.pydantic`:
+
+```python
+from dorm.contrib.pydantic import (
+    schema_for, create_schema_for, update_schema_for,
+)
+
+AuthorOut = schema_for(Author)
+AuthorCreate = create_schema_for(Author)            # POST body
+AuthorUpdate = update_schema_for(Author)            # PATCH body, all optional
+```
+
+### Admin
+
+Django ships `contrib.admin`. dorm **does not ship admin** built-in.
+FastAPI deployments typically use `sqladmin` or a custom dashboard.
+To generate JSON Schema from your models (input for external admin
+tools) use `dorm export-json-schema --out schemas/`.
+
+### `select_for_update` / signals / migrations
+
+Same API as Django. Migration ops new in 4.0 that Django doesn't
+have: `AddFieldOnline`, `BackfillBatch`, `SetNotNullOnline`,
+`CreateMaterializedView`, `CreatePartitionedTable`, `CreatePGEnum`.
+
+### Multi-tenancy
+
+| Django | dorm |
+|---|---|
+| `django-tenants` (3rd party, schema) | `dorm.contrib.tenants` (built-in, schema) |
+| Manager middleware with manual filter | `dorm.contrib.tenants_row.TenantModel` (4.0+) |
+
+### GIS
+
+| Django | dorm |
+|---|---|
+| `contrib.gis.db.models.PointField` | `dorm.contrib.gis.PointField` (4.0+) |
+| `contrib.gis.db.models.PolygonField` | `dorm.contrib.gis.PolygonField` (4.0+) |
+| `__intersects`, `__within`, `__contains`, `__distance_lte` | same names, in `dorm.contrib.gis` |
+
+### Dev tooling
+
+| Django | dorm |
+|---|---|
+| `django-stubs` (mypy plugin) | `djanorm-mypy` (sibling package) |
+| `pytest-django` | `pytest-djanorm` (sibling package) |

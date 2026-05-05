@@ -509,3 +509,99 @@ Run `dorm doctor` in CI to fail builds whose configuration trips a
 known production footgun. Examples it catches: small pool size,
 missing `sslmode` on a remote PG host, FKs without an index,
 transient-error retry disabled.
+
+## Post-deploy drift detection: `dorm diff` (4.0+)
+
+After deploying and applying migrations, run:
+
+```bash
+dorm diff --apps myapp.models || exit 1
+```
+
+as a pipeline step. Compares the model registry against the live
+schema (information_schema / sqlite_master) and aborts the release
+if a migration didn't land.
+
+## Query budget — protect HTTP SLA (4.0+)
+
+```python
+import dorm
+
+@app.get("/heavy")
+async def heavy(request):
+    async with dorm.abudget(timeout_ms=200, max_rows=10_000):
+        return await Order.objects.afilter(status="pending")
+```
+
+PG applies `SET LOCAL statement_timeout` inside an implicit
+`aatomic()`; `BudgetExceeded` is raised if the row ceiling is
+exceeded. Trade-off: the block becomes a transaction.
+
+## Circuit breaker (4.0+)
+
+```python
+from dorm.contrib.circuit_breaker import circuit_breaker, CircuitOpenError
+
+cb = circuit_breaker("default", failure_threshold=5, open_window_s=30.0)
+
+def safe_count() -> int | None:
+    try:
+        with cb:
+            return Author.objects.count()
+    except CircuitOpenError:
+        return None        # serve cache / default
+```
+
+CLOSED → OPEN (after N consecutive failures) → HALF_OPEN → CLOSED
+or reopen. Per-process; layer Redis on top for cross-worker
+coordination.
+
+## Pool task affinity (4.0+)
+
+Reuse one checkout per request in async handlers:
+
+```python
+from dorm.contrib.task_pool import pinned_connection
+
+@app.middleware("http")
+async def pin_db(request, call_next):
+    async with pinned_connection():
+        return await call_next(request)
+```
+
+## Lag-aware read routing (4.0+)
+
+```python
+from dorm.contrib.lag_router import LagAwareReadRouter
+
+DATABASE_ROUTERS = [
+    LagAwareReadRouter(
+        primary="primary",
+        replicas=["replica_1", "replica_2"],
+        max_lag_seconds=2.0,
+        cache_seconds=5.0,
+    ),
+]
+```
+
+`pg_last_xact_replay_timestamp()` is consulted every
+`cache_seconds`. Lag > threshold → automatic deflection to the
+primary.
+
+## Zero-downtime migrations (4.0+)
+
+For `ADD COLUMN NOT NULL` on big tables use the recipe in
+[Online migrations](online-migrations.md). PG ≥ 12 never rewrites
+the table.
+
+## Enriched OpenTelemetry (4.0+)
+
+```python
+from dorm.contrib.otel import instrument
+instrument(tracer_name="myapp.dorm")
+```
+
+Spans now carry SemConv 1.20+ attributes: `db.operation`,
+`db.sql.table` / `db.collection.name`, `db.dorm.alias`. Span name
+is `"<OPERATION> <table>"` so tracing UIs group by hot tables out
+of the box.

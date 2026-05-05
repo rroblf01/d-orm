@@ -28,6 +28,8 @@ async for a in Author.objects.filter(age__gte=18):
 | nuevo del todo | [Empezando](getting-started.md) |
 | montas una app con FastAPI | [Tutorial: tu primera API en 5 min](tutorial.md) |
 | vienes de Django | [Migración desde Django ORM](migration-from-django.md) |
+| buscas qué cambió en 4.0 | [Novedades 4.0](v4_0.md) |
+| no sabes qué helper usar | [Cuándo usar qué](when-to-use-what.md) |
 | buscas un método | Referencia API (barra lateral) |
 | vas a desplegar a producción | [Despliegue en producción](production.md) |
 
@@ -38,33 +40,50 @@ async for a in Author.objects.filter(age__gte=18):
   todo. Si conoces Django, ya conoces dorm.
 - **Sync **y** async** — cada método tiene una variante `a*`. El pool
   async reintenta errores transitorios y registra consultas lentas
-  sin configurar nada.
-- **Con tipos** — `Field[T]` genérico + `Manager[Self]`. Tu IDE sabe
-  que `user.name` es `str`, no `Any`, y detecta `user.naem` como typo.
-- **Listo para FastAPI** — `DormSchema` con `class Meta: model = User`
-  genera un schema Pydantic v2 que refleja tu modelo, incluyendo
-  serialización anidada de FK / M2M. Sin pegamento.
-- **Hardening de producción incluido** — helper de health-check,
-  advisory locks en migraciones, reintento transitorio, hooks de
-  observabilidad de queries (OpenTelemetry / Datadog / Prometheus),
-  logs de queries lentas.
-- **PostgreSQL y SQLite** — el mismo código de modelos, las mismas
-  migraciones; cambias entre ellos editando una línea.
-- **Almacenamiento de archivos pluggable** — `FileField` escribe a
-  disco local por defecto y a **AWS S3** (o cualquier servicio
-  compatible con S3: **MinIO**, **Cloudflare R2**,
-  **Backblaze B2**) cambiando `settings.STORAGES`. El código de la
-  app no cambia.
+  sin configurar nada. Modelos `AsyncModel` rechazan API sync para
+  stacks async puros.
+- **Con tipos** — `Field[T]` genérico + `Manager[Self]`. Plugin
+  [`djanorm-mypy`](sibling-packages.md) valida kwargs `filter()`
+  contra el modelo y suffixes lookup en compile-time.
+- **Listo para FastAPI** — `DormSchema` + `list_response_schema` +
+  `nested_schema_for` + `schema_with_computed`. Streaming
+  `StreamingResponse` directo via `dorm.contrib.streaming`. Sin
+  pegamento.
+- **Hardening de producción incluido** — circuit breaker, query
+  budget (timeout SLA), pool task affinity, lag-aware read routing,
+  outbox pattern, sharding por hash, idempotency keys, schema drift
+  detection (`dorm diff`).
+- **Multi-backend** — **SQLite**, **PostgreSQL**, **MySQL/MariaDB**,
+  **libsql/Turso** y desde 4.0 **DuckDB** (analítica embarcada).
+  Mismos modelos, mismas migraciones.
+- **PG features de primera** — `COPY FROM/TO`, materialised views,
+  particionamiento declarativo (RANGE/LIST/HASH), `LISTEN/NOTIFY`
+  async pub/sub, `pgvector`, `HStoreField`, ENUM nativo, full-text
+  search con trigram + GIN.
+- **Migraciones zero-downtime** — `AddFieldOnline` +
+  `BackfillBatch` + `SetNotNullOnline` para tablas grandes en prod.
+- **Multi-tenancy** — schema-level (`dorm.contrib.tenants`) o
+  row-level (`TenantModel` + `current_tenant()`).
+- **Tooling separado** — `pytest-djanorm` y `djanorm-mypy` viven en
+  paquetes hermanos para no contaminar el wheel principal con deps
+  dev-only ([rationale](sibling-packages.md)).
+- **Almacenamiento pluggable** — `FileField` a disco local o
+  **AWS S3** / **MinIO** / **Cloudflare R2** / **Backblaze B2**
+  cambiando `settings.STORAGES`. Sin tocar código.
 
 ## Instalación
 
 ```bash
 pip install "djanorm[sqlite]"
 pip install "djanorm[postgresql]"
+pip install "djanorm[duckdb]"                 # analítica embarcada (4.0+)
 pip install "djanorm[sqlite,postgresql,pydantic]"
 
-# Añade el extra s3 cuando guardes uploads en AWS S3 / MinIO / R2 / B2
+# Uploads en AWS S3 / MinIO / R2 / B2
 pip install "djanorm[postgresql,s3]"
+
+# Tooling dev (paquetes hermanos)
+pip install pytest-djanorm djanorm-mypy
 ```
 
 ## Referencia rápida
@@ -73,8 +92,16 @@ pip install "djanorm[postgresql,s3]"
 - API de consultas → [Consultas](queries.md)
 - Patrones async → [Patrones async](async.md)
 - Migraciones de schema → [Migraciones](migrations.md)
+- Migraciones zero-downtime → [Migraciones online](online-migrations.md)
 - Transacciones → [Transacciones](transactions.md)
 - FastAPI / Pydantic → [Integración con FastAPI](fastapi.md)
+- Backend DuckDB → [DuckDB](duckdb.md)
+- Multi-tenancy fila → [Tenancy fila](tenants-row.md)
+- CTEs recursivos / árboles → [Recursive CTE](recursive-cte.md)
+- Helpers framework-agnósticos → [Helpers](helpers.md)
+- Features avanzadas PG → [Avanzado](advanced.md)
+- Paquetes hermanos (mypy / pytest) → [Sibling packages](sibling-packages.md)
+- Benchmark vs otros ORMs → [Bench](bench.md)
 - CLI `dorm` → [Referencia del CLI](cli.md)
 - Subida de archivos (disco local / S3 / MinIO) → [Modelos: Archivos](models.md#archivos)
 - Pasar a producción → [Despliegue en producción](production.md)

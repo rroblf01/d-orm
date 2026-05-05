@@ -172,12 +172,41 @@ autoincrement. El wrapper fuerza `ANSI_QUOTES` para que los
 identificadores entre comillas dobles parseen igual que en
 PostgreSQL / SQLite.
 
+## 9. DuckDB para analítica embarcada (4.0+)
+
+Cuando tu workload es analítico (dashboards, ETL local, ML feature
+stores) en lugar de OLTP, el backend DuckDB ejecuta queries
+columnar en proceso, sin servidor.
+
+```bash
+pip install 'djanorm[duckdb]'
+```
+
+```python title="settings.py"
+DATABASES = {
+    "default": {
+        "ENGINE": "duckdb",
+        "NAME": "analytics.duckdb",   # archivo en disco; ":memory:" también vale
+    }
+}
+```
+
+Tu código sigue idéntico — `Author.objects.filter(...)`,
+`bulk_create`, agregaciones. Caveat: DuckDB no tiene `SAVEPOINT`,
+así que `atomic()` anidado degrada a no-op boundary; el rollback
+externo descarta todo. Más detalle en [DuckDB](duckdb.md).
+
+Para OLTP serio sigue PostgreSQL — DuckDB brilla en lecturas
+vectorizadas masivas, no en escrituras concurrentes.
+
 ## ¿Qué sigue?
 
 - [Modelos y campos](models.md) — todos los tipos y sus opciones
 - [Consultas](queries.md) — filter, exclude, Q, F, agregaciones
 - [Patrones async](async.md) — `acreate`, `aiterator`, `aatomic`
 - [Tutorial](tutorial.md) — montarlo con FastAPI
+- [Novedades 4.0](v4_0.md) — overview de las features 4.0
+- [DuckDB](duckdb.md) — backend OLAP embarcado
 - [Subida de archivos con `FileField`](models.md#archivos) — disco
   local por defecto, cambia a S3 / MinIO / R2 con un cambio en
   `STORAGES`

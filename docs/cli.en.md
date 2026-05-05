@@ -239,6 +239,63 @@ has landed. **`save()` and signals are bypassed** for performance;
 `Model.save()` is the right path when you do want pre-save hooks to
 fire.
 
+## `dorm diff` (4.0+)
+
+Detects schema drift between the model registry and the live DB
+schema. Compares `information_schema` (PG / DuckDB) or
+`sqlite_master` (SQLite). Reports:
+
+- Tables declared by models that don't exist in the DB.
+- Tables in the DB that no model declares.
+- Missing columns on tables that do exist on both sides.
+- Columns whose type disagrees with the model.
+
+```bash
+dorm diff                            # human-friendly summary
+dorm diff --json > drift.json        # CI-friendly output
+dorm diff --apps myapp.models        # restrict the walk
+dorm diff --alias replica            # specific alias
+```
+
+**Exit code**: `0` clean, `1` drift detected. Designed as a
+post-deploy CI gate: `dorm diff || exit 1` aborts the release if a
+migration didn't land.
+
+## `dorm purge-deleted` (4.0+)
+
+Physically delete `SoftDeleteModel` rows whose `deleted_at` is older
+than the given window. Cron-friendly: no interactive prompts,
+exit 0 on success.
+
+```bash
+dorm purge-deleted --older-than 30d           # 30 days
+dorm purge-deleted --older-than 12h --dry-run # report counts only
+dorm purge-deleted --older-than 90d --apps myapp.models
+dorm purge-deleted --older-than 30d --alias archive
+```
+
+Duration suffixes: `s`/`m`/`h`/`d`/`w` or a bare integer (seconds).
+Silently skips models whose table doesn't exist (typical in
+multi-tenant deployments where the alias doesn't host every model).
+
+## `dorm export-json-schema` (4.0+)
+
+Emits a Draft 2020-12 JSON Schema document per model. Designed for
+downstream validators (Ajv, Zod runtime), schema registries, and
+cross-language tooling.
+
+```bash
+dorm export-json-schema > schemas.json                # stdout
+dorm export-json-schema --out schemas/                # one .json per model
+dorm export-json-schema --apps myapp.models --out schemas/
+dorm export-json-schema --include-relations --out schemas/  # M2M nested
+```
+
+Type mapping: `EmailField` → `format: "email"`, `UUIDField` →
+`format: "uuid"`, `DateTimeField` → `format: "date-time"`,
+`CharField.max_length` → `maxLength`. Nullable fields emit
+`type: ["string", "null"]`.
+
 ## `dorm help`
 
 ```bash

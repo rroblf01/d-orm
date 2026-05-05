@@ -514,3 +514,114 @@ Ejecuta `dorm doctor` en CI para fallar builds cuya configuración
 tropiece con un footgun conocido de producción. Ejemplos que pilla:
 tamaño de pool pequeño, falta de `sslmode` en host PG remoto, FKs
 sin índice, retry de errores transitorios desactivado.
+
+## Detección de drift post-deploy: `dorm diff` (4.0+)
+
+Tras desplegar y aplicar migraciones, ejecuta:
+
+```bash
+dorm diff --apps myapp.models || exit 1
+```
+
+como step en el pipeline. Compara los modelos del registro contra
+el schema vivo (information_schema / sqlite_master) y aborta el
+release si una migración no aplicó (típico tras squashes mal
+planificados o entornos parcialmente migrados).
+
+## Query budget — proteger SLA HTTP (4.0+)
+
+```python
+import dorm
+
+@app.get("/heavy")
+async def heavy(request):
+    async with dorm.abudget(timeout_ms=200, max_rows=10_000):
+        return await Order.objects.afilter(status="pending")
+```
+
+PG aplica `SET LOCAL statement_timeout` dentro de un `aatomic()`
+implícito; `BudgetExceeded` se eleva si pasa el limit de filas.
+Trade-off: el bloque queda en una transacción — todas las
+escrituras commit/rollback juntas.
+
+## Circuit breaker (4.0+)
+
+```python
+from dorm.contrib.circuit_breaker import circuit_breaker, CircuitOpenError
+
+cb = circuit_breaker("default", failure_threshold=5, open_window_s=30.0)
+
+def safe_count() -> int | None:
+    try:
+        with cb:
+            return Author.objects.count()
+    except CircuitOpenError:
+        return None        # devuelve cache, valor por defecto, etc.
+```
+
+CLOSED → OPEN (tras N fallos consecutivos) → HALF_OPEN (tras
+`open_window_s`) → CLOSED o reabrir según el siguiente probe.
+Per-proceso. Para coordinación cross-worker, monta encima Redis.
+
+## Pool task affinity (4.0+)
+
+Reusa una checkout por request en handlers async:
+
+```python
+from dorm.contrib.task_pool import pinned_connection
+
+@app.middleware("http")
+async def pin_db(request, call_next):
+    async with pinned_connection():
+        return await call_next(request)
+```
+
+Una conexión PG por request (en lugar de N). Reduce churn 10x en
+handlers que emiten 5+ queries.
+
+## Lag-aware read routing (4.0+)
+
+```python
+from dorm.contrib.lag_router import LagAwareReadRouter
+
+DATABASE_ROUTERS = [
+    LagAwareReadRouter(
+        primary="primary",
+        replicas=["replica_1", "replica_2"],
+        max_lag_seconds=2.0,
+        cache_seconds=5.0,
+    ),
+]
+```
+
+El router consulta `pg_last_xact_replay_timestamp()` cada
+`cache_seconds`. Lag > umbral → desvío automático al primary.
+
+## Migraciones zero-downtime (4.0+)
+
+Para `ADD COLUMN NOT NULL` sobre tabla grande, usa la receta en
+[Migraciones online](online-migrations.md):
+
+```python
+operations = [
+    AddFieldOnline("Order", "currency", dorm.CharField(...)),
+    BackfillBatch(table="orders", update_sql=..., batch_size=10_000),
+    SetNotNullOnline("Order", "currency"),
+]
+```
+
+PG ≥ 12 nunca reescribe la tabla.
+
+## OpenTelemetry enriquecido (4.0+)
+
+```python
+from dorm.contrib.otel import instrument
+instrument(tracer_name="myapp.dorm")
+```
+
+Cada query genera un span con SemConv 1.20+:
+- `db.operation` (verb)
+- `db.sql.table` / `db.collection.name`
+- `db.dorm.alias`
+- Span name: `"<OPERATION> <table>"` — Datadog/Honeycomb agrupa por
+  tabla automáticamente.

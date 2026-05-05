@@ -312,3 +312,60 @@ SQLite ≥ 3.31).
   that no longer exist (e.g. after `squashmigrations`). No DDL.
 - `dorm sqlmigrate <app> <name> [--backwards]` — render a
   migration's SQL without applying it.
+
+## Operations added in 4.0
+
+### Zero-downtime DDL (PostgreSQL)
+
+| Op | What it does |
+|---|---|
+| `AddFieldOnline(model, name, field, *, set_not_null_now=False)` | `ADD COLUMN` nullable; no rewrite. Follow with backfill + `SetNotNullOnline` |
+| `BackfillBatch(table, *, update_sql, pk_column='id', batch_size=10_000, sleep_seconds=0)` | Chunked backfill by PK range. Each batch in its own tx |
+| `SetNotNullOnline(model, column)` | `CHECK (col IS NOT NULL) NOT VALID` + `VALIDATE` + `SET NOT NULL`. No rewrite on PG ≥ 12 |
+
+See [Online migrations](online-migrations.md) for the end-to-end recipe.
+
+### Materialised views (PG-only)
+
+| Op | What it does |
+|---|---|
+| `CreateMaterializedView(name, sql, *, with_data=True, if_not_exists=False)` | `CREATE MATERIALIZED VIEW` |
+| `RefreshMaterializedView(name, *, concurrently=False)` | `REFRESH MATERIALIZED VIEW [CONCURRENTLY]` |
+| `DropMaterializedView(name, *, reverse_sql='', if_exists=True)` | `DROP MATERIALIZED VIEW`. Reversible if `reverse_sql` is supplied |
+
+### Declarative partitioning (PG ≥ 11)
+
+| Op | What it does |
+|---|---|
+| `CreatePartitionedTable(name, *, columns_sql, method, key, if_not_exists=False)` | `CREATE TABLE ... PARTITION BY <RANGE\|LIST\|HASH> (key)` |
+| `CreatePartition(parent, name, *, for_values, if_not_exists=False)` | `CREATE TABLE ... PARTITION OF <parent> FOR VALUES <expr>` |
+| `AttachPartition(parent, name, *, for_values)` / `DetachPartition(...)` | `ALTER TABLE ... ATTACH/DETACH PARTITION` |
+
+### Native PostgreSQL ENUM types
+
+| Op | What it does |
+|---|---|
+| `CreatePGEnum(name, values)` | `CREATE TYPE name AS ENUM (…)` |
+| `DropPGEnum(name, *, reverse_values=None)` | `DROP TYPE`. Reversible if `reverse_values` is supplied |
+| `AddPGEnumValue(type_name, value, *, before=None)` | `ALTER TYPE ... ADD VALUE`. Irreversible (PG has no `DROP VALUE`) |
+
+Pair with `EnumField(native=True, type_name=...)` — the field emits
+the type as its `db_type`.
+
+### Functional GIN index for full-text search
+
+`dorm.search.search_index(table, *fields, name=, config='english')`
+renders the `CREATE INDEX ... USING GIN ON (to_tsvector(...))` SQL
+ready to drop into `RunSQL`:
+
+```python
+from dorm.migrations.operations import RunSQL
+from dorm.search import search_index
+
+operations = [
+    RunSQL(
+        search_index("articles", "title", "body"),
+        reverse_sql='DROP INDEX IF EXISTS ix_articles_search'
+    ),
+]
+```

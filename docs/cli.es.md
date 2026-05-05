@@ -242,6 +242,63 @@ fase, una vez que todas las filas padre han aterrizado. **Se omiten
 `save()` y las señales** por rendimiento; `Model.save()` es el camino
 correcto cuando sí quieres que disparen los pre-save hooks.
 
+## `dorm diff` (4.0+)
+
+Detecta drift entre los modelos del registro y el schema vivo de la
+BD. Compara `information_schema` (PG / DuckDB) o `sqlite_master`
+(SQLite). Reporta:
+
+- Tablas declaradas por modelos que no existen en BD.
+- Tablas en BD que ningún modelo declara.
+- Columnas faltantes en una tabla existente.
+- Columnas con tipo distinto al modelo.
+
+```bash
+dorm diff                            # human-friendly summary
+dorm diff --json > drift.json        # CI-friendly output
+dorm diff --apps myapp.models        # restringe el walk
+dorm diff --alias replica            # alias específico
+```
+
+**Exit code**: `0` cuando todo limpio, `1` cuando hay drift. Pensado
+como gate post-deploy en CI: `dorm diff || exit 1` aborta release si
+una migración no llegó.
+
+## `dorm purge-deleted` (4.0+)
+
+Hard-delete físico de filas `SoftDeleteModel` cuyo `deleted_at` es
+más viejo que el window dado. Cron-friendly: sin prompts
+interactivos, exit 0 OK.
+
+```bash
+dorm purge-deleted --older-than 30d           # 30 días
+dorm purge-deleted --older-than 12h --dry-run # solo reporta counts
+dorm purge-deleted --older-than 90d --apps myapp.models
+dorm purge-deleted --older-than 30d --alias archive
+```
+
+Sufijos duración: `s`/`m`/`h`/`d`/`w` o entero (segundos).
+Skip silencioso de modelos cuyo tabla no existe (típico en entornos
+multi-tenant donde el alias no aloja todos los modelos).
+
+## `dorm export-json-schema` (4.0+)
+
+Genera Draft 2020-12 JSON Schema por modelo. Pensado como input
+para validators downstream (Ajv, Zod runtime), schema registries o
+tooling cross-language.
+
+```bash
+dorm export-json-schema > schemas.json                # stdout
+dorm export-json-schema --out schemas/                # un .json por modelo
+dorm export-json-schema --apps myapp.models --out schemas/
+dorm export-json-schema --include-relations --out schemas/  # M2M anidado
+```
+
+Mapeo automático: `EmailField` → `format: "email"`,
+`UUIDField` → `format: "uuid"`, `DateTimeField` →
+`format: "date-time"`, `CharField.max_length` → `maxLength`. Campos
+nullable salen con `type: ["string", "null"]`.
+
 ## `dorm help`
 
 ```bash

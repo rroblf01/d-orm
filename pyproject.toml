@@ -216,4 +216,13 @@ timeout_method = "thread"
 # `bench/compare.py` imports Django / SQLAlchemy / Tortoise on demand to
 # benchmark them side-by-side; those packages are dev-tools, not runtime
 # deps of djanorm itself, so the type-checker would always complain.
-exclude = ["example/**", "bench/compare.py"]
+exclude = [
+    "example/**",
+    "bench/compare.py",
+    # Sibling packages live in their own subdirectories with their
+    # own pyproject.toml + dev deps (mypy, pytest). ty in the main
+    # project doesn't have those installed so it can't resolve the
+    # imports — the sibling packages run their own ty/mypy in CI.
+    "djanorm-mypy/**",
+    "pytest-djanorm/**",
+]

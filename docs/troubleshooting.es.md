@@ -175,9 +175,129 @@ o empuja la dedup a la BD con `ON CONFLICT DO NOTHING` vía
 **Causa.** `ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT '...'` en
 PostgreSQL ≤ 10 reescribe toda la tabla.
 
-**Arreglo.** Pártelo en tres migraciones: añadir nullable, backfill
-en chunks, fijar NOT NULL. En PG 11+, añadir una columna con un
-default no-volátil es solo metadata — dorm lo usa cuando puede.
+**Arreglo.** Usa la receta zero-downtime con `AddFieldOnline` +
+`BackfillBatch` + `SetNotNullOnline` (ver
+[Migraciones online](online-migrations.md)). En PG 11+, añadir una
+columna con un default no-volátil es solo metadata — dorm lo usa
+cuando puede.
+
+## `BudgetExceeded: Query returned N rows, exceeds active budget`
+
+**Causa.** Una query dentro de un bloque
+`with dorm.budget(max_rows=…):` materializó más filas que el techo.
+
+**Arreglo.** O subes `max_rows`, o estrechas el `filter()`/`limit()`
+de la query. El error es por diseño — bloquea silenciosamente
+querysets que han perdido selectividad en producción.
+
+## `BudgetExceeded` / `OperationalError: canceling statement due to statement timeout`
+
+**Causa.** Una query dentro de `dorm.budget(timeout_ms=…)` excedió
+el reloj de pared. PG la abortó vía `statement_timeout`.
+
+**Arreglo.** Diagnostica con `EXPLAIN ANALYZE` antes de subir el
+budget — un `timeout_ms` alto enmascara queries verdaderamente
+lentas. La feature existe precisamente para que la SLA del HTTP no
+salte por culpa de una query mala.
+
+## `NoActiveTenantError`
+
+**Causa.** Una query contra un `TenantModel` corrió sin
+`with current_tenant(<id>):` activo.
+
+**Arreglo.** Envuelve el handler / job con
+`with current_tenant(request.user.tenant_id):`. Si la query es
+deliberadamente cross-tenant (admin / reporte), usa
+`MyModel.unscoped.all()` para saltar el filtro explícitamente.
+El error es por diseño — un fallback silencioso a "todas las
+tenants" sería un leak de datos.
+
+## `ReadOnlyModelError`
+
+**Causa.** Una llamada a `save()` / `delete()` / `asave()` /
+`adelete()` sobre un modelo con `Meta.read_only = True`.
+
+**Arreglo.** Lee del modelo, escribe en el origen-de-verdad
+(materialised view subyacente, tabla maestra, etc.). El flag está
+ahí precisamente para bloquear mutaciones accidentales.
+
+## `AsyncOnlyError: AsyncModel forbids sync access`
+
+**Causa.** Llamaste un método sync (`MyModel.objects.create(...)`,
+`obj.save()`) sobre un `AsyncModel`. Esos modelos rechazan la API
+sync para forzar uso de `acreate` / `asave` en stacks async puros.
+
+**Arreglo.** Usa la variante async (`acreate`, `aget`, `afilter`,
+`asave`, `adelete`). Si necesitas paths sync, hereda de `dorm.Model`
+en lugar de `AsyncModel`.
+
+## `CircuitOpenError: Circuit '<name>' is OPEN`
+
+**Causa.** El circuit breaker de ese alias acumuló tantas fallas
+consecutivas que se abrió. Toda llamada `with cb:` ahora rebota
+hasta que el cooldown pase a HALF_OPEN.
+
+**Arreglo.** Espera al cooldown (default 30s) o
+`circuit_breaker(name).reset()` manualmente. Si aparece a menudo,
+hay un problema real downstream — log + alerta.
+
+## `_duckdb.ParserException: syntax error at or near "SAVEPOINT"`
+
+**Causa.** DuckDB **no soporta `SAVEPOINT`**. Si lo ves es porque
+algo intenta savepoints contra DuckDB.
+
+**Arreglo.** En `atomic()` de DuckDB, los nested blocks degradan a
+no-op boundary — outer rollback descarta todo. Patrón típico que
+falla: librerías terceras que asumen savepoints. Aísla con un
+`try/except` o cambia a SQLite/PG si necesitas savepoints reales.
+
+## "Mi fixture `transactional_db` no aparece"
+
+**Causa.** El paquete `pytest-djanorm` no está instalado. Los
+fixtures viven ahí, **no en el wheel principal**.
+
+**Arreglo.**
+
+```bash
+pip install pytest-djanorm                       # SQLite-only
+pip install 'pytest-djanorm[postgres]'           # + container PG
+```
+
+Después auto-discovery vía `pytest11` entry-point. Más detalle en
+[paquetes hermanos](sibling-packages.md).
+
+## "mypy no detecta `filter(naem=...)` como typo"
+
+**Causa.** El plugin `djanorm-mypy` no está instalado o no está
+configurado.
+
+**Arreglo.** `pip install djanorm-mypy` y en `pyproject.toml`:
+
+```toml
+[tool.mypy]
+plugins = ["djanorm_mypy"]
+```
+
+Sin el plugin, mypy ve `filter(**kwargs)` y no sabe qué validar.
+
+## `ImproperlyConfigured: Unsupported database engine: 'duckdb'`
+
+**Causa.** `ENGINE = "duckdb"` requiere el extra DuckDB.
+
+**Arreglo.** `pip install 'djanorm[duckdb]'`. Si ya estaba
+instalado, comprueba que el venv activo es el correcto (
+`uv run python -c "import duckdb"`).
+
+## "El backend de plugins de terceros no se carga"
+
+**Causa.** El entry-point está mal escrito o el paquete con
+`[project.entry-points."djanorm.backends"]` no está instalado.
+
+**Arreglo.** `pip show <pkg>` para confirmar instalación; abrir un
+shell Python y `from importlib.metadata import entry_points;
+print(list(entry_points(group="djanorm.backends")))` para
+verificar el registro. Si tras instalar nada cambia,
+`reset_backend_cache()` desde Python o reinicia proceso.
 
 ## Dónde pedir más ayuda
 

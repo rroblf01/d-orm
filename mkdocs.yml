@@ -61,21 +61,37 @@ plugins:
             Querying: Consultas
             Async patterns: Patrones async
             Migrations: Migraciones
+            Online migrations (zero-downtime): Migraciones online (zero-downtime)
+            Recursive CTEs (trees): CTEs recursivos (árboles)
             Transactions: Transacciones
             Soft delete: Soft delete
             Audit trail (history): Auditoría (history)
+            Row-level multi-tenancy: Multi-tenancy a nivel fila
             FastAPI integration: Integración con FastAPI
             Vector search (pgvector): Búsqueda vectorial (pgvector)
             libsql backend: Backend libsql
+            DuckDB backend: Backend DuckDB
             Result cache (Redis): Caché de resultados (Redis)
             CLI reference: Referencia del CLI
             Production deployment: Despliegue en producción
             Cookbook: Recetario
             Troubleshooting: Resolución de problemas
             Migration from Django ORM: Migración desde Django ORM
-            What's new in 4.0: Novedades 4.0
-            Advanced PostgreSQL features: Características avanzadas PostgreSQL
+            When to use what: Cuándo usar qué
+            PostgreSQL features: Features PostgreSQL
+            Bulk COPY: Bulk COPY
+            LISTEN / NOTIFY: LISTEN / NOTIFY
+            GIS: GIS
+            Advanced PG features: Features avanzadas PG
+            Production primitives: Primitivos de producción
+            Circuit breaker: Circuit breaker
+            Outbox pattern: Patrón outbox
+            Idempotency keys: Idempotency keys
+            Hash sharding: Sharding por hash
+            Lag-aware read routing: Read routing con lag
             Framework-agnostic helpers: Helpers framework-agnósticos
+            Release notes: Release notes
+            What's new in 4.0: Novedades 4.0
             Sibling packages (mypy / pytest): Paquetes hermanos (mypy / pytest)
             Benchmark vs other ORMs: Benchmark vs otros ORMs
             API Reference: Referencia API
@@ -86,12 +102,22 @@ plugins:
             Connection / health: Conexión y health-check
             Auth (User / Group / tokens): Auth (User / Group / tokens)
             Async-call guard: Async-call guard
+            Async-only Model: Modelo async-only
+            Task-affinity pool: Pool con afinidad por task
             Field encryption: Cifrado de campos
             Prometheus metrics: Métricas Prometheus
             Observability collectors: Colectores de observabilidad
-            Multi-tenant: Multi-tenant
+            Multi-tenant (schema): Multi-tenant (schema)
+            Multi-tenant (row): Multi-tenant (fila)
             Cache backends: Backends de caché
             Migration linter: Linter de migraciones
+            Query budget: Query budget
+            Tree / recursive CTEs: Tree / CTEs recursivos
+            Streaming serialisers: Serialisers streaming
+            Outbox: Outbox
+            Sharding: Sharding
+            Idempotency: Idempotency
+            Lag-aware router: Router lag-aware
   - mkdocstrings:
       handlers:
         python:
@@ -112,22 +138,38 @@ nav:
       - Querying: queries.md
       - Async patterns: async.md
       - Migrations: migrations.md
+      - Online migrations (zero-downtime): online-migrations.md
+      - Recursive CTEs (trees): recursive-cte.md
       - Transactions: transactions.md
       - Signals: signals.md
       - Soft delete: softdelete.md
       - Audit trail (history): history.md
+      - Row-level multi-tenancy: tenants-row.md
       - FastAPI integration: fastapi.md
       - Vector search (pgvector): pgvector.md
       - libsql backend: libsql.md
+      - DuckDB backend: duckdb.md
       - Result cache (Redis): cache_redis.md
       - CLI reference: cli.md
       - Production deployment: production.md
       - Cookbook: cookbook.md
       - Troubleshooting: troubleshooting.md
       - Migration from Django ORM: migration-from-django.md
-      - What's new in 4.0: v4_0.md
-      - Advanced PostgreSQL features: advanced.md
+      - When to use what: when-to-use-what.md
+  - PostgreSQL features:
+      - Bulk COPY: bulk-copy.md
+      - LISTEN / NOTIFY: listen-notify.md
+      - GIS: gis.md
+      - Advanced PG features: advanced.md
+  - Production primitives:
+      - Circuit breaker: circuit-breaker.md
+      - Outbox pattern: outbox.md
+      - Idempotency keys: idempotency.md
+      - Hash sharding: sharding.md
+      - Lag-aware read routing: lag-router.md
       - Framework-agnostic helpers: helpers.md
+  - Release notes:
+      - What's new in 4.0: v4_0.md
       - Sibling packages (mypy / pytest): sibling-packages.md
       - Benchmark vs other ORMs: bench.md
   - API Reference:
@@ -140,12 +182,26 @@ nav:
       - Connection / health: api/connection.md
       - Auth (User / Group / tokens): api/auth.md
       - Async-call guard: api/asyncguard.md
+      - Async-only Model: api/asyncmodel.md
+      - Task-affinity pool: api/task_pool.md
       - Field encryption: api/encrypted.md
       - Prometheus metrics: api/prometheus.md
       - Observability collectors: api/observability.md
-      - Multi-tenant: api/tenants.md
+      - Multi-tenant (schema): api/tenants.md
+      - Multi-tenant (row): api/tenants_row.md
       - Cache backends: api/cache.md
       - Migration linter: api/migrations_lint.md
+      - Query budget: api/budget.md
+      - Tree / recursive CTEs: api/tree.md
+      - Streaming serialisers: api/streaming.md
+      - Bulk COPY: api/bulk_copy.md
+      - LISTEN / NOTIFY: api/listen_notify.md
+      - GIS: api/gis.md
+      - Circuit breaker: api/circuit_breaker.md
+      - Outbox: api/outbox.md
+      - Sharding: api/sharding.md
+      - Idempotency: api/idempotency.md
+      - Lag-aware router: api/lag_router.md
 
 markdown_extensions:
   - admonition
