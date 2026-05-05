@@ -4,57 +4,7 @@ A Django-inspired ORM for Python with full **synchronous and asynchronous** supp
 
 Works with **SQLite**, **PostgreSQL**, **MySQL / MariaDB** and **libsql / Turso**. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related` / `FilteredRelation`), aggregations, DB functions, async-native ORM path, queryset & row caching, audit-trail tracking (`@track_history`), per-tenant migration runner, and Pydantic interop — all with real static typing (`Field[T]`).
 
-## What's new in 3.3
-
-- **`FilteredRelation`** — `LEFT OUTER JOIN` with a `Q` condition baked into the `ON` clause. Filter the *joined rows* without dropping outer rows. Forward FK / reverse FK / reverse OneToOne supported. Re-exported from `dorm` directly.
-- **`QuerySet.values_list(named=True)`** — namedtuple rows; access fields by attribute (`r.author_id`) instead of positional index.
-- **`prefetch_related_objects(instances, *lookups)`** — retrofit prefetch on a hand-built list of model instances. Same shape as Django's helper.
-- **`dorm makemigrations --check`** — CI gate. Exits non-zero when the autodetector would write a migration; prints the pending diff and writes nothing.
-- **Bug fixes** — `bulk_create` + `db_default` columns no longer send `NULL`; `pk` alias resolves under JOINs; per-tenant recorder bootstraps in its own schema; async pool teardown SIGSEGV under `pytest -n N` on Python 3.14.
-
-## What's new in 3.2
-
-- **Per-tenant migration runner** — `dorm migrate --tenant <name>` / `--all-tenants` (PG-only).
-- **Connection-pool autoscaling** — `dorm.contrib.pool_autoscale` resizes the pool when utilisation crosses a threshold.
-- **Async migration executor** — `AsyncMigrationExecutor` for boot-time migrations in async stacks (Lambda, edge, FastAPI startup).
-- **Audit trail (`@track_history`)** — sibling `<Name>Historical` model auto-built; `+`/`~`/`-` rows on every `save` / `delete`. User attribution via contextvars.
-- **`bulk_create(returning=[…])`** — DB-side default columns back-filled in one round-trip via `RETURNING`.
-- **`dorm makemigrations --merge`** — collapse parallel migration leaves into a no-op merge migration.
-- **`dorm migrate-from-django` converter** — auto-port Django `models.py` to dorm-flavoured equivalents.
-- **MySQL / MariaDB backend** — real implementation via pymysql + aiomysql.
-
-## What's new in 3.1
-
-- **`settings.USE_TZ = True`** — Django ≥4-compatible timezone-aware datetimes (UTC normalisation on insert, `TIMESTAMP WITH TIME ZONE` on PG).
-- **`Meta.proxy = True`** — proxy models share the parent's table; autodetector skips them so `makemigrations` doesn't emit a phantom `CreateModel`.
-- **`QuerySet.dates(field, kind)` / `datetimes(...)`** — distinct truncated values for archive listings.
-- **`dorm migrate --fake` / `--fake-initial`** — record migrations as applied without running operations. Ideal for adopting dorm against a legacy schema.
-- **JSONField PG operators** — `__contained_by`, `__has_key`, `__has_keys`, `__has_any_keys`, `__overlap`, `__len`. Same spelling as Django's `contrib.postgres`.
-- **`Field.deconstruct()`** — base-class implementation for migration serialisation. Custom field subclasses get it for free.
-- **`Model.from_db(db, field_names, values)`** — Django-parity hydration hook; stamps `_state.db` with the alias.
-- **`dorm.transaction.savepoint()` / `savepoint_commit()` / `savepoint_rollback()`** — manual savepoints inside `atomic()`.
-- **`dorm.contrib.auth.tokens`** — stateless HMAC-signed reset tokens for password-reset / email-verification flows.
-- **`Meta.permissions = [...]`** + **`sync_permissions()`** — declare custom permissions, materialise into `auth_permission`.
-- **`dorm.contrib.tenants`** — `TenantContext` / `aTenantContext` for PostgreSQL `search_path` switching.
-- **MySQL / MariaDB scaffold** — `ENGINE = "mysql"` parses through `parse_database_url`; the connection wrapper raises `ImproperlyConfigured` pointing at v3.1 for the full implementation.
-- **MySQL / MariaDB vector support** — `VectorField` returns `VECTOR(N)` and distance expressions compile to `VEC_DISTANCE_EUCLIDEAN` / `VEC_DISTANCE_COSINE`.
-
-## What's new in 3.0
-
-- **`dorm.contrib.auth`** — `User` / `Group` / `Permission` with stdlib PBKDF2 hashing. Same shape as Django, no `passlib` dependency.
-- **`dorm.contrib.encrypted`** — `EncryptedCharField` / `EncryptedTextField` (AES-GCM with key rotation; `pip install 'djanorm[encrypted]'`).
-- **`dorm.contrib.asyncguard`** — surfaces sync ORM calls inside an event loop as warnings or exceptions.
-- **`dorm.contrib.querylog`** + **`dorm.contrib.querycount`** — request-scoped collectors for SQL traffic and N+1 guards.
-- **`dorm.contrib.prometheus`** — stdlib-only metrics exposer for the `/metrics` endpoint.
-- **`dorm lint-migrations`** — pre-merge gate that flags online-deploy footguns (full-table backfills, missing `concurrently=True`, irreversible `RunPython`).
-- **`LocMemCache`** + **`Manager.cache_get(pk=…)`** / `cache_get_many(pks=[…])` — in-process LRU + single-row caching that piggy-backs on the same invalidation signal as queryset cache.
-- **Sticky read-after-write window** for the DB router — no stale replica reads after a write on the same request.
-- **`settings.SLOW_QUERY_MS`** — slow-query WARNING; `settings.RETRY_ATTEMPTS` / `RETRY_BACKOFF` — transient-error retry knobs (resolution: explicit setting > env var > default).
-- **`dorm.test.assertNumQueries`** + `assertMaxQueries` — context-manager and decorator forms (sync + async).
-- **Async-aware `dorm shell`** — top-level `await` works in the stdlib REPL fallback.
-- **Math / string DB functions** — `Power`, `Sqrt`, `Mod`, `Sign`, `Ceil`, `Floor`, `Log`, `Ln`, `Exp`, `Random`, `Trim`, `LTrim`, `RTrim`, `NullIf`.
-
-Full notes in [CHANGELOG.md](CHANGELOG.md). **Zero breaking changes vs 2.5** — every addition is opt-in or zero-cost when unused.
+Release notes for every version live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Installation
 
