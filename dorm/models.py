@@ -4,11 +4,22 @@ import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from .exceptions import (
+    DatabaseError,
     DoesNotExist,
     ImproperlyConfigured,
     MultipleObjectsReturned,
     ValidationError,
 )
+
+
+class ReadOnlyModelError(DatabaseError):
+    """Raised when a write is attempted on a Model whose
+    ``Meta.read_only`` flag is set.
+
+    Subclasses :class:`DatabaseError` so generic ``except DatabaseError``
+    handlers degrade gracefully — the failure mode is, after all, a
+    database-level signal that the operation is invalid for the
+    target table."""
 
 if TYPE_CHECKING:
     from typing import Self
@@ -37,6 +48,13 @@ class Options:
         # a separate migration. The autodetector skips them so
         # ``makemigrations`` doesn't emit a phantom CreateModel.
         self.proxy: bool = False
+        # ``Meta.read_only = True`` blocks every save / delete /
+        # bulk_create against the model. Reads pass through. Useful
+        # for models that map a materialised view, an immutable
+        # audit log, or a denormalised cache table where writes
+        # belong elsewhere (the underlying source-of-truth tables,
+        # ``REFRESH MATERIALIZED VIEW``, etc.).
+        self.read_only: bool = False
         # ``concrete_model`` is the closest non-proxy ancestor whose
         # table actually backs the rows. For non-proxy models it's
         # ``self.model``; for proxies it's the parent's concrete
@@ -513,6 +531,18 @@ class Model(metaclass=ModelBase):
         from .db.connection import get_connection
         from .signals import post_save, pre_save
 
+        # ``Meta.read_only = True`` flips this Model into a strict
+        # read-only mode (typical use: a model that maps a
+        # materialised view, an immutable audit log, a denormalised
+        # cache table, etc.). Reads are unaffected; writes raise
+        # ``ReadOnlyModelError`` so a stray ``save()`` mid-handler
+        # surfaces immediately instead of silently no-oping.
+        if getattr(self._meta, "read_only", False):
+            raise ReadOnlyModelError(
+                f"{type(self).__name__} is marked Meta.read_only=True; "
+                "save() is forbidden."
+            )
+
         conn = get_connection(using)
         meta = self._meta
         adding = force_insert or self._is_unsaved()
@@ -749,6 +779,12 @@ class Model(metaclass=ModelBase):
         from .query import SQLQuery
         from .signals import post_delete, pre_delete
 
+        if getattr(self._meta, "read_only", False):
+            raise ReadOnlyModelError(
+                f"{type(self).__name__} is marked Meta.read_only=True; "
+                "delete() is forbidden."
+            )
+
         self._handle_on_delete(using=using)
 
         conn = get_connection(using)
@@ -774,6 +810,12 @@ class Model(metaclass=ModelBase):
     ) -> None:
         from .db.connection import get_async_connection
         from .signals import post_save, pre_save
+
+        if getattr(self._meta, "read_only", False):
+            raise ReadOnlyModelError(
+                f"{type(self).__name__} is marked Meta.read_only=True; "
+                "asave() is forbidden."
+            )
 
         conn = get_async_connection(using)
         meta = self._meta
@@ -863,6 +905,12 @@ class Model(metaclass=ModelBase):
     async def adelete(self, using: str = "default") -> tuple[int, dict[str, int]]:
         from .db.connection import get_async_connection
         from .query import SQLQuery
+
+        if getattr(self._meta, "read_only", False):
+            raise ReadOnlyModelError(
+                f"{type(self).__name__} is marked Meta.read_only=True; "
+                "adelete() is forbidden."
+            )
         from .signals import post_delete, pre_delete
 
         # Use the async cascade handler so reverse-FK CASCADE /

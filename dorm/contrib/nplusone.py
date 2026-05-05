@@ -39,6 +39,7 @@ stable across SQLite (``%s``) and PostgreSQL (``$1``) backends.
 
 from __future__ import annotations
 
+import contextlib as _contextlib
 import re
 import threading
 from contextlib import contextmanager
@@ -227,8 +228,57 @@ def assert_no_nplusone(threshold: int = 5) -> Iterator[NPlusOneDetector]:
         yield detector
 
 
+@contextmanager
+def detect(
+    *,
+    threshold: int = 5,
+    raise_on_detect: bool = False,
+) -> Iterator[NPlusOneDetector]:
+    """User-friendly alias for :class:`NPlusOneDetector`.
+
+    Default ``raise_on_detect=False`` — yield the detector so the
+    surrounding code (typically a request middleware) can log
+    ``detector.report()`` without taking the request down. Pass
+    ``raise_on_detect=True`` for the strict pytest mode.
+
+    Example wired into an arbitrary middleware::
+
+        with dorm.contrib.nplusone.detect() as d:
+            response = await call_next(request)
+        if d.findings:
+            log.warning("N+1 detected: %s", d.report())
+    """
+    detector = NPlusOneDetector(
+        threshold=threshold, raise_on_detect=raise_on_detect
+    )
+    with detector:
+        yield detector
+
+
+@_contextlib.asynccontextmanager
+async def adetect(
+    *,
+    threshold: int = 5,
+    raise_on_detect: bool = False,
+):
+    """Async equivalent of :func:`detect`.
+
+    The detector itself is signal-driven and works in any execution
+    context, but exposing a dedicated ``async with`` form lets async
+    callers stay idiomatic and avoid an awkward ``with`` block inside
+    an ``async def``.
+    """
+    detector = NPlusOneDetector(
+        threshold=threshold, raise_on_detect=raise_on_detect
+    )
+    with detector:
+        yield detector
+
+
 __all__ = [
     "NPlusOneDetector",
     "NPlusOneError",
+    "adetect",
     "assert_no_nplusone",
+    "detect",
 ]

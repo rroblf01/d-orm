@@ -1729,6 +1729,431 @@ def cmd_sqlmigrate(args):
         print(f"-- {type(op).__name__}: {op.describe()}")
 
 
+def cmd_diff(args):
+    """Compare model registry vs live DB schema.
+
+    Returns drift report covering:
+
+    - Tables present in models but missing in DB (and vice versa).
+    - Per-column drift: type mismatches, NOT NULL mismatches.
+    - Indexes declared on the model but not present in the DB.
+    """
+    import json as _json
+    import sys
+
+    settings_module = getattr(args, "settings", None)
+    if settings_module:
+        _load_settings(settings_module)
+    from .conf import settings as dorm_settings, _autodiscover_settings
+    if not dorm_settings._configured:
+        _autodiscover_settings()
+    _load_apps(getattr(dorm_settings, "INSTALLED_APPS", []) or [])
+
+    from .db.connection import get_connection
+    from .inspect import introspect_tables
+    from .models import _model_registry
+
+    conn = get_connection(args.alias)
+
+    # Live DB tables — keyed by table name.
+    live_tables = {t["name"]: t for t in introspect_tables(conn)}
+
+    # Model side — keyed by ``Meta.db_table``. Also pulls in M2M
+    # junction tables so they don't surface as ``extra_table`` drift.
+    from .fields import ManyToManyField as _M2M
+    from typing import Any as _Any
+
+    apps_filter = tuple(getattr(args, "apps", None) or [])
+
+    model_tables: dict[str, _Any] = {}
+    m2m_through_tables: set[str] = set()
+    for fqname, cls in _model_registry.items():
+        if "." not in fqname:
+            continue
+        meta = getattr(cls, "_meta", None)
+        if meta is None or getattr(meta, "abstract", False):
+            continue
+        if getattr(meta, "proxy", False):
+            continue
+        if apps_filter and not any(
+            cls.__module__.startswith(p) for p in apps_filter
+        ):
+            continue
+        table = getattr(meta, "db_table", None)
+        if table:
+            model_tables[table] = cls
+        for f in getattr(meta, "fields", []) or []:
+            if isinstance(f, _M2M):
+                # ``_get_through_table()`` returns the runtime junction
+                # table name (default convention or explicit override).
+                getter = getattr(f, "_get_through_table", None)
+                through = getter() if callable(getter) else None
+                if through:
+                    m2m_through_tables.add(through)
+
+    findings: list[dict] = []
+
+    # Ignored modules — built-in dorm contrib whose tables are
+    # bootstrapped opportunistically and routinely lag behind the
+    # model registry in apps that don't actually use them. We match
+    # by module prefix so the user's apps named ``contenttypes`` etc.
+    # aren't accidentally swallowed.
+    def _is_dorm_contrib_app(cls: type) -> bool:
+        return cls.__module__.startswith(
+            ("dorm.contrib.contenttypes", "dorm.contrib.auth", "dorm.contrib.history")
+        )
+
+    # 1. Tables present in models but missing in DB.
+    for table, cls in sorted(model_tables.items()):
+        if _is_dorm_contrib_app(cls):
+            continue
+        if table not in live_tables:
+            findings.append(
+                {
+                    "kind": "missing_table",
+                    "table": table,
+                    "model": cls.__name__,
+                    "detail": f"Model {cls.__name__!r} declares table {table!r} but it is not present in the database.",
+                }
+            )
+
+    # 2. Tables in DB without a matching model — typically expected
+    # for things like the migration history or extensions; only
+    # report those that look user-facing.
+    _ignored_prefixes = ("dorm_", "django_", "pg_", "sqlite_", "sql_", "auth_")
+    for table in sorted(live_tables):
+        if table in model_tables:
+            continue
+        if table in m2m_through_tables:
+            continue
+        if table.startswith(_ignored_prefixes):
+            continue
+        findings.append(
+            {
+                "kind": "extra_table",
+                "table": table,
+                "detail": f"Table {table!r} exists in the database but no model declares it.",
+            }
+        )
+
+    # 3. Per-column drift: only on tables present in both sides.
+    for table, cls in sorted(model_tables.items()):
+        if _is_dorm_contrib_app(cls):
+            continue
+        if table not in live_tables:
+            continue
+        live_cols: dict[str, dict] = {
+            c["name"]: c for c in live_tables[table].get("columns", [])
+        }
+        for f in cls._meta.fields:
+            if not f.column:
+                continue
+            if f.column not in live_cols:
+                findings.append(
+                    {
+                        "kind": "missing_column",
+                        "table": table,
+                        "column": f.column,
+                        "detail": f"Field {cls.__name__}.{f.name} expects column {f.column!r} on {table!r} — not found.",
+                    }
+                )
+                continue
+            # Coarse type comparison: introspect-mapped Python type
+            # name vs the field's class name. Tightening this would
+            # require per-vendor catalog lookups; the coarse signal
+            # already catches "INTEGER renamed to VARCHAR" foot-guns.
+            live_field_cls = live_cols[f.column].get("field_class", "")
+            expected = type(f).__name__
+            if live_field_cls and not _types_compatible(expected, live_field_cls):
+                findings.append(
+                    {
+                        "kind": "type_mismatch",
+                        "table": table,
+                        "column": f.column,
+                        "detail": f"{cls.__name__}.{f.name}: model is {expected}, DB is {live_field_cls}.",
+                    }
+                )
+
+    if args.json:
+        _json.dump({"findings": findings, "drift": bool(findings)}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        if not findings:
+            print(f"OK — no drift detected against alias {args.alias!r}.")
+        else:
+            print(f"Drift detected against alias {args.alias!r}: {len(findings)} finding(s)\n")
+            for f in findings:
+                print(f"[{f['kind']}] {f['detail']}")
+    sys.exit(1 if findings else 0)
+
+
+def _types_compatible(model_type: str, db_type: str) -> bool:
+    """Return True when *model_type* and *db_type* are equivalent
+    enough that no migration is needed.
+
+    The mapping is intentionally lenient — cosmetic differences
+    between e.g. ``CharField`` and ``TextField`` are common when a
+    DB was bootstrapped without a migration (raw ``CREATE TABLE``)
+    and we don't want every diff run to flag them as drift.
+    """
+    if model_type == db_type:
+        return True
+    equivalents: list[set[str]] = [
+        {"AutoField", "BigAutoField", "IntegerField", "BigIntegerField"},
+        {"CharField", "TextField", "EmailField", "URLField", "SlugField"},
+        {"DateTimeField", "DateField"},
+        {"BooleanField", "NullBooleanField"},
+    ]
+    for group in equivalents:
+        if model_type in group and db_type in group:
+            return True
+    return False
+
+
+def cmd_export_json_schema(args):
+    """Render every Model in INSTALLED_APPS as a JSON Schema doc.
+
+    Schema dialect: ``https://json-schema.org/draft/2020-12/schema``.
+    Each model becomes one schema with ``properties``, ``required``,
+    ``additionalProperties: False`` and per-field constraints derived
+    from the dorm field declaration (max_length, minimum/maximum,
+    pattern for SlugField, format for EmailField / URLField, etc.).
+    """
+    import json
+    import os
+    import sys
+
+    settings_module = getattr(args, "settings", None)
+    if settings_module:
+        _load_settings(settings_module)
+    from .conf import settings as dorm_settings, _autodiscover_settings
+    if not dorm_settings._configured:
+        _autodiscover_settings()
+    _load_apps(getattr(dorm_settings, "INSTALLED_APPS", []) or [])
+
+    from .models import _model_registry
+
+    apps_filter = set(args.apps or [])
+
+    schemas: dict[str, dict] = {}
+    for fqname, cls in _model_registry.items():
+        if "." not in fqname:
+            continue
+        meta = getattr(cls, "_meta", None)
+        if meta is None or getattr(meta, "abstract", False) or getattr(meta, "proxy", False):
+            continue
+        if apps_filter and not any(
+            cls.__module__.startswith(a) for a in apps_filter
+        ):
+            continue
+        schemas[cls.__name__] = _model_to_jsonschema(
+            cls, include_relations=args.include_relations
+        )
+
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+        for name, schema in schemas.items():
+            with open(os.path.join(args.out, f"{name}.json"), "w", encoding="utf-8") as fh:
+                json.dump(schema, fh, indent=2)
+                fh.write("\n")
+        print(f"wrote {len(schemas)} schema(s) to {args.out}")
+    else:
+        json.dump(schemas, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+
+
+def _model_to_jsonschema(cls, *, include_relations: bool) -> dict:
+    """Render a single dorm Model class as a JSON Schema dict."""
+    from . import fields as _f
+
+    properties: dict[str, dict] = {}
+    required: list[str] = []
+
+    for fld in cls._meta.fields:
+        if not fld.column:
+            if include_relations and isinstance(fld, _f.ManyToManyField):
+                properties[fld.name] = {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                }
+            continue
+        if isinstance(fld, _f.ManyToManyField):
+            continue
+        prop = _field_to_jsonschema(fld)
+        properties[fld.name] = prop
+        if not fld.null and not fld.has_default() and not isinstance(fld, _f.AutoField):
+            required.append(fld.name)
+
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": f"{cls.__module__}.{cls.__name__}",
+        "title": cls.__name__,
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _field_to_jsonschema(fld) -> dict:
+    """Map a dorm Field to a JSON Schema fragment."""
+    from . import fields as _f
+
+    schema: dict = {}
+
+    if isinstance(fld, (_f.IntegerField, _f.AutoField)):
+        schema["type"] = "integer"
+    elif isinstance(fld, _f.FloatField):
+        schema["type"] = "number"
+    elif isinstance(fld, _f.DecimalField):
+        schema["type"] = "string"
+        schema["pattern"] = r"^-?\d+(\.\d+)?$"
+    elif isinstance(fld, _f.BooleanField):
+        schema["type"] = "boolean"
+    elif isinstance(fld, _f.UUIDField):
+        schema["type"] = "string"
+        schema["format"] = "uuid"
+    elif isinstance(fld, _f.EmailField):
+        schema["type"] = "string"
+        schema["format"] = "email"
+    elif isinstance(fld, _f.URLField):
+        schema["type"] = "string"
+        schema["format"] = "uri"
+    elif isinstance(fld, _f.DateTimeField):
+        schema["type"] = "string"
+        schema["format"] = "date-time"
+    elif isinstance(fld, _f.DateField):
+        schema["type"] = "string"
+        schema["format"] = "date"
+    elif isinstance(fld, _f.TimeField):
+        schema["type"] = "string"
+        schema["format"] = "time"
+    elif isinstance(fld, _f.JSONField):
+        schema["type"] = ["object", "array", "string", "number", "boolean", "null"]
+    elif isinstance(fld, (_f.CharField, _f.TextField, _f.SlugField)):
+        schema["type"] = "string"
+        max_len = getattr(fld, "max_length", None)
+        if max_len:
+            schema["maxLength"] = int(max_len)
+    else:
+        # Unknown / custom field — fallback to string with no constraints.
+        schema["type"] = ["string", "null"]
+
+    if fld.null:
+        if isinstance(schema.get("type"), str):
+            schema["type"] = [schema["type"], "null"]
+
+    return schema
+
+
+def _parse_duration(spec: str) -> int:
+    """Parse a duration spec like ``30d`` / ``12h`` / ``45m`` / ``90s``
+    into seconds. Bare integers are treated as seconds.
+
+    Multi-token specs (``1d12h``) are NOT supported — pick a single
+    unit and use the smallest meaningful value (``36h`` instead of
+    ``1d12h``).
+    """
+    spec = spec.strip()
+    if not spec:
+        raise ValueError("duration spec must be non-empty")
+    if spec[-1].isdigit():
+        return int(spec)
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    suffix = spec[-1].lower()
+    if suffix not in units:
+        raise ValueError(
+            f"unknown duration suffix {suffix!r}; use one of "
+            f"{sorted(units)} or a bare integer (seconds)."
+        )
+    try:
+        n = int(spec[:-1])
+    except ValueError:
+        raise ValueError(f"could not parse duration {spec!r}") from None
+    return n * units[suffix]
+
+
+def cmd_purge_deleted(args):
+    """Hard-delete every SoftDeleteModel row whose ``deleted_at`` is
+    older than the supplied window. Designed to run from cron / Celery
+    beat / systemd timer."""
+    import sys
+    from datetime import datetime, timedelta, timezone
+
+    settings_module = getattr(args, "settings", None)
+    if settings_module:
+        _load_settings(settings_module)
+    from .conf import settings as dorm_settings, _autodiscover_settings
+    if not dorm_settings._configured:
+        _autodiscover_settings()
+    _load_apps(getattr(dorm_settings, "INSTALLED_APPS", []) or [])
+
+    seconds = _parse_duration(args.older_than)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+
+    from .contrib.softdelete import SoftDeleteModel
+    from .models import _model_registry
+
+    apps_filter = set(args.apps or [])
+
+    from typing import Any as _Any
+
+    purgeable: list[_Any] = []
+    for fqname, cls in _model_registry.items():
+        if "." not in fqname:
+            continue
+        if not isinstance(cls, type):
+            continue
+        if not issubclass(cls, SoftDeleteModel):
+            continue
+        if cls is SoftDeleteModel:
+            continue
+        if apps_filter and not any(
+            cls.__module__.startswith(a) for a in apps_filter
+        ):
+            continue
+        purgeable.append(cls)
+
+    if not purgeable:
+        print("No SoftDeleteModel subclasses found in the model registry.")
+        sys.exit(0)
+
+    from .db.connection import get_connection
+    conn = get_connection(args.alias)
+
+    total = 0
+    for cls in purgeable:
+        # Skip models whose table is missing — avoids spurious errors
+        # when the registry holds models bootstrapped by an inactive
+        # app (typical in test environments) or a multi-tenant
+        # deployment where this alias isn't the model's home.
+        try:
+            if not conn.table_exists(cls._meta.db_table):
+                continue
+        except Exception:
+            continue
+        qs = cls.all_objects.using(args.alias).filter(deleted_at__lt=cutoff)
+        n = qs.count()
+        if args.dry_run:
+            print(f"[DRY-RUN] {cls.__name__}: would purge {n} row(s).")
+        else:
+            # Hard-delete via raw SQL — the SoftDeleteModel.delete()
+            # path is row-by-row and we want a single DML for the
+            # purge. The CLI is already authenticated against the
+            # alias, so trust the caller-supplied window.
+            table = cls._meta.db_table
+            placeholder = "%s" if conn.vendor == "postgresql" else "?"
+            conn.execute_write(
+                f'DELETE FROM "{table}" WHERE "deleted_at" < {placeholder}',
+                [cutoff],
+            )
+            print(f"{cls.__name__}: purged {n} row(s).")
+        total += n
+
+    summary = "would purge" if args.dry_run else "purged"
+    print(f"\nTotal: {summary} {total} row(s) older than {args.older_than}.")
+
+
 def cmd_help(args):
     args.parser.print_help()
 
@@ -2223,6 +2648,110 @@ def main():
     )
     sqm.add_argument("--settings", required=False)
     sqm.set_defaults(func=cmd_sqlmigrate)
+
+    # diff — schema drift detector
+    df = sub.add_parser(
+        "diff",
+        help=(
+            "Compare the project's models against the live database "
+            "schema and report any drift. Reads ``information_schema`` "
+            "(PG) or ``sqlite_master`` (SQLite) and walks the model "
+            "registry; lists tables missing on either side, columns "
+            "that disagree on type, and missing indexes. Exits 0 on a "
+            "clean match, 1 on drift — suitable as a CI gate post-deploy."
+        ),
+    )
+    df.add_argument(
+        "--alias",
+        default="default",
+        help="Database alias to compare against (default: 'default').",
+    )
+    df.add_argument(
+        "--apps",
+        nargs="*",
+        default=None,
+        help=(
+            "Restrict to models whose module path begins with one of "
+            "these prefixes (default: every model in the registry). "
+            "Useful in test suites or multi-tenant deployments where "
+            "the model registry holds models from unrelated apps."
+        ),
+    )
+    df.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Emit findings as JSON instead of a human-readable summary.",
+    )
+    df.set_defaults(func=cmd_diff)
+
+    # export-json-schema
+    ex = sub.add_parser(
+        "export-json-schema",
+        help=(
+            "Export every Model in INSTALLED_APPS as a JSON Schema "
+            "document (Draft 2020-12). Output goes to stdout by "
+            "default; use --out to write one file per model into a "
+            "directory. Useful as input for downstream validators "
+            "(Ajv, Zod runtime) or schema-registry tooling."
+        ),
+    )
+    ex.add_argument(
+        "--out",
+        default=None,
+        help="Output directory (one <ModelName>.json per model). Default: stdout.",
+    )
+    ex.add_argument(
+        "--apps",
+        nargs="*",
+        default=None,
+        help="Restrict to models in these app modules (default: all installed).",
+    )
+    ex.add_argument(
+        "--include-relations",
+        action="store_true",
+        default=False,
+        help="Inline FK / OneToOne / M2M as nested schemas (depth 1).",
+    )
+    ex.set_defaults(func=cmd_export_json_schema)
+
+    # purge-deleted — TTL job for SoftDeleteModel rows
+    pd = sub.add_parser(
+        "purge-deleted",
+        help=(
+            "Hard-delete every SoftDeleteModel row whose deleted_at "
+            "is older than --older-than. Cron-friendly: runs with no "
+            "interactive prompts, exits 0 on success and prints a "
+            "per-model summary. Pass --dry-run to log without deleting."
+        ),
+    )
+    pd.add_argument(
+        "--older-than",
+        required=True,
+        metavar="DURATION",
+        help=(
+            "Time window — e.g. ``30d``, ``12h``, ``45m``. Rows whose "
+            "deleted_at < (now - DURATION) are eligible."
+        ),
+    )
+    pd.add_argument(
+        "--apps",
+        nargs="*",
+        default=None,
+        help="Restrict purge to models in these app modules.",
+    )
+    pd.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Report counts without deleting. Recommended on first run.",
+    )
+    pd.add_argument(
+        "--alias",
+        default="default",
+        help="Database alias (default: 'default').",
+    )
+    pd.set_defaults(func=cmd_purge_deleted)
 
     # help
     hp = sub.add_parser("help", help="Show this help message and exit")

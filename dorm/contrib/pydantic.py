@@ -785,10 +785,251 @@ def update_schema_for(
     return create_model(cls_name, __base__=configured_base, **fields)  # type: ignore
 
 
+def list_response_schema(
+    item_schema: Type[BaseModel],
+    *,
+    name: str | None = None,
+    cursor_type: Any = str,
+) -> Type[BaseModel]:
+    """Build a Pydantic schema for the canonical paginated response::
+
+        {
+            "items": [<item_schema>, ...],
+            "total": int | None,        # null when count() was skipped
+            "next_cursor": <cursor_type> | None,
+            "has_more": bool,
+        }
+
+    *cursor_type* defaults to ``str`` so opaque base64 cursors round-
+    trip; pass ``int`` for offset-style pagination if your API uses
+    integer page numbers. The schema name defaults to
+    ``f"{item_schema.__name__}List"``.
+
+    Use as a FastAPI ``response_model``::
+
+        @app.get("/authors", response_model=list_response_schema(AuthorOut))
+        async def list_authors(...):
+            ...
+    """
+    cls_name = name or f"{item_schema.__name__}List"
+    # ``list[item_schema]`` is built dynamically — cast through
+    # ``Any`` so the type checker doesn't try to resolve a class
+    # value as a type expression.
+    item_any: Any = item_schema
+    items_type: Any = list[item_any]
+    fields: dict[str, tuple[Any, Any]] = {
+        "items": (items_type, ...),
+        "total": (int | None, None),
+        "next_cursor": (cursor_type | None, None),
+        "has_more": (bool, False),
+    }
+    return create_model(cls_name, **fields)  # type: ignore
+
+
+def schema_with_computed(
+    model_cls: Type[Model],
+    *,
+    computed: dict[str, Any] | None = None,
+    name: str | None = None,
+    exclude: tuple[str, ...] = (),
+) -> Type[BaseModel]:
+    """Like :func:`schema_for` but also pulls in *computed* properties.
+
+    *computed* maps attribute name → return type annotation. The
+    helper looks up the named attribute on *model_cls* and adds a
+    Pydantic field of the given type, with a ``computed_field``
+    decorator that defers to the underlying ``@property``.
+
+    Example::
+
+        class Author(dorm.Model):
+            name = dorm.CharField(max_length=100)
+            age = dorm.IntegerField()
+
+            @property
+            def is_adult(self) -> bool:
+                return self.age >= 18
+
+        AuthorOut = schema_with_computed(
+            Author, computed={"is_adult": bool}
+        )
+    """
+    base_schema = schema_for(model_cls, name=name, exclude=exclude)
+    if not computed:
+        return base_schema
+
+    extras: dict[str, tuple[Any, Any]] = {}
+    for attr_name, ann in computed.items():
+        attr = getattr(model_cls, attr_name, None)
+        if attr is None:
+            raise AttributeError(
+                f"schema_with_computed(): {model_cls.__name__!r} has no "
+                f"attribute {attr_name!r}."
+            )
+        extras[attr_name] = (ann, None)
+
+    cls_name = name or f"{model_cls.__name__}Schema"
+    return create_model(cls_name, __base__=base_schema, **extras)  # type: ignore
+
+
+def schema_for_with_examples(
+    model_cls: Type[Model],
+    *,
+    examples: list[Any] | None = None,
+    sample_count: int = 1,
+    name: str | None = None,
+    using: str = "default",
+) -> Type[BaseModel]:
+    """Generate a schema and attach an OpenAPI ``examples`` block.
+
+    *examples* — when provided, used verbatim as the ``examples``
+    list on each field's ``json_schema_extra``. When omitted, the
+    helper queries the live database for *sample_count* rows of
+    *model_cls* and uses them as the example payload — handy for
+    self-documenting docs without hand-curating fixtures.
+
+    The DB lookup is lazy and best-effort: if no rows exist or the
+    DB is unreachable, the schema falls back to no examples (it
+    does not raise). Pass ``examples=[]`` explicitly to skip the
+    DB lookup.
+    """
+    schema = schema_for(model_cls, name=name)
+    if examples is None:
+        try:
+            qs = model_cls.objects.using(using).all()[:sample_count]
+            examples = [_to_example_dict(row) for row in qs]
+        except Exception:
+            examples = []
+    if not examples:
+        return schema
+
+    # Inject examples on the model's json_schema_extra so OpenAPI
+    # docs show realistic data alongside each property.
+    cfg = dict(schema.model_config)
+    extra = dict(cfg.get("json_schema_extra") or {})
+    extra["examples"] = examples
+    cfg["json_schema_extra"] = extra
+    schema.model_config = ConfigDict(**cfg)  # type: ignore[assignment]
+    return schema
+
+
+def _to_example_dict(row: Any) -> dict[str, Any]:
+    """Serialise a model instance into an OpenAPI-friendly dict.
+
+    Datetimes go to ISO-8601, Decimal to ``str``, UUID to ``str`` —
+    same rules as :class:`dorm.contrib.streaming._JSONEncoder`."""
+    from datetime import date, datetime, time
+    from decimal import Decimal
+    from enum import Enum
+    from uuid import UUID
+
+    out: dict[str, Any] = {}
+    meta = row._meta
+    for f in meta.fields:
+        if not f.column or isinstance(f, ManyToManyField):
+            continue
+        v = row.__dict__.get(f.attname)
+        if isinstance(v, (datetime, date, time)):
+            out[f.name] = v.isoformat()
+        elif isinstance(v, (Decimal, UUID)):
+            out[f.name] = str(v)
+        elif isinstance(v, Enum):
+            out[f.name] = v.value
+        elif isinstance(v, (bytes, bytearray)):
+            out[f.name] = v.hex()
+        else:
+            out[f.name] = v
+    return out
+
+
+def nested_schema_for(
+    model_cls: Type[Model],
+    *,
+    depth: int = 1,
+    name: str | None = None,
+    exclude: tuple[str, ...] = (),
+) -> Type[BaseModel]:
+    """Like :func:`schema_for` but expand FK / OneToOne / reverse-FK /
+    M2M relations into nested schemas, *depth* levels deep.
+
+    *depth* counts hops along the relation graph. With ``depth=1`` an
+    ``Author``'s ``books`` field becomes ``list[BookSchema]`` where
+    ``BookSchema`` is the plain (non-nested) schema. With ``depth=2``
+    each ``Book`` then nests its own relations one more hop.
+
+    Cycle protection: a model already encountered earlier on the
+    expansion path is replaced with a forward reference name to
+    avoid infinite recursion.
+
+    Sub-schemas are generated lazily and cached per ``(model, depth)``
+    inside this call so the result is consistent across siblings of
+    the same nesting level.
+    """
+    cache: dict[tuple[type, int], Type[BaseModel]] = {}
+
+    def _build(cls: Any, d: int, seen: frozenset) -> Type[BaseModel]:
+        key = (cls, d)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        # Build the leaf schema first.
+        leaf = schema_for(cls, name=f"{cls.__name__}Nested{d}", exclude=exclude)
+        if d == 0:
+            cache[key] = leaf
+            return leaf
+
+        extras: dict[str, tuple[Any, Any]] = {}
+        # Forward FK / OneToOne — expand the related model.
+        from ..fields import ForeignKey, OneToOneField, ManyToManyField as _M2M
+
+        for f in cls._meta.fields:
+            if not f.column:
+                continue
+            if isinstance(f, (ForeignKey, OneToOneField)):
+                rel = f._resolve_related_model()
+                if rel in seen:
+                    extras[f.name] = (Any, None)
+                    continue
+                sub = _build(rel, d - 1, seen | {cls})
+                # ``sub | None`` is built at runtime; ``Any`` keeps
+                # the static checker happy.
+                sub_optional: Any = sub | None
+                extras[f.name] = (sub_optional, None)
+            elif isinstance(f, _M2M):
+                rel = f._resolve_related_model()
+                if rel in seen:
+                    extras[f.name] = (list[Any], [])
+                    continue
+                sub = _build(rel, d - 1, seen | {cls})
+                # ``list[sub]`` is the runtime annotation; cast through
+                # ``Any`` so ty doesn't try to resolve a class as a
+                # type-expression.
+                sub_any: Any = sub
+                sub_list: Any = list[sub_any]
+                extras[f.name] = (sub_list, [])
+        if not extras:
+            cache[key] = leaf
+            return leaf
+        composed_name = name if (cls is model_cls and name) else f"{cls.__name__}Nested{d}"
+        composed = create_model(  # type: ignore
+            composed_name,
+            __base__=leaf,
+            **extras,
+        )
+        cache[key] = composed
+        return composed
+
+    return _build(model_cls, depth, frozenset())
+
+
 __all__ = [
     "schema_for",
     "create_schema_for",
     "update_schema_for",
+    "list_response_schema",
+    "schema_with_computed",
+    "schema_for_with_examples",
+    "nested_schema_for",
     "DormSchema",
     "DormSchemaMeta",
 ]

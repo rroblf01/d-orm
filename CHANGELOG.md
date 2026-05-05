@@ -181,11 +181,100 @@ ENGINE string doesn't match any of them.
 - mkdocs nav updated under **Guides → Advanced features (3.4)**
   and **Guides → Benchmark vs other ORMs**.
 
+### Added — Pure-ORM helpers (framework-agnostic)
+
+- **Query budget** — ``dorm.budget(timeout_ms=…, max_rows=…)`` /
+  ``dorm.abudget(...)``. Wall-clock ceiling enforced via
+  ``SET LOCAL statement_timeout`` on PostgreSQL inside an implicit
+  ``atomic()``; row ceiling enforced client-side at materialise
+  time on every backend. ``BudgetExceeded`` subclasses
+  ``DatabaseError``. Nested blocks combine via the strictest
+  active value.
+- **Streaming primitives** — ``dorm.contrib.streaming`` ships
+  ``stream_json`` / ``stream_jsonl`` / ``stream_csv`` /
+  ``stream_ndjson_pretty`` (sync) and ``astream_json`` /
+  ``astream_jsonl`` / ``astream_csv`` (async). Yields ``bytes``
+  ready for any framework's streaming-response helper. Memory-
+  bounded — backed by ``QuerySet.iterator``/``aiterator``.
+- **Pydantic adapter expansion** — ``list_response_schema(item)``
+  for paginated responses (``items``/``total``/``next_cursor``/
+  ``has_more``), ``schema_with_computed(model, computed={...})``
+  for ``@property``-derived fields, ``schema_for_with_examples``
+  for OpenAPI examples (auto-generated from a live row sample),
+  ``nested_schema_for(model, depth=N)`` for FK / O2O / M2M
+  inlining with cycle-protection.
+- **N+1 detector helpers** — ``dorm.contrib.nplusone.detect()``
+  context manager (``raise_on_detect=False`` by default for log-
+  only middleware use) and ``adetect()`` async equivalent.
+- **`AsyncModel`** — ``dorm.contrib.asyncmodel.AsyncModel``
+  abstract base whose default ``objects`` manager rejects every
+  sync ORM method with ``AsyncOnlyError`` (a ``RuntimeError``
+  subclass). ``save()`` / ``delete()`` instance methods raise the
+  same error. Defends async-only stacks against accidental
+  event-loop blockers.
+- **Idempotency outbox primitive** — ``dorm.contrib.idempotency``
+  with ``IdempotencyRecord`` abstract model, ``idempotency_key``
+  context manager that wraps the block in ``atomic()``, and
+  ``purge_expired`` TTL helper. Caller decides what to store and
+  when.
+- **Lag-aware read router** —
+  ``dorm.contrib.lag_router.LagAwareReadRouter`` consults
+  ``pg_last_xact_replay_timestamp()`` to skip replicas above
+  ``max_lag_seconds`` and deflect reads to the primary. Per-
+  replica caching with configurable TTL.
+- **GIS contrib** — ``dorm.contrib.gis`` ships ``Geom``
+  (Pythonic GeoJSON-shaped value), ``PointField`` /
+  ``PolygonField`` / ``LineStringField`` / ``GeometryField``
+  with PostGIS DDL on PG and BLOB/spatialite hooks on SQLite,
+  plus spatial lookups (``__intersects``, ``__within``,
+  ``__contains``, ``__distance_lte``, ``__distance_gte``).
+- **`Meta.read_only = True`** — strict read-only model lock.
+  ``save()`` / ``delete()`` / ``asave()`` / ``adelete()`` raise
+  ``ReadOnlyModelError`` (a ``DatabaseError`` subclass). Reads
+  pass through. Useful for materialised-view-backed models and
+  immutable audit logs.
+
+### Added — CLI subcommands
+
+- **`dorm diff`** — schema drift detector. Compares the model
+  registry against ``information_schema`` (PG) /
+  ``sqlite_master`` (SQLite) and reports missing/extra tables,
+  missing columns and type mismatches. Exit 0 = clean, 1 =
+  drift; ``--json`` for CI-friendly output.
+- **`dorm purge-deleted`** — TTL job for SoftDeleteModel rows.
+  ``--older-than 30d`` parses ``s``/``m``/``h``/``d``/``w``
+  suffixes, ``--dry-run`` reports without deleting,
+  ``--apps`` restricts the model walk.
+- **`dorm export-json-schema`** — emits Draft 2020-12 JSON
+  Schema documents for every Model, with type / format /
+  constraint mappings (``maxLength``, ``email`` format, ``uuid``
+  format etc.). Output to stdout or one file per model via
+  ``--out``.
+
+### Added — Sibling packages (extracted out of the main wheel)
+
+The mypy and pytest plugins ship as separate, independently-
+versioned packages so the core dorm install never pulls in
+``mypy`` or ``pytest`` as runtime dependencies. See
+``docs/sibling-packages.md`` for the rationale.
+
+- **`pytest-djanorm`** — sibling package (``pytest-djanorm/``)
+  registered via ``pytest11`` entry-point. Fixtures:
+  ``djanorm_settings``, ``pg_container``, ``transactional_db``,
+  ``atransactional_db``, ``nplusone_guard``. Optional extras:
+  ``[postgres]``, ``[mysql]``, ``[async]``.
+- **`djanorm-mypy`** — sibling package (``djanorm-mypy/``)
+  exposing ``DjanormPlugin``. Validates ``filter()`` /
+  ``exclude()`` / ``get()`` kwargs against the model's field
+  set, recognises lookup suffixes (``__icontains``, ``__gte`` …),
+  synthesises the runtime ``pk`` / ``id`` attribute on every
+  Model subclass.
+
 ### Validated
 
 - ``ruff check``: clean.
 - ``ty check``: clean.
-- ``pytest tests/``: 5980 passed, 124 skipped (no failures, no
+- ``pytest tests/``: 6198 passed, 130 skipped (no failures, no
   regressions vs 3.3).
 
 ## [3.3.0] - 2026-05-04

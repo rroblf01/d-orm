@@ -30,7 +30,9 @@ Quick start:
 """
 
 from .conf import configure, parse_database_url, settings
-from . import signals, transaction
+from . import budget, signals, transaction
+from .budget import BudgetExceeded
+from .models import ReadOnlyModelError
 from .db.connection import ahealth_check, health_check, pool_stats
 from .signals import (
     Signal,
@@ -229,6 +231,9 @@ __all__ = [
     "settings",
     "transaction",
     "signals",
+    "budget",
+    "BudgetExceeded",
+    "ReadOnlyModelError",
     "health_check",
     "ahealth_check",
     "pool_stats",

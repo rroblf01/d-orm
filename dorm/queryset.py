@@ -1223,6 +1223,9 @@ class QuerySet(Generic[_T]):
                 model_cache_version(self.model) if self._cache_alias else None
             )
             rows = [item async for item in self._aiterator()]
+            from .budget import check_rowcount as _check_rowcount
+
+            _check_rowcount(len(rows))
             await self._cache_store_async(rows, version=version_at_fetch)
             return rows
         return _materialize().__await__()
@@ -1309,6 +1312,12 @@ class QuerySet(Generic[_T]):
             model_cache_version(self.model) if self._cache_alias else None
         )
         rows = list(self._iterator())  # type: ignore[assignment]
+        # Honour any active ``dorm.budget(max_rows=…)`` block before
+        # the rows leak into the caller's buffer. Inline import so
+        # the budget module isn't loaded for every queryset op.
+        from .budget import check_rowcount as _check_rowcount
+
+        _check_rowcount(len(rows))
         self._result_cache = rows
         self._cache_store_sync(rows, version=version_at_fetch)
 
