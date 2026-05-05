@@ -73,8 +73,9 @@ plugins:
             Cookbook: Recetario
             Troubleshooting: Resolución de problemas
             Migration from Django ORM: Migración desde Django ORM
-            Advanced features (3.4): Características avanzadas (3.4)
-            Framework-agnostic helpers (3.4): Helpers framework-agnósticos (3.4)
+            What's new in 4.0: Novedades 4.0
+            Advanced PostgreSQL features: Características avanzadas PostgreSQL
+            Framework-agnostic helpers: Helpers framework-agnósticos
             Sibling packages (mypy / pytest): Paquetes hermanos (mypy / pytest)
             Benchmark vs other ORMs: Benchmark vs otros ORMs
             API Reference: Referencia API
@@ -124,8 +125,9 @@ nav:
       - Cookbook: cookbook.md
       - Troubleshooting: troubleshooting.md
       - Migration from Django ORM: migration-from-django.md
-      - Advanced features (3.4): advanced.md
-      - Framework-agnostic helpers (3.4): helpers.md
+      - What's new in 4.0: v4_0.md
+      - Advanced PostgreSQL features: advanced.md
+      - Framework-agnostic helpers: helpers.md
       - Sibling packages (mypy / pytest): sibling-packages.md
       - Benchmark vs other ORMs: bench.md
   - API Reference:

@@ -6,21 +6,132 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [3.4.0] - 2026-05-05
+## [4.0.0] - 2026-05-05
 
-Minor release. Production-grade helpers for high-throughput PostgreSQL
-deployments (COPY-based ETL, materialised views, declarative
-partitioning, LISTEN/NOTIFY pub-sub) plus operational primitives that
-sit one layer above the ORM (circuit breaker, outbox pattern,
-hash-based horizontal sharding, async pool task-affinity). Third-party
-backends become first-class citizens via entry-points, and a new
-side-by-side benchmark runner ships against Django ORM, SQLAlchemy 2.0
-and Tortoise ORM.
+Major release. Consolidates everything we've shipped between 3.3 and
+the cut: production-grade PostgreSQL helpers (COPY-based ETL,
+materialised views, declarative partitioning, LISTEN/NOTIFY pub-sub),
+operational primitives layered on top of the ORM (circuit breaker,
+outbox pattern, hash-based horizontal sharding, async pool task-
+affinity), framework-agnostic helpers (query budget, streaming
+serialisers, expanded Pydantic adapter, N+1 detector, AsyncModel,
+idempotency keys, lag-aware read routing, GIS, Meta.read_only),
+three new CLI subcommands, and the four new headline features that
+warrant the major bump:
 
-**No breaking changes vs 3.3**: every addition is opt-in via
-``dorm.contrib.*`` or zero-cost when unused. ``ENGINE`` resolution still
-prefers built-in backends — entry-point lookup only fires when the
-ENGINE string doesn't match any of them.
+- Full-text search additions on top of the existing ``SearchVector``
+  / ``SearchQuery`` infrastructure: ``TrigramSimilarity`` /
+  ``TrigramWordSimilarity`` and a ``search_index`` SQL helper for
+  GIN functional indexes.
+- Online migration operations — zero-downtime ``ADD COLUMN`` /
+  ``SET NOT NULL`` recipes and a ``BackfillBatch`` chunked data
+  migration step.
+- OpenTelemetry trace enrichment with semantic-convention attributes
+  per query (``db.operation``, ``db.sql.table``, ``db.dorm.alias``).
+- Recursive CTE helpers — ``descendants_cte`` / ``ancestors_cte``
+  for adjacency-list tree traversals.
+- Row-level multi-tenancy — ``TenantModel`` + ``current_tenant``
+  context manager that scopes every queryset against an active
+  tenant id.
+- **DuckDB backend** — first analytic-OLAP backend in the family.
+- ``HStoreField`` + native PostgreSQL ``ENUM`` types with
+  ``CreatePGEnum`` / ``DropPGEnum`` / ``AddPGEnumValue`` migrations.
+
+The ``mypy`` and ``pytest`` plugins now ship as separate sibling
+packages — ``djanorm-mypy`` and ``pytest-djanorm`` — so the main
+wheel never pulls those tools as runtime deps. See
+``docs/sibling-packages.md`` for the rationale.
+
+**Breaking change** (single one): the public version bumped
+straight from 3.3 to 4.0. Code shipped against 3.3 keeps working
+without modification — every addition listed below is opt-in.
+``ENGINE`` resolution still prefers built-in backends; entry-point
+lookup only fires when the ENGINE string doesn't match any of them.
+
+### Added — Full-text search
+
+- ``dorm.search.TrigramSimilarity`` and
+  ``dorm.search.TrigramWordSimilarity`` expressions wrap PG
+  ``pg_trgm``'s ``similarity()`` / ``word_similarity()`` for fuzzy
+  match ranking. Use in ``annotate(score=TrigramSimilarity('name',
+  'foo'))`` followed by ``order_by('-score')``.
+- ``dorm.search.search_index(table, *fields, name=, config=)``
+  renders a ``CREATE INDEX ... USING GIN ON (to_tsvector(...))``
+  string ready to splice into a :class:`RunSQL` migration step.
+  Functional GIN index — the canonical accelerator for
+  ``__search`` lookups.
+
+### Added — Online migrations
+
+- ``AddFieldOnline`` op — adds the column nullable, lets the caller
+  drive a chunked backfill, then optionally promotes to NOT NULL.
+  Zero rewrite on PG.
+- ``BackfillBatch`` op — runs ``UPDATE`` in fixed-size PK ranges
+  inside short transactions. ``sleep_seconds`` and ``max_batches``
+  knobs let you throttle the workload against a live primary.
+- ``SetNotNullOnline`` op — uses the ``CHECK (col IS NOT NULL)
+  NOT VALID`` + ``VALIDATE CONSTRAINT`` recipe to flip ``SET NOT
+  NULL`` without a full table rewrite on PG ≥ 12.
+
+### Added — OpenTelemetry enrichment
+
+- Span attributes now follow OTel SemConv 1.20+:
+  ``db.operation`` (verb extraction), ``db.sql.table`` /
+  ``db.collection.name`` (table extraction). Span name uses
+  ``"<OPERATION> <table>"`` so tracing UIs sort by hot tables
+  out of the box.
+- ``db.dorm.alias`` carries the connection alias so multi-DB
+  apps filter on it.
+
+### Added — Recursive CTEs
+
+- ``dorm.tree.descendants_cte(model, parent_field=, root_pk=, …)``
+  and ``dorm.tree.ancestors_cte(...)`` build a :class:`CTE` body
+  for adjacency-list tree walks.
+- ``descendants(model, …)`` / ``ancestors(model, …)`` convenience
+  wrappers run the CTE end-to-end and return the result rows.
+- ``cycle_field`` knob on ``descendants_cte`` adds an
+  ``ARRAY[pk]``-style visited set + ``is_cycle`` boolean so cyclic
+  graphs terminate cleanly (PG-only — SQLite has no array literal).
+
+### Added — Row-level multi-tenancy
+
+- ``dorm.contrib.tenants_row.TenantModel`` ships a default
+  ``tenant_id`` column, a tenant-scoping ``Manager``, and an
+  ``unscoped`` escape-hatch manager.
+- ``current_tenant(tenant_id)`` context manager pins the active
+  tenant via ``contextvars`` (per-task in asyncio, per-thread
+  otherwise).
+- Queries on a ``TenantModel`` raise ``NoActiveTenantError`` when
+  no tenant is active — the explicit failure surfaces silent
+  cross-tenant leaks in code review.
+- ``save()`` / ``asave()`` auto-fill ``tenant_id`` from the active
+  tenant when the field is unset.
+
+### Added — DuckDB backend
+
+- ``ENGINE = "duckdb"`` resolves to
+  ``dorm.db.backends.duckdb.DuckDBDatabaseWrapper`` (sync) and
+  ``DuckDBAsyncDatabaseWrapper`` (async, runs the sync API in a
+  worker thread).
+- Atomic transactions, savepoint-degraded nesting (DuckDB has no
+  ``SAVEPOINT`` — nested ``atomic()`` blocks behave as no-op
+  boundaries; outer rollback discards everything).
+- Streaming iterator via ``execute_streaming``.
+- ``information_schema.columns`` introspection so the ``dorm diff``
+  CLI works against DuckDB out of the box.
+- New optional extra: ``pip install 'djanorm[duckdb]'``.
+
+### Added — HStore + native PostgreSQL ENUM
+
+- ``dorm.HStoreField`` — PG ``hstore`` column on PostgreSQL,
+  JSON-encoded TEXT fallback on SQLite. Validates string-only
+  keys and string-or-None values at assignment time.
+- ``EnumField(native=True)`` opts the field into a PG ``CREATE TYPE
+  ... AS ENUM`` column; non-PG backends fall back to ``VARCHAR``.
+- ``CreatePGEnum(name, values)`` migration op emits the type DDL
+  before columns reference it; ``DropPGEnum`` is the inverse;
+  ``AddPGEnumValue`` appends a label to an existing type.
 
 ### Added — PostgreSQL `COPY FROM` / `COPY TO`
 
@@ -34,12 +145,7 @@ ENGINE string doesn't match any of them.
   of rows.
 - ``copy_to(sql)`` / ``acopy_to(sql)`` — wrap an arbitrary
   ``SELECT`` in ``COPY (...) TO STDOUT`` and yield rows lazily.
-  Ideal for full-table exports without buffering the result set in
-  Python.
-- PG-only: non-PG backends raise ``NotImplementedError`` rather than
-  silently degrading to ``bulk_create`` (the call site asked for
-  COPY explicitly — silent downgrades would mislead capacity
-  planning).
+- PG-only: non-PG backends raise ``NotImplementedError``.
 
 ### Added — Materialised-view migration operations
 

@@ -277,3 +277,129 @@ class SearchHeadline:
 
     def __repr__(self) -> str:
         return f"SearchHeadline({self.expression!r}, {self.query!r})"
+
+
+class TrigramSimilarity:
+    """Compile to ``similarity(<expression>, %s)`` — PostgreSQL
+    ``pg_trgm`` extension. Used in ``annotate(score=TrigramSimilarity(
+    'name', 'foo'))`` followed by ``order_by('-score')`` for fuzzy
+    search ranking.
+
+    Requires the extension::
+
+        CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+    Pair with a GIN/GIST index for performance::
+
+        Index(fields=["name"], opclass="gin_trgm_ops", method="GIN")
+    """
+
+    def __init__(self, expression: Any, value: str) -> None:
+        if not isinstance(value, str):
+            raise ImproperlyConfigured(
+                f"TrigramSimilarity value must be a string; got "
+                f"{type(value).__name__}."
+            )
+        self.expression = expression
+        self.value = value
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        from .expressions import F
+        from .functions import _compile_expr
+
+        expr = self.expression
+        # Bare strings are treated as column references (the common
+        # case: ``TrigramSimilarity("name", "alice")``); explicit F /
+        # Value wrappers are honoured if the caller passed them.
+        if isinstance(expr, str):
+            expr = F(expr)
+        expr_sql, expr_params = _compile_expr(expr, table_alias)
+        return f"similarity({expr_sql}, %s)", list(expr_params) + [self.value]
+
+    def __repr__(self) -> str:
+        return f"TrigramSimilarity({self.expression!r}, {self.value!r})"
+
+
+class TrigramWordSimilarity:
+    """Compile to ``word_similarity(%s, <expression>)`` — PG ``pg_trgm``
+    extension's word-aware variant. Better when the search target has
+    multiple words and the user query is a single word."""
+
+    def __init__(self, value: str, expression: Any) -> None:
+        if not isinstance(value, str):
+            raise ImproperlyConfigured(
+                f"TrigramWordSimilarity value must be a string; got "
+                f"{type(value).__name__}."
+            )
+        self.value = value
+        self.expression = expression
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        from .expressions import F
+        from .functions import _compile_expr
+
+        expr = self.expression
+        if isinstance(expr, str):
+            expr = F(expr)
+        expr_sql, expr_params = _compile_expr(expr, table_alias)
+        return f"word_similarity(%s, {expr_sql})", [self.value] + list(expr_params)
+
+    def __repr__(self) -> str:
+        return f"TrigramWordSimilarity({self.value!r}, {self.expression!r})"
+
+
+def search_index(
+    table: str, *fields: str, name: str | None = None, config: str = "english"
+) -> str:
+    """Render a ``CREATE INDEX`` statement for a functional GIN
+    index over ``to_tsvector(config, col || ' ' || …)``. Returns
+    the raw SQL string suitable for a migration's
+    :class:`~dorm.migrations.operations.RunSQL` step::
+
+        from dorm.migrations.operations import RunSQL
+        from dorm.search import search_index
+
+        operations = [
+            RunSQL(
+                search_index("articles", "title", "body"),
+                reverse_sql='DROP INDEX IF EXISTS ix_articles_search'
+            ),
+        ]
+
+    The functional-index path goes through ``RunSQL`` rather than
+    :class:`~dorm.indexes.Index` because the ``to_tsvector`` shape
+    falls outside the strict allowlist on
+    :class:`~dorm.indexes.Index` (which intentionally accepts only
+    ``FN(col1, col2)``-shaped expressions to keep migration
+    autodetection sound).
+
+    PostgreSQL-only. Default *config* is ``english``; override per-
+    locale.
+    """
+    if not fields:
+        raise ImproperlyConfigured("search_index requires at least one field")
+    _validate_identifier(table, kind="search_index table")
+    for f in fields:
+        _validate_identifier(f, kind="search_index field")
+    config = _validate_config(config)
+
+    idx_name = name or f"ix_{table}_search"
+    _validate_identifier(idx_name, kind="search_index name")
+
+    expr = " || ' ' || ".join(f"coalesce({f}::text, '')" for f in fields)
+    return (
+        f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+        f'ON "{table}" USING GIN '
+        f"(to_tsvector('{config}', ({expr})))"
+    )
+
+
+__all__ = [
+    "SearchVector",
+    "SearchQuery",
+    "SearchRank",
+    "SearchHeadline",
+    "TrigramSimilarity",
+    "TrigramWordSimilarity",
+    "search_index",
+]

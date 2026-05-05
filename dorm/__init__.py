@@ -140,6 +140,7 @@ from .functions import (
 from .constraints import CheckConstraint, ExclusionConstraint, UniqueConstraint
 from .fields import (
     ArrayField,
+    HStoreField,
     AutoField,
     BigAutoField,
     BigIntegerField,
@@ -223,7 +224,7 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "3.4.0"
+__version__ = "4.0.0"
 __all__ = [
     # Config
     "configure",
@@ -284,6 +285,7 @@ __all__ = [
     "JSONField",
     "BinaryField",
     "ArrayField",
+    "HStoreField",
     "GeneratedField",
     "DurationField",
     "EnumField",

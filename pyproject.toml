@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "3.4.0"
+version = "4.0.0"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -168,6 +168,10 @@ auth-argon2 = ["argon2-cffi>=23.0"]
 # real driver pins (``pymysql`` + ``asyncmy``) on the v3.1 bump
 # without changing user requirements files.
 mysql = ["pymysql>=1.1.0", "aiomysql>=0.2.0"]
+# DuckDB backend ships in 4.0 — single embedded analytical
+# database. The Python client speaks DB-API and bundles the engine
+# binary, so no system-level install is required.
+duckdb = ["duckdb>=1.0"]
 all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted,mysql,auth-argon2]"]
 
 [project.scripts]

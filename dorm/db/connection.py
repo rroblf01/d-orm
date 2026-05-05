@@ -257,6 +257,9 @@ def _create_sync_connection(alias: str, db_settings: dict):
         # at construction time pointing at the v3.1 milestone.
         from .backends.mysql import MySQLDatabaseWrapper
         return MySQLDatabaseWrapper(db_settings, alias)
+    if "duckdb" in engine:
+        from .backends.duckdb import DuckDBDatabaseWrapper
+        return DuckDBDatabaseWrapper(db_settings)
 
     factory = _load_external_backend(engine, "sync")
     if factory is not None:
@@ -285,6 +288,9 @@ def _create_async_connection(alias: str, db_settings: dict):
     if "mysql" in engine or "mariadb" in engine:
         from .backends.mysql import MySQLAsyncDatabaseWrapper
         return MySQLAsyncDatabaseWrapper(db_settings, alias)
+    if "duckdb" in engine:
+        from .backends.duckdb import DuckDBAsyncDatabaseWrapper
+        return DuckDBAsyncDatabaseWrapper(db_settings)
 
     factory = _load_external_backend(engine, "async")
     if factory is not None:

@@ -1024,6 +1024,83 @@ class ArrayField(Field[list]):
         return [self.base_field.get_db_prep_value(v) for v in value]
 
 
+class HStoreField(Field[dict]):
+    """PostgreSQL ``hstore`` column — flat key/value mapping where
+    every value is a string (or ``NULL``).
+
+    Why not just use :class:`JSONField`? Two reasons:
+
+    1. ``hstore`` keys can be GIN-indexed for ``?`` (key exists),
+       ``?&`` / ``?|`` (any/all keys), and ``@>`` (containment). The
+       index is more compact than the JSONB equivalent because there
+       is no nesting to traverse.
+    2. ``hstore`` is the canonical column for "tagged metadata" —
+       config flags, search facets, lightweight attribute bags.
+
+    Requires the ``hstore`` extension::
+
+        CREATE EXTENSION IF NOT EXISTS hstore;
+
+    Issue this from a :class:`~dorm.migrations.operations.RunSQL`
+    migration before adding any ``HStoreField`` columns.
+
+    SQLite has no equivalent — the field falls back to ``TEXT``
+    holding a JSON-encoded dict for portability. Use
+    :class:`JSONField` directly if you only target SQLite.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+
+    def db_type(self, connection) -> str:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            return "hstore"
+        return "TEXT"
+
+    def to_python(self, value):
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return {str(k): (None if v is None else str(v)) for k, v in value.items()}
+        if isinstance(value, str):
+            # SQLite fallback path stores JSON; decode on read.
+            import json
+
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+            if isinstance(decoded, dict):
+                return {str(k): (None if v is None else str(v)) for k, v in decoded.items()}
+            return decoded
+        return value
+
+    def get_db_prep_value(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValidationError(
+                f"HStoreField '{self.name}' expects a dict; got {type(value).__name__}."
+            )
+        # Keys must be strings; values may be strings or None.
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ValidationError(
+                    f"HStoreField '{self.name}': all keys must be strings; "
+                    f"got {type(k).__name__}."
+                )
+            if v is not None and not isinstance(v, str):
+                raise ValidationError(
+                    f"HStoreField '{self.name}': value for {k!r} must be "
+                    f"str or None; got {type(v).__name__}."
+                )
+        return value
+
+    def from_db_value(self, value):
+        return self.to_python(value)
+
+
 class GeneratedField(Field[Any]):
     """A column whose value is computed from a SQL expression at write
     time. PostgreSQL ≥ 12 and SQLite ≥ 3.31 both support
@@ -1649,6 +1726,8 @@ class EnumField(Field[Any], Generic[_TEnum]):
         enum_cls: type[_TEnum],
         *,
         max_length: int | None = None,
+        native: bool = False,
+        type_name: str | None = None,
         **kwargs: Any,
     ) -> None:
         if not (isinstance(enum_cls, type) and issubclass(enum_cls, enum.Enum)):
@@ -1658,6 +1737,20 @@ class EnumField(Field[Any], Generic[_TEnum]):
         self.enum_cls = enum_cls
         sample = next(iter(enum_cls)).value
         self._is_string = isinstance(sample, str)
+        # ``native=True`` opts into PostgreSQL's ``CREATE TYPE ... AS ENUM``
+        # column type. The migration must create the type itself
+        # (``CreatePGEnum`` operation) before the column is added — the
+        # field merely emits the type name as the ``db_type``.
+        self.native = bool(native)
+        if self.native and not self._is_string:
+            raise ValidationError(
+                "EnumField(native=True) requires a string-valued enum — "
+                "PostgreSQL ENUM types are textual under the hood."
+            )
+        self.type_name = (
+            type_name
+            or f"{enum_cls.__name__.lower()}_enum"
+        )
         if self._is_string:
             longest = max(len(m.value) for m in enum_cls)
             self.max_length = max_length if max_length is not None else max(
@@ -1709,6 +1802,13 @@ class EnumField(Field[Any], Generic[_TEnum]):
             return value
 
     def db_type(self, connection) -> str:
+        # ``native=True`` only takes effect on PostgreSQL; other
+        # backends fall through to the default VARCHAR mapping so the
+        # same model class compiles against SQLite/MySQL with no
+        # schema change required.
+        vendor = getattr(connection, "vendor", "sqlite")
+        if self.native and vendor == "postgresql":
+            return f'"{self.type_name}"'
         if self._is_string:
             return f"VARCHAR({self.max_length})"
         # Integer enums; ``BIGINT``-sized values are fine in INTEGER on

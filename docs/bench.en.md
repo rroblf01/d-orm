@@ -38,17 +38,17 @@ Flags:
 Environment:
 
 - Python 3.14.4, Linux x86_64, in-process SQLite
-- djanorm 3.3.0, Django 6.0.4, SQLAlchemy 2.0.49, Tortoise ORM 1.1.7
+- djanorm 4.0.0, Django 6.0.4, SQLAlchemy 2.0.49, Tortoise ORM 1.1.7
 - 5 repeats × 1000 operations per scenario; values reported are the
   **median microseconds per operation**.
 
 | Scenario | dorm | django | sqlalchemy | tortoise |
 |---|---|---|---|---|
-| `bulk_insert` | **1.6 µs/op** | 9.9 µs/op | 24.1 µs/op | 2.8 µs/op |
-| `list_first_n` | **3.9 µs/op** | 4.4 µs/op | 5.2 µs/op | 6.2 µs/op |
-| `filter_count` | **90.1 µs/op** | 244.5 µs/op | 179.8 µs/op | 180.5 µs/op |
-| `get_by_pk` | **61.2 µs/op** | 190.6 µs/op | 161.9 µs/op | 159.8 µs/op |
-| `insert_one` | 121.5 µs/op | 190.0 µs/op | 294.0 µs/op | **94.0 µs/op** |
+| `bulk_insert` | **1.5 µs/op** | 8.0 µs/op | 23.8 µs/op | 2.6 µs/op |
+| `list_first_n` | **3.5 µs/op** | 4.4 µs/op | 5.5 µs/op | 6.9 µs/op |
+| `filter_count` | **89.4 µs/op** | 243.6 µs/op | 202.0 µs/op | 204.2 µs/op |
+| `get_by_pk` | **62.2 µs/op** | 182.4 µs/op | 172.4 µs/op | 157.4 µs/op |
+| `insert_one` | 117.7 µs/op | 175.2 µs/op | 262.8 µs/op | **86.6 µs/op** |
 
 dorm wins 4/5 scenarios. Tortoise wins `insert_one` (individual
 commits) by a small margin; the order of magnitude matches.

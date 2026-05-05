@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     pass
@@ -1454,6 +1454,487 @@ class DetachPartition(Operation):
 
     def describe(self) -> str:
         return f"Detach partition {self.name} from {self.parent}"
+
+
+# ── Zero-downtime / online operations ──────────────────────────────────────────
+
+
+class AddFieldOnline(Operation):
+    """Zero-downtime ``ADD COLUMN`` on PostgreSQL.
+
+    The standard :class:`AddField` operation can rewrite the entire
+    table when the new column is ``NOT NULL`` with a non-volatile
+    default, which on a billion-row table means hours of downtime.
+    This variant splits the work into three atomic steps that each
+    finish in milliseconds and never hold a long lock:
+
+    1. ``ALTER TABLE ... ADD COLUMN <name> <type> NULL``
+    2. (optional) caller-driven backfill of the new column in
+       chunks — typically driven by :class:`BackfillBatch` in a
+       follow-up migration.
+    3. ``ALTER TABLE ... ALTER COLUMN <name> SET NOT NULL`` once the
+       backfill is complete and verified, plus optional
+       ``ADD CHECK (col IS NOT NULL) NOT VALID`` followed by
+       ``VALIDATE CONSTRAINT`` — both metadata-only locks on
+       PG ≥ 12.
+
+    Use ``set_not_null_now=False`` (default) to leave step 3 to a
+    later migration; the field stays nullable after the operation
+    even if the model declares it ``null=False``. The state graph
+    is updated to match the model's eventual shape regardless, so
+    the autodetector's idea of the schema stays correct.
+
+    On non-PG backends the op falls back to the standard
+    :class:`AddField` behaviour — there is no portable equivalent
+    of "concurrent" DDL.
+    """
+
+    reversible = True
+
+    def __init__(
+        self,
+        model_name: str,
+        name: str,
+        field: Any,
+        *,
+        set_not_null_now: bool = False,
+        preserve_default: bool = True,
+    ) -> None:
+        self.model_name = model_name
+        self.name = name
+        self.field = field
+        self.set_not_null_now = set_not_null_now
+        self.preserve_default = preserve_default
+
+    def state_forwards(self, app_label: str, state) -> None:
+        key = f"{app_label}.{self.model_name.lower()}"
+        if key in state.models:
+            state.models[key]["fields"][self.name] = self.field
+
+    def _resolve_table(self, app_label: str, state) -> str:
+        model_state = state.models.get(
+            f"{app_label}.{self.model_name.lower()}", {}
+        )
+        return (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        table = self._resolve_table(app_label, to_state)
+
+        # Step 1: add the column nullable, regardless of the model's
+        # eventual ``null=`` value. Forces no rewrite on PG and is
+        # the only form SQLite accepts at all (``ALTER TABLE ... ADD
+        # COLUMN NOT NULL`` is rejected without a DEFAULT).
+        original_null = getattr(self.field, "null", False)
+        try:
+            self.field.null = True
+            col_sql = _field_to_column_sql(self.name, self.field, connection)
+        finally:
+            self.field.null = original_null
+        connection.execute_script(
+            f'ALTER TABLE "{table}" ADD COLUMN {col_sql}'
+        )
+
+        if vendor != "postgresql":
+            # Step 3 is PG-only — other backends handle the
+            # eventual NOT NULL via SetNotNullOnline (which falls
+            # back to a plain ALTER) or stay nullable.
+            return
+
+        # Step 3 (optional immediate): only run when caller asks for
+        # it AND the eventual model declared NOT NULL.
+        if self.set_not_null_now and not original_null:
+            column = getattr(self.field, "column", None) or self.name
+            connection.execute_script(
+                f'ALTER TABLE "{table}" '
+                f'ALTER COLUMN "{column}" SET NOT NULL'
+            )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        table = self._resolve_table(app_label, from_state)
+        column = getattr(self.field, "column", None) or self.name
+        connection.execute_script(
+            f'ALTER TABLE "{table}" DROP COLUMN "{column}"'
+        )
+
+    def describe(self) -> str:
+        return f"Add field {self.name} to {self.model_name} (online, nullable first)"
+
+    def __repr__(self) -> str:
+        return (
+            f"AddFieldOnline(model_name={self.model_name!r}, "
+            f"name={self.name!r}, set_not_null_now={self.set_not_null_now!r})"
+        )
+
+
+class BackfillBatch(Operation):
+    """Run a column backfill in fixed-size batches inside short
+    transactions, advancing by primary key. Intended as the second
+    step of the zero-downtime ``AddFieldOnline`` recipe.
+
+    Usage::
+
+        BackfillBatch(
+            table="orders",
+            update_sql='UPDATE "orders" SET "status_v2" = "status" '
+                       'WHERE "id" BETWEEN %s AND %s AND "status_v2" IS NULL',
+            pk_column="id",
+            batch_size=10_000,
+        )
+
+    Each iteration claims one batch via the PK range, runs the SQL,
+    commits, and advances. Lock duration is bounded by the batch
+    size, not the table size — safe to run against a primary
+    serving live traffic.
+    """
+
+    reversible = True
+
+    def __init__(
+        self,
+        table: str,
+        *,
+        update_sql: str,
+        pk_column: str = "id",
+        batch_size: int = 10_000,
+        sleep_seconds: float = 0.0,
+        max_batches: int | None = None,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        if sleep_seconds < 0:
+            raise ValueError("sleep_seconds must be >= 0")
+        self.table = table
+        self.update_sql = update_sql
+        self.pk_column = pk_column
+        self.batch_size = batch_size
+        self.sleep_seconds = sleep_seconds
+        self.max_batches = max_batches
+
+    def state_forwards(self, app_label: str, state) -> None:
+        # Pure data migration — no state mutation.
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        import time as _time
+
+        rows = connection.execute(
+            f'SELECT MIN("{self.pk_column}") AS lo, MAX("{self.pk_column}") AS hi '
+            f'FROM "{self.table}"'
+        )
+        if not rows:
+            return
+        row = rows[0]
+        lo = row.get("lo") if isinstance(row, dict) else row[0]
+        hi = row.get("hi") if isinstance(row, dict) else row[1]
+        if lo is None or hi is None:
+            return
+
+        batches = 0
+        start = int(lo)
+        end_pk = int(hi)
+        while start <= end_pk:
+            stop = start + self.batch_size - 1
+            connection.execute_write(self.update_sql, [start, stop])
+            try:
+                connection.commit()
+            except Exception:
+                pass
+            start = stop + 1
+            batches += 1
+            if self.max_batches is not None and batches >= self.max_batches:
+                break
+            if self.sleep_seconds > 0:
+                _time.sleep(self.sleep_seconds)
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        # Backfills don't have a generic inverse — the caller is
+        # responsible for issuing a compensating ``RunSQL`` in the
+        # reverse direction if one exists.
+        pass
+
+    def describe(self) -> str:
+        return (
+            f"Backfill {self.table} in batches of {self.batch_size} "
+            f"by {self.pk_column}"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"BackfillBatch(table={self.table!r}, batch_size={self.batch_size})"
+        )
+
+
+class SetNotNullOnline(Operation):
+    """Promote a previously-nullable column to ``NOT NULL`` without a
+    full table rewrite.
+
+    On PostgreSQL ≥ 12 the recipe is::
+
+        ALTER TABLE t ADD CONSTRAINT chk CHECK (col IS NOT NULL) NOT VALID;
+        ALTER TABLE t VALIDATE CONSTRAINT chk;
+        ALTER TABLE t ALTER COLUMN col SET NOT NULL;
+        ALTER TABLE t DROP CONSTRAINT chk;
+
+    The CHECK constraint without ``VALID`` adopts in O(1) — no scan;
+    ``VALIDATE CONSTRAINT`` does the row-by-row check but holds only
+    a ``SHARE UPDATE EXCLUSIVE`` lock (won't block readers/writers).
+    The final ``SET NOT NULL`` is metadata-only because PG ≥ 12
+    consults the validated CHECK and skips the rewrite.
+
+    On non-PG backends, falls back to a plain
+    ``ALTER COLUMN SET NOT NULL`` which IS a rewrite. Document the
+    expected impact when targeting MySQL/SQLite.
+    """
+
+    reversible = True
+
+    def __init__(
+        self,
+        model_name: str,
+        column: str,
+    ) -> None:
+        self.model_name = model_name
+        self.column = column
+
+    def state_forwards(self, app_label: str, state) -> None:
+        # The state already reflects ``null=False``; this op only
+        # synchronises the database side.
+        pass
+
+    def _resolve_table(self, app_label: str, state) -> str:
+        model_state = state.models.get(
+            f"{app_label}.{self.model_name.lower()}", {}
+        )
+        return (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        table = self._resolve_table(app_label, to_state)
+        constraint = f"chk_{table}_{self.column}_notnull"
+
+        if vendor != "postgresql":
+            connection.execute_script(
+                f'ALTER TABLE "{table}" '
+                f'ALTER COLUMN "{self.column}" SET NOT NULL'
+            )
+            return
+
+        connection.execute_script(
+            f'ALTER TABLE "{table}" ADD CONSTRAINT "{constraint}" '
+            f'CHECK ("{self.column}" IS NOT NULL) NOT VALID'
+        )
+        connection.execute_script(
+            f'ALTER TABLE "{table}" VALIDATE CONSTRAINT "{constraint}"'
+        )
+        connection.execute_script(
+            f'ALTER TABLE "{table}" '
+            f'ALTER COLUMN "{self.column}" SET NOT NULL'
+        )
+        connection.execute_script(
+            f'ALTER TABLE "{table}" DROP CONSTRAINT "{constraint}"'
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        table = self._resolve_table(app_label, from_state)
+        connection.execute_script(
+            f'ALTER TABLE "{table}" '
+            f'ALTER COLUMN "{self.column}" DROP NOT NULL'
+        )
+
+    def describe(self) -> str:
+        return f"SET NOT NULL on {self.model_name}.{self.column} (online)"
+
+    def __repr__(self) -> str:
+        return f"SetNotNullOnline({self.model_name!r}, {self.column!r})"
+
+
+# ── PostgreSQL native ENUM types ───────────────────────────────────────────────
+
+
+class CreatePGEnum(Operation):
+    """Create a PostgreSQL ``CREATE TYPE ... AS ENUM`` type.
+
+    Pair with :class:`~dorm.fields.EnumField` set to ``native=True``
+    so the column references the type name instead of falling back
+    to ``VARCHAR``. The migration order matters: emit
+    :class:`CreatePGEnum` *before* the :class:`AddField` /
+    :class:`CreateModel` that uses the enum.
+
+    Example::
+
+        operations = [
+            CreatePGEnum("status_enum", ["active", "archived", "deleted"]),
+            CreateModel(
+                name="Article",
+                fields=[
+                    ("status", dorm.EnumField(Status, native=True)),
+                    ...
+                ],
+            ),
+        ]
+
+    Backwards: drops the type. Fails if any column still references
+    it — drop the column first.
+
+    Non-PG backends are no-ops; the field's ``db_type`` falls back
+    to VARCHAR so the column DDL still emits cleanly.
+    """
+
+    reversible = True
+
+    def __init__(self, name: str, values: list[str]) -> None:
+        if not values:
+            raise ValueError("CreatePGEnum requires at least one value")
+        for v in values:
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"CreatePGEnum values must be strings; got {type(v).__name__}"
+                )
+        self.name = name
+        self.values = list(values)
+
+    def state_forwards(self, app_label: str, state) -> None:
+        # Pure schema-side op — no model state to mutate.
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        quoted = ", ".join(
+            "'" + v.replace("'", "''") + "'" for v in self.values
+        )
+        connection.execute_script(
+            f'CREATE TYPE "{self.name}" AS ENUM ({quoted})'
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(f'DROP TYPE IF EXISTS "{self.name}"')
+
+    def describe(self) -> str:
+        return f"Create PG enum type {self.name}"
+
+    def __repr__(self) -> str:
+        return f"CreatePGEnum({self.name!r}, {self.values!r})"
+
+
+class DropPGEnum(Operation):
+    """Drop a PostgreSQL ``ENUM`` type. Reverse direction recreates
+    it from *reverse_values* (required for reversibility)."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        reverse_values: list[str] | None = None,
+    ) -> None:
+        self.name = name
+        self.reverse_values = list(reverse_values or [])
+        self.reversible = bool(self.reverse_values)
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(f'DROP TYPE IF EXISTS "{self.name}"')
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if not self.reverse_values:
+            raise NotImplementedError(
+                f"DropPGEnum({self.name!r}) is irreversible — no "
+                "reverse_values supplied."
+            )
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        quoted = ", ".join(
+            "'" + v.replace("'", "''") + "'" for v in self.reverse_values
+        )
+        connection.execute_script(
+            f'CREATE TYPE "{self.name}" AS ENUM ({quoted})'
+        )
+
+    def describe(self) -> str:
+        return f"Drop PG enum type {self.name}"
+
+
+class AddPGEnumValue(Operation):
+    """``ALTER TYPE … ADD VALUE`` — append a new label to a PG enum.
+
+    Notable PG quirk: ``ADD VALUE`` cannot run inside a transaction
+    block on PG ≤ 11. The migration runner already commits between
+    operations, so this only matters if you wrap the migration in
+    your own atomic context manually."""
+
+    reversible = False  # ALTER TYPE ... DROP VALUE doesn't exist on PG.
+
+    def __init__(self, type_name: str, value: str, *, before: str | None = None) -> None:
+        if not isinstance(value, str):
+            raise ValueError("AddPGEnumValue value must be a string")
+        self.type_name = type_name
+        self.value = value
+        self.before = before
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        v = "'" + self.value.replace("'", "''") + "'"
+        sql = f'ALTER TYPE "{self.type_name}" ADD VALUE IF NOT EXISTS {v}'
+        if self.before:
+            b = "'" + self.before.replace("'", "''") + "'"
+            sql += f" BEFORE {b}"
+        connection.execute_script(sql)
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        # PG has no ``ALTER TYPE ... DROP VALUE``; the only way back
+        # is to drop and recreate the entire type, which loses any
+        # rows referencing the value being removed. Document the
+        # irreversibility loud and clear.
+        raise NotImplementedError(
+            "AddPGEnumValue cannot be reversed — PostgreSQL has no "
+            "DROP VALUE syntax. Recreate the type from scratch via "
+            "DropPGEnum + CreatePGEnum if you really need to remove a "
+            "value, and migrate every column referencing it first."
+        )
+
+    def describe(self) -> str:
+        return f"Add value {self.value!r} to PG enum {self.type_name}"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
