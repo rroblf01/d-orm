@@ -239,8 +239,9 @@ jobs:
           cd pytest-djanorm && uv build
       - name: Smoke install + import
         run: |
-          uv pip install ./dist/*.whl ./djanorm-mypy/dist/*.whl ./pytest-djanorm/dist/*.whl
-          uv run python -c "import djanorm_mypy; import pytest_djanorm; print('siblings ok')"
+          uv venv /tmp/siblings
+          uv pip install --python /tmp/siblings/bin/python ./dist/*.whl ./djanorm-mypy/dist/*.whl ./pytest-djanorm/dist/*.whl
+          /tmp/siblings/bin/python -c "import djanorm_mypy; import pytest_djanorm; print('siblings ok')"
 
   # 4.0 release smoke test — confirm wheel build + installed import
   # surface the right version. Catches release-engineering regressions
