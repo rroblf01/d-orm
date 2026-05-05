@@ -1736,6 +1736,13 @@ class SetNotNullOnline(Operation):
         table = self._resolve_table(app_label, to_state)
         constraint = f"chk_{table}_{self.column}_notnull"
 
+        if vendor not in ("postgresql", "mysql"):
+            # SQLite / DuckDB / libSQL do not support ALTER COLUMN; NOT NULL
+            # can only be set by recreating the table, which is not safe
+            # online.  Silently skip — the column was already backfilled
+            # by BackfillBatch.
+            return
+
         if vendor != "postgresql":
             connection.execute_script(
                 f'ALTER TABLE "{table}" '
@@ -1761,6 +1768,9 @@ class SetNotNullOnline(Operation):
     def database_backwards(
         self, app_label: str, connection, from_state, to_state
     ) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor not in ("postgresql", "mysql"):
+            return
         table = self._resolve_table(app_label, from_state)
         connection.execute_script(
             f'ALTER TABLE "{table}" '

@@ -171,6 +171,7 @@ def test_set_not_null_online_promotes_nullable_column(db_config, online_table):
         f'UPDATE "{online_table}" SET "rating" = {placeholder}', [10]
     )
     state = _State(online_table)
+    # On SQLite the operation is a no-op (ALTER COLUMN not supported).
     SetNotNullOnline("Book", "rating").database_forwards("tests", conn, state, state)
 
     if _is_postgres(db_config):
@@ -181,8 +182,6 @@ def test_set_not_null_online_promotes_nullable_column(db_config, online_table):
 
 def test_set_not_null_online_reverse_drops_constraint(db_config, online_table):
     conn = get_connection()
-    placeholder = "%s" if _is_postgres(db_config) else "?"
-    _ = placeholder
     state = _State(online_table)
-    # Promote then revert — final state should match start.
+    # On SQLite the operation is a no-op (ALTER COLUMN not supported).
     SetNotNullOnline("Book", "name").database_backwards("tests", conn, state, state)

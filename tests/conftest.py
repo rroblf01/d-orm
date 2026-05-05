@@ -13,28 +13,15 @@ import sqlite3
 from dorm.db.connection import reset_connections
 
 
-# Worker crashes on Python 3.14 under ``pytest -n 4`` come back as
-# ``[gwN] node down: Not properly terminated`` with no Python
-# traceback. The interpreter aborts at the C level (psycopg + libpq
-# + asyncio cross-loop pool teardown is the prime suspect on the
-# FastAPI TestClient tests). Writing ``faulthandler`` output to
-# ``sys.stderr`` doesn't help because xdist captures worker stderr
-# through a pipe and the buffer is lost when the worker dies before
-# drain — so we route the native trace to a per-worker file under
-# ``$DORM_FAULT_DIR`` (default ``/tmp/dorm-faults``). The CI step
-# that runs after the suite can ``cat`` those files to surface the C
-# stack in the log. Opt-out via ``DORM_DISABLE_FAULTHANDLER=1``.
+# Route faulthandler output to a per-process file under
+# ``$DORM_FAULT_DIR`` (default ``/tmp/dorm-faults``) so C-level
+# crashes surface a native stack trace in the CI log.
+# Opt-out via ``DORM_DISABLE_FAULTHANDLER=1``.
 if not os.environ.get("DORM_DISABLE_FAULTHANDLER"):
     _fault_dir = os.environ.get("DORM_FAULT_DIR", "/tmp/dorm-faults")
     try:
         os.makedirs(_fault_dir, exist_ok=True)
-        # ``PYTEST_XDIST_WORKER`` is set per worker (``gw0`` / ``gw1`` /
-        # ...). When running outside xdist it's unset — fall back to
-        # the pid so two parallel ``pytest`` invocations don't collide.
-        _worker_id = os.environ.get("PYTEST_XDIST_WORKER") or f"pid-{os.getpid()}"
-        _fault_path = os.path.join(_fault_dir, f"{_worker_id}.log")
-        # Open in line-buffered append mode so concurrent workers don't
-        # truncate each other's traces on a re-run.
+        _fault_path = os.path.join(_fault_dir, f"pid-{os.getpid()}.log")
         _fault_fp = open(_fault_path, "a", buffering=1)
         faulthandler.enable(file=_fault_fp, all_threads=True)
     except OSError:
@@ -98,19 +85,13 @@ def _backends() -> list[str]:
     return backends
 
 
-def _shared_admin_dsn(tmp_path_factory, worker_id: str) -> dict:
-    """Return *admin* DSN info for a Postgres instance shared across xdist workers.
+def _shared_admin_dsn(tmp_path_factory) -> dict:
+    """Return *admin* DSN info for a Postgres instance.
 
     Sources, in preference order:
       1. CI env vars DORM_TEST_POSTGRES_HOST/_PORT/_USER/_PASSWORD/_DB.
-      2. A single testcontainers Postgres started by whichever xdist worker
-         arrives first; subsequent workers read its connection info from a
-         file in the *per-pytest-run* tmp dir (so the file doesn't leak
-         across pytest invocations and point at a dead container).
-
-    The previous behaviour of one container per worker consistently raced
-    docker into killing 3 of 4 containers under ``pytest -n 4`` — only one
-    survived, leaving the other workers waiting forever.
+      2. A testcontainers Postgres whose connection info is cached in
+         the per-pytest-run tmp dir (so it doesn't leak across runs).
     """
     if _ci_postgres_available():
         return {
@@ -121,100 +102,59 @@ def _shared_admin_dsn(tmp_path_factory, worker_id: str) -> dict:
             "base_db": os.environ.get("DORM_TEST_POSTGRES_DB", "postgres"),
         }
 
-    # Resolve a tmp dir that is shared between xdist workers of the SAME
-    # pytest run, but NOT across pytest invocations.
-    #   - master mode: getbasetemp() is `pytest-N/`. Use it directly.
-    #   - xdist worker: getbasetemp() is `pytest-N/popen-gwK/`. Its parent
-    #     (`pytest-N/`) is shared with sibling workers.
-    bt = tmp_path_factory.getbasetemp()
-    shared_root = bt if worker_id == "master" else bt.parent
+    shared_root = tmp_path_factory.getbasetemp()
     info_file = shared_root / "shared_pg.json"
-    lock_path = shared_root / "shared_pg.lock"
 
-    import fcntl
+    if info_file.exists():
+        return json.loads(info_file.read_text())
 
-    fh = open(str(lock_path), "a+")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    from testcontainers.postgres import PostgresContainer
 
-        if info_file.exists():
-            return json.loads(info_file.read_text())
+    pg = PostgresContainer("postgres:16-alpine")
+    pg.start()
+    pg._connect()
 
-        # First worker: spawn the container. Don't wrap in `with` — we need
-        # it alive past this fixture's exit. testcontainers' ryuk sidecar
-        # cleans it up at session end. Bump max_connections so xdist
-        # workers leaving stale conns across event-loop transitions don't
-        # exhaust the server (default 100 is tight for 4 workers × pools).
-        from testcontainers.postgres import PostgresContainer
-
-        pg = PostgresContainer("postgres:16-alpine")
-        pg.with_command(["postgres", "-c", "max_connections=500"])
-        pg.start()
-        # PostgresContainer.start() returns when the docker container is
-        # running, but PG may still be initializing internally. _connect()
-        # polls `psql -c 'select version();'` until it succeeds.
-        pg._connect()
-
-        info = {
-            "host": pg.get_container_host_ip(),
-            "port": int(pg.get_exposed_port(5432)),
-            "user": pg.username,
-            "password": pg.password,
-            "base_db": pg.dbname,
-        }
-        info_file.write_text(json.dumps(info))
-        return info
-    finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        fh.close()
+    info = {
+        "host": pg.get_container_host_ip(),
+        "port": int(pg.get_exposed_port(5432)),
+        "user": pg.username,
+        "password": pg.password,
+        "base_db": pg.dbname,
+    }
+    info_file.write_text(json.dumps(info))
+    return info
 
 
-def _shared_minio_endpoint(tmp_path_factory, worker_id: str) -> dict:
-    """Return endpoint info for a MinIO instance shared across xdist workers.
+def _shared_minio_endpoint(tmp_path_factory) -> dict:
+    """Return endpoint info for a MinIO instance.
 
-    Mirrors :func:`_shared_admin_dsn`'s pattern: the first worker to
-    arrive starts a single ``MinioContainer`` and writes its
-    coordinates to a tmp-dir-shared JSON file; subsequent workers read
-    the file. testcontainers' ryuk sidecar tears the container down at
-    session end. Bucket-level isolation between tests / workers is the
-    fixture's responsibility — not this function's.
+    Starts a ``MinioContainer`` and caches its coordinates in the
+    per-pytest-run tmp dir. testcontainers' ryuk sidecar tears the
+    container down at session end.
     """
-    bt = tmp_path_factory.getbasetemp()
-    shared_root = bt if worker_id == "master" else bt.parent
+    shared_root = tmp_path_factory.getbasetemp()
     info_file = shared_root / "shared_minio.json"
-    lock_path = shared_root / "shared_minio.lock"
 
-    import fcntl
+    if info_file.exists():
+        return json.loads(info_file.read_text())
 
-    fh = open(str(lock_path), "a+")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    from testcontainers.minio import MinioContainer
 
-        if info_file.exists():
-            return json.loads(info_file.read_text())
-
-        from testcontainers.minio import MinioContainer
-
-        # Pin to a known-good tag so a future MinIO release doesn't
-        # silently change the API surface tests rely on. Bump
-        # deliberately when reviewing changelogs.
-        minio = MinioContainer(image="minio/minio:RELEASE.2025-04-22T22-12-26Z")
-        minio.start()
-        # ``MinioContainer`` exposes the API on port 9000 and the web
-        # console on 9001; we only need the API for boto3.
-        host = minio.get_container_host_ip()
-        api_port = int(minio.get_exposed_port(9000))
-        info = {
-            "endpoint_url": f"http://{host}:{api_port}",
-            "access_key": minio.access_key,
-            "secret_key": minio.secret_key,
-            "region_name": "us-east-1",
-        }
-        info_file.write_text(json.dumps(info))
-        return info
-    finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        fh.close()
+    # Pin to a known-good tag so a future MinIO release doesn't
+    # silently change the API surface tests rely on. Bump
+    # deliberately when reviewing changelogs.
+    minio = MinioContainer(image="minio/minio:RELEASE.2025-04-22T22-12-26Z")
+    minio.start()
+    host = minio.get_container_host_ip()
+    api_port = int(minio.get_exposed_port(9000))
+    info = {
+        "endpoint_url": f"http://{host}:{api_port}",
+        "access_key": minio.access_key,
+        "secret_key": minio.secret_key,
+        "region_name": "us-east-1",
+    }
+    info_file.write_text(json.dumps(info))
+    return info
 
 
 def _wait_for_minio(
@@ -256,8 +196,8 @@ def _wait_for_minio(
 
 
 @pytest.fixture(scope="session")
-def minio_endpoint(tmp_path_factory, worker_id):
-    """Session-scoped MinIO endpoint shared across xdist workers.
+def minio_endpoint(tmp_path_factory):
+    """Session-scoped MinIO endpoint.
 
     Skips the requesting test when Docker / boto3 / testcontainers'
     MinIO module aren't available — same gating philosophy as the
@@ -269,7 +209,7 @@ def minio_endpoint(tmp_path_factory, worker_id):
             "testcontainers[minio]. Install with `pip install "
             "'djanorm[dev,s3]'` and start Docker."
         )
-    info = _shared_minio_endpoint(tmp_path_factory, worker_id)
+    info = _shared_minio_endpoint(tmp_path_factory)
     _wait_for_minio(info["endpoint_url"], info["access_key"], info["secret_key"])
     return info
 
@@ -294,25 +234,15 @@ def _wait_for_postgres(host, port, user, password, timeout: float = 30.0) -> Non
 
 
 @pytest.fixture(scope="session", params=_backends(), ids=_backends())
-def db_config(request, tmp_path_factory, worker_id):
-    """Yield a DATABASES dict for each available backend.
-
-    For PostgreSQL, **one** Postgres instance is shared across all xdist
-    workers; each worker gets its own database (named after PYTEST_XDIST_WORKER)
-    so parallel suites don't trample each other.
-    """
+def db_config(request, tmp_path_factory):
+    """Yield a DATABASES dict for each available backend."""
     if request.param == "sqlite":
         yield {"ENGINE": "sqlite", "NAME": _db_path}
         return
 
     if request.param == "mysql":
-        # Per-worker database isolation, same shape Postgres uses.
-        # MySQL doesn't have an admin db distinct from user dbs, so
-        # we connect to the configured base db and ``CREATE DATABASE``
-        # for each worker.
-        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
         base_db = os.environ.get("DORM_TEST_MYSQL_DB", "mysql")
-        worker_db = f"dorm_test_{worker}" if worker != "main" else base_db
+        worker_db = "dorm_test"
 
         import pymysql
 
@@ -341,12 +271,10 @@ def db_config(request, tmp_path_factory, worker_id):
         }
         return
 
-    admin = _shared_admin_dsn(tmp_path_factory, worker_id)
+    admin = _shared_admin_dsn(tmp_path_factory)
     _wait_for_postgres(admin["host"], admin["port"], admin["user"], admin["password"])
 
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
-    base_db = admin["base_db"]
-    worker_db = f"dorm_test_{worker}" if worker != "main" else base_db
+    worker_db = "dorm_test"
 
     import psycopg
     from psycopg import sql
@@ -372,11 +300,8 @@ def db_config(request, tmp_path_factory, worker_id):
         "PASSWORD": admin["password"],
         "HOST": admin["host"],
         "PORT": admin["port"],
-        # 4 xdist workers × 10 (default) = 40 active conns; with both sync
-        # and async pool plus the admin conn we used for CREATE DATABASE,
-        # we get close to PG's default max_connections=100. Cap tightly so
-        # cross-worker xdist runs don't exhaust the server when leftover
-        # connections from failed tests leak.
+        # Cap pool size so leftover connections from failed tests don't
+        # exhaust the server.
         "MIN_POOL_SIZE": 1,
         "MAX_POOL_SIZE": 3,
     }
@@ -416,8 +341,7 @@ def clean_db(configure_dorm):
     *next* test calls ``reset_connections()`` — and on Python 3.14 +
     ``psycopg_pool``, the GC sometimes reaches the lingering pool
     BEFORE the next test starts, runs ``__del__`` against an already-
-    closing session loop, and takes the xdist worker down with a
-    SIGSEGV.
+    closing session loop, and takes the process down with a SIGSEGV.
 
     The yield-based shape gives us the post-test hook we need: drain
     every async pool's libpq sockets synchronously so ``__del__`` is
@@ -476,7 +400,7 @@ def clean_db(configure_dorm):
     # test. Without this, an async pool can survive into the next test;
     # on Python 3.14 the GC sometimes reaches it BEFORE
     # ``reset_connections`` does, finalises against a session loop in an
-    # inconsistent state, and SIGSEGVs the xdist worker.
+    # inconsistent state, and SIGSEGVs the process.
     from dorm.db.connection import _async_connections
 
     for async_conn in list(_async_connections.values()):
