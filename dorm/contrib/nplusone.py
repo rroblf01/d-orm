@@ -275,8 +275,58 @@ async def adetect(
         yield detector
 
 
+def install_debug_global() -> NPlusOneDetector | None:
+    """Activate a long-lived :class:`NPlusOneDetector` when
+    ``settings.DEBUG_NPLUSONE`` is set.
+
+    Reads ``settings.DEBUG_NPLUSONE``:
+
+    - ``False`` / unset → no-op, returns ``None``.
+    - ``True`` / ``"log"`` → install a detector in log-only mode.
+    - ``"raise"`` → install a detector that raises
+      :class:`NPlusOneError` the first time a template crosses the
+      threshold.
+
+    The threshold can be overridden via
+    ``settings.DEBUG_NPLUSONE_THRESHOLD`` (default 10). Returns the
+    detector so the caller can inspect ``.findings`` from a
+    debug-mode endpoint.
+
+    Idempotent — repeat calls return the previously-installed detector
+    instead of stacking new ones.
+    """
+    global _GLOBAL_DEBUG_DETECTOR
+
+    if _GLOBAL_DEBUG_DETECTOR is not None:
+        return _GLOBAL_DEBUG_DETECTOR
+
+    try:
+        from ..conf import settings
+
+        mode = getattr(settings, "DEBUG_NPLUSONE", False)
+        threshold = int(getattr(settings, "DEBUG_NPLUSONE_THRESHOLD", 10))
+    except Exception:
+        return None
+
+    if not mode:
+        return None
+    raise_on_detect = (
+        isinstance(mode, str) and mode.strip().lower() == "raise"
+    )
+    detector = NPlusOneDetector(
+        threshold=threshold, raise_on_detect=raise_on_detect
+    )
+    detector.__enter__()  # connect the signal receiver, never exit
+    _GLOBAL_DEBUG_DETECTOR = detector
+    return detector
+
+
+_GLOBAL_DEBUG_DETECTOR: NPlusOneDetector | None = None
+
+
 __all__ = [
     "NPlusOneDetector",
+    "install_debug_global",
     "NPlusOneError",
     "adetect",
     "assert_no_nplusone",

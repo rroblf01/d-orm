@@ -180,11 +180,25 @@ class MigrationExecutor:
                 fake_initial=fake_initial,
             )
 
-    def rollback(self, app_label: str, migrations_dir: str | Path, target: str) -> None:
+    def rollback(
+        self,
+        app_label: str,
+        migrations_dir: str | Path,
+        target: str,
+        *,
+        dry_run: bool = False,
+    ) -> list[tuple[str, list]] | None:
         """Roll back applied migrations until *target* is the latest applied.
 
         *target* can be a full migration name (``"0002_add_email"``), a numeric
         prefix (``"0002"`` or ``2``), or ``"zero"`` to undo every migration.
+
+        When ``dry_run=True``, no SQL hits the database — every
+        :meth:`Operation.database_backwards` call is intercepted by a
+        capturing connection and the recorded ``(sql, params)`` tuples
+        are returned. Useful as a pre-deploy diff: see exactly what the
+        rollback would execute, audit it, then re-run without
+        ``dry_run`` once happy.
         """
         migrations_dir = Path(migrations_dir)
         with _migration_lock(self.connection):
@@ -194,7 +208,9 @@ class MigrationExecutor:
             all_migs = self._sorted(app_label)
             applied = self._applied_names(app_label)
             target_num = self._resolve_target_num(target, all_migs, app_label)
-            self._rollback_to(app_label, all_migs, applied, target_num)
+            return self._rollback_to(
+                app_label, all_migs, applied, target_num, dry_run=dry_run
+            )
 
     def migrate_to(self, app_label: str, migrations_dir: str | Path, target: str) -> None:
         """Go to *target*, applying or rolling back migrations as needed.
@@ -415,7 +431,9 @@ class MigrationExecutor:
         all_migs: list,
         applied: set[str],
         target_num: int,
-    ) -> None:
+        *,
+        dry_run: bool = False,
+    ) -> list[tuple[str, list]] | None:
         to_rollback = sorted(
             [
                 (num, name, mod) for num, name, mod in all_migs
@@ -427,11 +445,15 @@ class MigrationExecutor:
         if not to_rollback:
             if self.verbosity:
                 print(f"  Nothing to rollback for '{app_label}'.")
-            return
+            return [] if dry_run else None
+
+        captured: list[tuple[str, list]] = []
+        capture_conn = _DryRunConnection(self.connection) if dry_run else None
 
         for number, name, module in to_rollback:
             if self.verbosity:
-                print(f"  Unapplying {app_label}.{name}...", end=" ")
+                kind = "Would unapply" if dry_run else "Unapplying"
+                print(f"  {kind} {app_label}.{name}...", end=" ")
 
             # to_state = state BEFORE this migration (where we return to)
             to_state = ProjectState()
@@ -449,10 +471,30 @@ class MigrationExecutor:
             # Same atomicity guarantee as forward apply: rollbacks must
             # not be partially committed. If op M of N fails in
             # ``database_backwards``, the surrounding transaction is rolled
-            # back so the schema state matches the recorder.
-            with self.connection.atomic():
+            # back so the schema state matches the recorder. Dry-run
+            # never touches the recorder or opens a real transaction.
+            if dry_run and capture_conn is not None:
                 for op in reversed(getattr(module, "operations", [])):
-                    op.database_backwards(app_label, self.connection, from_state, to_state)
-                self.recorder.record_unapplied(app_label, name)
+                    try:
+                        op.database_backwards(
+                            app_label, capture_conn, from_state, to_state
+                        )
+                    except Exception as exc:
+                        # Capture failures inline so the rest of the
+                        # rollback plan still emits — partial visibility
+                        # beats nothing when the user is debugging.
+                        captured.append(
+                            (f"-- {type(op).__name__} capture failed: {exc}", [])
+                        )
+                captured.extend(capture_conn.captured)
+                capture_conn.captured = []
+            else:
+                with self.connection.atomic():
+                    for op in reversed(getattr(module, "operations", [])):
+                        op.database_backwards(app_label, self.connection, from_state, to_state)
+                    self.recorder.record_unapplied(app_label, name)
             if self.verbosity:
                 print("OK")
+        if dry_run:
+            return captured
+        return None

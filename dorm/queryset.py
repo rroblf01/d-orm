@@ -621,6 +621,24 @@ class QuerySet(Generic[_T]):
             qs._query.selected_related_fields[relation] = kept
         return qs
 
+    def lookup(self, column: str | None = None) -> Any:
+        """Shortcut for ``__in=Subquery(qs.values("col"))``.
+
+        Turns a queryset into a scalar subquery that's ready to plug
+        into an ``IN`` filter on the outer query::
+
+            top10 = Article.objects.order_by("-score")[:10]
+            comments = Comment.objects.filter(article_id__in=top10.lookup("pk"))
+
+        Without *column*, the wrapped queryset's existing SELECT
+        clause is reused — pre-call ``.values(...)`` if it isn't
+        already projecting a single column.
+        """
+        from .expressions import Subquery
+
+        qs = self.values(column) if column else self
+        return Subquery(qs)
+
     def values(self, *fields: str) -> QuerySet[Any]:
         qs: QuerySet[Any] = QuerySet(self.model, self._db)  # type: ignore[arg-type]
         qs._query = self._query.clone()

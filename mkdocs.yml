@@ -91,6 +91,7 @@ plugins:
             Lag-aware read routing: Read routing con lag
             Framework-agnostic helpers: Helpers framework-agnósticos
             Release notes: Release notes
+            What's new in 4.2: Novedades 4.2
             What's new in 4.1: Novedades 4.1
             What's new in 4.0: Novedades 4.0
             Upgrading from 3.3 to 4.0: Subiendo de 3.3 a 4.0
@@ -171,6 +172,7 @@ nav:
       - Lag-aware read routing: lag-router.md
       - Framework-agnostic helpers: helpers.md
   - Release notes:
+      - What's new in 4.2: v4_2.md
       - What's new in 4.1: v4_1.md
       - What's new in 4.0: v4_0.md
       - Upgrading from 3.3 to 4.0: upgrading-to-4.0.md

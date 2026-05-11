@@ -144,34 +144,88 @@ def _iter_rows(source: Any, chunk_size: int) -> Iterator[Any]:
     yield from iter(source)
 
 
-def stream_json(source: Any, *, chunk_size: int = 1000) -> Iterator[bytes]:
+def _resolve_model(source: Any) -> Any | None:
+    """Best-effort: pull the ``Model`` out of a QuerySet / Manager-like
+    *source*. Returns ``None`` when *source* is a plain iterable."""
+    model = getattr(source, "model", None)
+    if model is not None:
+        return model
+    qs = getattr(source, "get_queryset", None)
+    if callable(qs):
+        return getattr(qs(), "model", None)
+    return None
+
+
+def _maybe_mask(row_dict: dict[str, Any], model_cls: Any | None) -> dict[str, Any]:
+    """Apply :func:`dorm.contrib.pii.mask_dict` when the source carries
+    a Model class. No-op for plain iterables."""
+    if model_cls is None:
+        return row_dict
+    from .pii import mask_dict
+
+    return mask_dict(model_cls, row_dict)
+
+
+def stream_json(
+    source: Any, *, chunk_size: int = 1000, mask_pii: bool = False
+) -> Iterator[bytes]:
     """Yield bytes of a single ``[{...}, {...}]`` JSON array.
 
     Suitable for clients that expect a JSON document; the encoded
     bytes are streamed comma-separated so memory stays flat.
+
+    Args:
+        source: a :class:`~dorm.QuerySet`, a ``Manager``, or any
+            iterable of dict-/Model-shaped rows.
+        chunk_size: rows per round-trip when *source* exposes
+            ``iterator()``.
+        mask_pii: when True, fields flagged ``pii=True`` on the source
+            model are replaced with the masked sentinel before
+            serialisation (uses :func:`dorm.contrib.pii.mask_dict`).
+            Silently no-op for sources that don't carry a model
+            (``model`` attribute missing).
     """
+    model_cls = _resolve_model(source) if mask_pii else None
     yield b"["
     first = True
     for row in _iter_rows(source, chunk_size):
         sep = b"" if first else b","
         first = False
-        yield sep + _dump(_row_to_dict(row)).encode("utf-8")
+        payload = _row_to_dict(row)
+        if mask_pii:
+            payload = _maybe_mask(payload, model_cls)
+        yield sep + _dump(payload).encode("utf-8")
     yield b"]"
 
 
-def stream_jsonl(source: Any, *, chunk_size: int = 1000) -> Iterator[bytes]:
-    """Yield newline-delimited JSON. One full record per line."""
+def stream_jsonl(
+    source: Any, *, chunk_size: int = 1000, mask_pii: bool = False
+) -> Iterator[bytes]:
+    """Yield newline-delimited JSON. One full record per line.
+
+    See :func:`stream_json` for the ``mask_pii`` semantics.
+    """
+    model_cls = _resolve_model(source) if mask_pii else None
     for row in _iter_rows(source, chunk_size):
-        yield _dump(_row_to_dict(row)).encode("utf-8") + b"\n"
+        payload = _row_to_dict(row)
+        if mask_pii:
+            payload = _maybe_mask(payload, model_cls)
+        yield _dump(payload).encode("utf-8") + b"\n"
 
 
-def stream_ndjson_pretty(source: Any, *, chunk_size: int = 1000) -> Iterator[bytes]:
+def stream_ndjson_pretty(
+    source: Any, *, chunk_size: int = 1000, mask_pii: bool = False
+) -> Iterator[bytes]:
     """Yield indented JSON records, one record per multi-line block.
 
     Use for ``less``-grade human inspection only — the format is not
     a valid JSONL document for downstream parsers."""
+    model_cls = _resolve_model(source) if mask_pii else None
     for row in _iter_rows(source, chunk_size):
-        yield _dump(_row_to_dict(row), indent=2).encode("utf-8") + b"\n"
+        payload = _row_to_dict(row)
+        if mask_pii:
+            payload = _maybe_mask(payload, model_cls)
+        yield _dump(payload, indent=2).encode("utf-8") + b"\n"
 
 
 def stream_csv(
@@ -260,22 +314,34 @@ async def _aiter_rows(source: Any, chunk_size: int) -> AsyncIterator[Any]:
 
 
 async def astream_json(
-    source: Any, *, chunk_size: int = 1000
+    source: Any, *, chunk_size: int = 1000, mask_pii: bool = False
 ) -> AsyncIterator[bytes]:
+    """Async ``[{...}, {...}]`` JSON stream.
+
+    See :func:`stream_json` for the ``mask_pii`` semantics.
+    """
+    model_cls = _resolve_model(source) if mask_pii else None
     yield b"["
     first = True
     async for row in _aiter_rows(source, chunk_size):
         sep = b"" if first else b","
         first = False
-        yield sep + _dump(_row_to_dict(row)).encode("utf-8")
+        payload = _row_to_dict(row)
+        if mask_pii:
+            payload = _maybe_mask(payload, model_cls)
+        yield sep + _dump(payload).encode("utf-8")
     yield b"]"
 
 
 async def astream_jsonl(
-    source: Any, *, chunk_size: int = 1000
+    source: Any, *, chunk_size: int = 1000, mask_pii: bool = False
 ) -> AsyncIterator[bytes]:
+    model_cls = _resolve_model(source) if mask_pii else None
     async for row in _aiter_rows(source, chunk_size):
-        yield _dump(_row_to_dict(row)).encode("utf-8") + b"\n"
+        payload = _row_to_dict(row)
+        if mask_pii:
+            payload = _maybe_mask(payload, model_cls)
+        yield _dump(payload).encode("utf-8") + b"\n"
 
 
 async def astream_csv(

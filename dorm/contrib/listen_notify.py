@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from ..db.connection import get_async_connection, get_connection
 
@@ -174,9 +174,147 @@ async def listen(*channels: str, using: str = "default"):
             await cm.__aexit__(None, None, None)
 
 
+class Broadcaster:
+    """Multiplexer for LISTEN/NOTIFY: one dedicated connection,
+    many in-process subscribers.
+
+    The standalone :func:`listen` helper pins a connection to a single
+    iterator — fine for one consumer per channel, awkward when many
+    async tasks want to react to the same PG event. The broadcaster
+    keeps a single LISTEN connection open for the lifetime of the
+    process (or context) and fans every arriving notification out
+    across an :class:`asyncio.Queue` per subscription.
+
+    Usage::
+
+        from dorm.contrib.listen_notify import Broadcaster
+
+        async def task_a(bcast):
+            async with bcast.subscribe("orders") as queue:
+                async for n in queue:
+                    handle_a(n.payload)
+
+        async def main():
+            async with Broadcaster(["orders"]) as bcast:
+                await asyncio.gather(
+                    task_a(bcast), task_b(bcast), task_c(bcast)
+                )
+
+    Each subscriber gets its own queue: a slow consumer can lag
+    without dropping notifications for the others. Queue overflow is
+    bounded by ``maxsize`` (default 100) — older items are discarded
+    once full so memory pressure stays predictable; emit a NOTIFY
+    that re-syncs from authoritative state if your protocol requires
+    every event.
+    """
+
+    def __init__(
+        self,
+        channels: list[str],
+        *,
+        using: str = "default",
+        maxsize: int = 100,
+    ) -> None:
+        if not channels:
+            raise ValueError("Broadcaster requires at least one channel")
+        if maxsize < 1:
+            raise ValueError("maxsize must be >= 1")
+        self._channels = list(channels)
+        self._using = using
+        self._maxsize = maxsize
+        # ``_subs`` maps channel → list of subscriber queues. Mutation
+        # under ``_lock`` so subscribe/unsubscribe doesn't race the
+        # dispatcher task.
+        self._subs: dict[str, list[asyncio.Queue[Notification]]] = {
+            ch: [] for ch in channels
+        }
+        self._lock = asyncio.Lock()
+        self._listen_ctx: Any = None
+        self._listen_channel: _ListenChannel | None = None
+        self._dispatcher_task: asyncio.Task[None] | None = None
+        self._started = False
+
+    async def __aenter__(self) -> "Broadcaster":
+        self._listen_ctx = listen(*self._channels, using=self._using)
+        self._listen_channel = await self._listen_ctx.__aenter__()
+        self._started = True
+
+        async def _dispatch() -> None:
+            assert self._listen_channel is not None
+            async for n in self._listen_channel:
+                async with self._lock:
+                    queues = list(self._subs.get(n.channel, ()))
+                for q in queues:
+                    if q.full():
+                        try:
+                            q.get_nowait()
+                        except asyncio.QueueEmpty:  # pragma: no cover
+                            pass
+                    q.put_nowait(n)
+
+        self._dispatcher_task = asyncio.create_task(_dispatch())
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._dispatcher_task is not None:
+            self._dispatcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._dispatcher_task
+        if self._listen_ctx is not None:
+            await self._listen_ctx.__aexit__(exc_type, exc, tb)
+        # Notify any remaining subscribers via sentinel so their
+        # iterators terminate cleanly instead of hanging forever.
+        # Queues hold Notification, so we cast the sentinel via Any to
+        # bypass the type-checker — the iterator detects ``is None``
+        # and raises StopAsyncIteration.
+        async with self._lock:
+            for queues in self._subs.values():
+                for q in queues:
+                    with contextlib.suppress(Exception):
+                        sentinel: Any = None
+                        q.put_nowait(sentinel)
+
+    @contextlib.asynccontextmanager
+    async def subscribe(self, channel: str):
+        """Subscribe to *channel*. Yields an async iterator that
+        yields :class:`Notification` instances and terminates when the
+        broadcaster shuts down."""
+        if channel not in self._subs:
+            raise KeyError(
+                f"Broadcaster: channel {channel!r} not registered "
+                f"(known: {sorted(self._subs)})"
+            )
+        queue: asyncio.Queue[Notification] = asyncio.Queue(self._maxsize)
+        async with self._lock:
+            self._subs[channel].append(queue)
+        try:
+            yield _SubscriberStream(queue)
+        finally:
+            async with self._lock:
+                try:
+                    self._subs[channel].remove(queue)
+                except ValueError:  # pragma: no cover
+                    pass
+
+
+class _SubscriberStream:
+    def __init__(self, queue: "asyncio.Queue[Notification]") -> None:
+        self._queue = queue
+
+    def __aiter__(self) -> "_SubscriberStream":
+        return self
+
+    async def __anext__(self) -> Notification:
+        item = await self._queue.get()
+        if item is None:  # broadcaster shutdown sentinel
+            raise StopAsyncIteration
+        return item
+
+
 __all__ = [
     "Notification",
     "listen",
     "notify",
     "anotify",
+    "Broadcaster",
 ]

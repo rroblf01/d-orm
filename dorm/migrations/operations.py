@@ -1784,6 +1784,263 @@ class SetNotNullOnline(Operation):
         return f"SetNotNullOnline({self.model_name!r}, {self.column!r})"
 
 
+class MakeTableAppendOnly(Operation):
+    """Install a trigger that blocks ``UPDATE`` and ``DELETE`` on
+    *table*, turning it into an append-only audit log.
+
+    On PostgreSQL the recipe is::
+
+        CREATE FUNCTION <table>_block_mod() RETURNS TRIGGER ...;
+        CREATE TRIGGER <table>_block_mod_trg
+            BEFORE UPDATE OR DELETE ON <table>
+            FOR EACH ROW EXECUTE FUNCTION <table>_block_mod();
+
+    The trigger raises an exception with SQLSTATE ``P0001`` when a
+    ``UPDATE`` / ``DELETE`` reaches it, propagating as a dorm
+    ``IntegrityError`` at the application layer. Use on
+    ``@track_history`` sibling tables and any other immutable audit
+    log.
+
+    On SQLite a comparable trigger is supported (``RAISE(ABORT, ...)``).
+    On MySQL / DuckDB the operation is a no-op with a warning logged
+    at migration time — no portable append-only trigger.
+
+    Args:
+        table: physical table name to protect.
+        allow_delete: when True, only block UPDATE (still allow DELETE
+            — useful for log-retention policies).
+    """
+
+    reversible = True
+
+    def __init__(self, table: str, *, allow_delete: bool = False) -> None:
+        self.table = table
+        self.allow_delete = allow_delete
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def _names(self) -> tuple[str, str]:
+        return (
+            f"{self.table}_block_mod",
+            f"{self.table}_block_mod_trg",
+        )
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        fn_name, trg_name = self._names()
+        events = "UPDATE" if self.allow_delete else "UPDATE OR DELETE"
+        if vendor == "postgresql":
+            connection.execute_script(
+                f"""CREATE OR REPLACE FUNCTION "{fn_name}"() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'table "{self.table}" is append-only — TG_OP=% blocked', TG_OP
+        USING ERRCODE = 'P0001';
+END;
+$$ LANGUAGE plpgsql"""
+            )
+            connection.execute_script(
+                f'DROP TRIGGER IF EXISTS "{trg_name}" ON "{self.table}"'
+            )
+            connection.execute_script(
+                f'CREATE TRIGGER "{trg_name}" '
+                f'BEFORE {events} ON "{self.table}" '
+                f'FOR EACH ROW EXECUTE FUNCTION "{fn_name}"()'
+            )
+            return
+        if vendor in ("sqlite", "libsql"):
+            triggers = [("update", "UPDATE")]
+            if not self.allow_delete:
+                triggers.append(("delete", "DELETE"))
+            for suffix, event in triggers:
+                tname = f"{trg_name}_{suffix}"
+                connection.execute_script(f'DROP TRIGGER IF EXISTS "{tname}"')
+                connection.execute_script(
+                    f'CREATE TRIGGER "{tname}" '
+                    f'BEFORE {event} ON "{self.table}" '
+                    f"BEGIN "
+                    f"SELECT RAISE(ABORT, 'table {self.table} is append-only'); "
+                    f"END"
+                )
+            return
+        import logging
+        logging.getLogger("dorm.migrations").warning(
+            "MakeTableAppendOnly: vendor %r has no portable trigger — "
+            "skipping. Use a database-level check or application-level "
+            "enforcement.",
+            vendor,
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        fn_name, trg_name = self._names()
+        if vendor == "postgresql":
+            connection.execute_script(
+                f'DROP TRIGGER IF EXISTS "{trg_name}" ON "{self.table}"'
+            )
+            connection.execute_script(
+                f'DROP FUNCTION IF EXISTS "{fn_name}"()'
+            )
+            return
+        if vendor in ("sqlite", "libsql"):
+            for suffix in ("update", "delete"):
+                connection.execute_script(
+                    f'DROP TRIGGER IF EXISTS "{trg_name}_{suffix}"'
+                )
+            return
+
+    def describe(self) -> str:
+        return f"Make {self.table} append-only"
+
+    def __repr__(self) -> str:
+        return f"MakeTableAppendOnly({self.table!r}, allow_delete={self.allow_delete!r})"
+
+
+class AlterColumnTypeOnline(Operation):
+    """``ALTER COLUMN ... TYPE`` with a bounded lock window.
+
+    PostgreSQL's ``ALTER TABLE ... ALTER COLUMN ... TYPE`` acquires an
+    ``ACCESS EXCLUSIVE`` lock and may rewrite the entire table when the
+    type cast isn't binary-coercible. This op wraps the ALTER in a
+    short transaction with ``SET LOCAL lock_timeout`` so the
+    operation aborts quickly under contention rather than queueing
+    behind every reader — the caller can retry during a quieter
+    window.
+
+    For type changes that PG can do without rewrite (e.g.
+    ``VARCHAR(10) → VARCHAR(50)``, ``INTEGER → BIGINT``), the lock is
+    released in milliseconds. For rewrite-requiring changes, the
+    bounded lock means the operation fails fast rather than blocking
+    indefinitely.
+
+    For genuinely large rewrites that won't fit in the lock budget,
+    use the manual "shadow column" recipe (add new column, backfill,
+    swap names, drop old) — :class:`AddFieldOnline` +
+    :class:`BackfillBatch` + a follow-up ``RunSQL`` cover the steps.
+
+    Args:
+        model_name: Model whose column is being altered.
+        column: column name to alter.
+        new_type: the target SQL type (e.g. ``"BIGINT"``,
+            ``"VARCHAR(120)"``).
+        using: optional ``USING <expr>`` clause for the cast. Defaults
+            to ``"<column>::<new_type>"`` on PG.
+        lock_timeout: ``SET LOCAL lock_timeout`` value. Default ``"5s"``.
+        old_type: previous SQL type, required when the operation must
+            be reversible (mirror the forward cast).
+        old_using: optional reverse ``USING`` expression.
+
+    PostgreSQL-only — every other backend raises
+    :class:`NotImplementedError` because ``ALTER COLUMN TYPE`` is not
+    portable.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        column: str,
+        new_type: str,
+        *,
+        using: str | None = None,
+        lock_timeout: str = "5s",
+        old_type: str | None = None,
+        old_using: str | None = None,
+    ) -> None:
+        if not new_type:
+            raise ValueError("AlterColumnTypeOnline requires new_type")
+        self.model_name = model_name
+        self.column = column
+        self.new_type = new_type
+        self.using = using
+        self.lock_timeout = lock_timeout
+        self.old_type = old_type
+        self.old_using = old_using
+        self.reversible = old_type is not None
+
+    def _resolve_table(self, app_label: str, state) -> str:
+        model_state = state.models.get(
+            f"{app_label}.{self.model_name.lower()}", {}
+        )
+        return (
+            model_state.get("options", {}).get("db_table")
+            or f"{app_label}_{self.model_name.lower()}"
+        )
+
+    def state_forwards(self, app_label: str, state) -> None:
+        # Pure DB-side op — model state already reflects the new
+        # field type (caller updates the field declaration).
+        pass
+
+    def _alter(
+        self,
+        connection,
+        table: str,
+        target_type: str,
+        using: str | None,
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            raise NotImplementedError(
+                "AlterColumnTypeOnline is PostgreSQL-only — "
+                "other backends do not support bounded-lock "
+                "ALTER COLUMN TYPE."
+            )
+        using_clause = (
+            f' USING ({using})' if using
+            else f' USING ("{self.column}"::{target_type})'
+        )
+        with connection.atomic():
+            connection.execute_script(
+                f"SET LOCAL lock_timeout = '{self.lock_timeout}'"
+            )
+            connection.execute_script(
+                f'ALTER TABLE "{table}" '
+                f'ALTER COLUMN "{self.column}" TYPE {target_type}'
+                f"{using_clause}"
+            )
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        self._alter(
+            connection,
+            self._resolve_table(app_label, to_state),
+            self.new_type,
+            self.using,
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if self.old_type is None:
+            raise NotImplementedError(
+                f"AlterColumnTypeOnline({self.model_name!r}, {self.column!r}) "
+                "is irreversible — supply old_type for a reversible "
+                "migration."
+            )
+        self._alter(
+            connection,
+            self._resolve_table(app_label, from_state),
+            self.old_type,
+            self.old_using,
+        )
+
+    def describe(self) -> str:
+        return (
+            f"Alter column type online on {self.model_name}.{self.column} "
+            f"→ {self.new_type}"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"AlterColumnTypeOnline({self.model_name!r}, {self.column!r}, "
+            f"{self.new_type!r})"
+        )
+
+
 # ── PostgreSQL native ENUM types ───────────────────────────────────────────────
 
 

@@ -158,6 +158,23 @@ class Func:
             params.extend(p)
         return f"{self.function}({', '.join(parts)})", params
 
+    def apply(self, func_cls: type["Func"], *extra: Any) -> "Func":
+        """Wrap this expression in another :class:`Func` subclass.
+
+        Useful for building short, fluent transformation chains
+        without nesting constructor calls::
+
+            F("name").apply(Lower).apply(Trim)
+            # ↓ equivalent to:
+            Trim(Lower(F("name")))
+
+        Extra positional arguments are passed to the wrapping
+        function's constructor — e.g.
+        ``F("name").apply(Substr, 1, 4)`` resolves to
+        ``Substr(F("name"), 1, 4)``.
+        """
+        return func_cls(self, *extra)
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({', '.join(repr(e) for e in self.expressions)})"
 

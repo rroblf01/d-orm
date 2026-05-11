@@ -525,11 +525,24 @@ def cmd_migrate(args):
             print(f"  No migrations directory for '{app}'. Run makemigrations first.")
             continue
         if target:
-            if dry_run:
-                print("  Error: --dry-run is not supported with a target.")
-                sys.exit(1)
             try:
-                executor.migrate_to(resolved_label, mig_dir, target)
+                if dry_run:
+                    captured = executor.rollback(
+                        resolved_label, mig_dir, target, dry_run=True
+                    )
+                    if captured:
+                        print(
+                            f"\n--- Rollback SQL that would run for '{app}' "
+                            f"(target={target}) ---"
+                        )
+                        for sql, params in captured:
+                            sql_print = sql.strip()
+                            print(f"\n{sql_print};")
+                            if params:
+                                print(f"  -- params: {params!r}")
+                        print()
+                else:
+                    executor.migrate_to(resolved_label, mig_dir, target)
             except ValueError as exc:
                 print(f"  Error: {exc}")
                 # Surface the failure through the CLI exit code so
@@ -1146,6 +1159,171 @@ def cmd_init(args):
     else:
         print("  2. Run: dorm makemigrations")
     print("  3. Run: dorm migrate")
+
+
+def cmd_migrations_graph(args):
+    """Render the migration dependency graph as Mermaid or DOT.
+
+    Walks every app's ``migrations/`` directory, reads each migration's
+    ``dependencies`` list, and emits one node per migration plus one
+    edge per declared dependency. Output goes to stdout — pipe through
+    the renderer of your choice::
+
+        dorm migrations-graph --format=mermaid > graph.mmd
+        dorm migrations-graph --format=dot | dot -Tpng -o graph.png
+    """
+    fmt = (args.format or "mermaid").lower()
+    if fmt not in {"mermaid", "dot"}:
+        print(f"Unknown --format={fmt!r}; expected 'mermaid' or 'dot'.", file=sys.stderr)
+        sys.exit(2)
+
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    from .conf import settings
+
+    if not settings._configured:
+        _load_settings(settings_mod)
+
+    # Collect (app_label, migration_name, dependencies) tuples by
+    # scanning every INSTALLED_APPS' ``migrations/`` directory.
+    nodes: list[tuple[str, str]] = []
+    edges: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    for app in settings.INSTALLED_APPS:
+        try:
+            mig_dir = _find_migrations_dir(app)
+        except Exception:
+            continue
+        if not mig_dir.exists():
+            continue
+        app_label = _resolve_app_label(app)
+        for mig_path in sorted(mig_dir.glob("*.py")):
+            if mig_path.name.startswith("_"):
+                continue
+            name = mig_path.stem
+            nodes.append((app_label, name))
+            # Read the module's ``dependencies`` list via AST to avoid
+            # importing migration modules (which would require fully
+            # set-up apps).
+            import ast
+
+            try:
+                tree = ast.parse(mig_path.read_text())
+            except Exception:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, ast.Name) and tgt.id == "dependencies":
+                            value = node.value
+                            if isinstance(value, (ast.List, ast.Tuple)):
+                                for item in value.elts:
+                                    if (
+                                        isinstance(item, (ast.Tuple, ast.List))
+                                        and len(item.elts) == 2
+                                    ):
+                                        first = item.elts[0]
+                                        second = item.elts[1]
+                                        if (
+                                            isinstance(first, ast.Constant)
+                                            and isinstance(second, ast.Constant)
+                                            and isinstance(first.value, str)
+                                            and isinstance(second.value, str)
+                                        ):
+                                            edges.append(
+                                                (
+                                                    (app_label, name),
+                                                    (first.value, second.value),
+                                                )
+                                            )
+
+    if fmt == "mermaid":
+        print("graph TD")
+        for app, name in nodes:
+            node_id = f"{app}__{name}".replace("-", "_")
+            print(f'    {node_id}["{app}.{name}"]')
+        for (a_app, a_name), (b_app, b_name) in edges:
+            a = f"{a_app}__{a_name}".replace("-", "_")
+            b = f"{b_app}__{b_name}".replace("-", "_")
+            print(f"    {b} --> {a}")
+        return
+
+    # DOT
+    print("digraph migrations {")
+    print("    rankdir=LR;")
+    for app, name in nodes:
+        nid = f'"{app}.{name}"'
+        print(f"    {nid};")
+    for (a_app, a_name), (b_app, b_name) in edges:
+        print(f'    "{b_app}.{b_name}" -> "{a_app}.{a_name}";')
+    print("}")
+
+
+def cmd_reset(args):
+    """Drop every applied migration and re-apply them from scratch.
+
+    ``dorm reset`` is shorthand for ``dorm migrate zero`` followed by
+    ``dorm migrate``. Useful during development when the model graph
+    diverges far enough that hand-rolling a migration is more work
+    than nuking the database.
+
+    Refuses to run when ``settings.DEBUG`` is False (or when the
+    target alias name doesn't look like a dev/test database — the
+    safety net is intentional). Pass ``--force`` to override.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
+    _load_settings(settings_mod)
+    from .conf import settings
+
+    if not args.force:
+        # Refuse against anything that smells like production.
+        debug = bool(getattr(settings, "DEBUG", False))
+        alias = "default"
+        db_settings = settings.DATABASES.get(alias, {})
+        name = str(db_settings.get("NAME", "")).lower()
+        host = str(db_settings.get("HOST", "")).lower()
+        looks_safe = (
+            debug
+            or "test" in name
+            or "dev" in name
+            or name in (":memory:", "")
+            or host in ("", "localhost", "127.0.0.1")
+        )
+        if not looks_safe:
+            print(
+                "Refusing to reset: target doesn't look like a dev/test "
+                "database. Pass --force to override (irrecoverable).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    # Re-use cmd_migrate's plumbing by emitting fake args via
+    # ``argparse.Namespace`` — typed attribute access keeps the
+    # type-checker happy without resorting to a bespoke shim class.
+    import argparse as _argparse
+
+    cmd_migrate(
+        _argparse.Namespace(
+            settings=args.settings,
+            app_label=None,
+            target="zero",
+            fake=False,
+            fake_initial=False,
+            dry_run=False,
+            sync_db=False,
+        )
+    )
+    cmd_migrate(
+        _argparse.Namespace(
+            settings=args.settings,
+            app_label=None,
+            target=None,
+            fake=False,
+            fake_initial=False,
+            dry_run=False,
+            sync_db=False,
+        )
+    )
 
 
 def cmd_inspectdb(args):
@@ -1778,7 +1956,12 @@ def cmd_flush(args):
 
 
 def cmd_sqlmigrate(args):
-    """Render the SQL a migration would run, without applying it."""
+    """Render the SQL a migration would run, without applying it.
+
+    Captures the real DDL/DML each :class:`Operation` would emit via
+    the dry-run connection, so the output is the exact statement the
+    migration runner would send to the database.
+    """
     sys.path.insert(0, os.getcwd())
     settings_mod = args.settings or os.environ.get("DORM_SETTINGS", "settings")
     _load_settings(settings_mod)
@@ -1788,7 +1971,9 @@ def cmd_sqlmigrate(args):
     _load_apps(installed)
 
     from .db.connection import get_connection
+    from .migrations.executor import _DryRunConnection
     from .migrations.loader import MigrationLoader
+    from .migrations.state import ProjectState
 
     conn = get_connection()
     app_module = _resolve_app_module(args.app_label, installed)
@@ -1810,11 +1995,49 @@ def cmd_sqlmigrate(args):
     if args.backwards:
         ops = list(reversed(ops))
     print(f"-- {app_label}.{args.name} ({'backwards' if args.backwards else 'forwards'})")
+
+    # Re-play prior migrations into ProjectState so the target migration
+    # sees the same model state it would at runtime. Each prior op's
+    # ``state_forwards`` is fired with no DB side-effect.
+    state = ProjectState()
+    prior = [
+        (mod_label, mig_name, mig_module)
+        for mig_app, migs in loader.migrations.items()
+        for (mod_label, mig_name, mig_module) in migs
+    ]
+    for mod_label, mig_name, mig_module in prior:
+        if mod_label == app_label and mig_name == args.name:
+            break
+        for op in getattr(mig_module, "operations", []):
+            try:
+                op.state_forwards(mod_label, state)
+            except Exception:
+                # State-only replay shouldn't crash on unfamiliar ops.
+                pass
+
+    dry = _DryRunConnection(conn)
     for op in ops:
-        # Each op exposes ``describe()`` for human-readable text;
-        # the actual SQL emitter (``_run_capture``) is internal —
-        # show describe + class name for now.
         print(f"-- {type(op).__name__}: {op.describe()}")
+        from_state = state
+        to_state = state.clone() if hasattr(state, "clone") else state
+        try:
+            if args.backwards:
+                op.database_backwards(app_label, dry, from_state, to_state)
+            else:
+                op.database_forwards(app_label, dry, from_state, to_state)
+        except Exception as exc:
+            print(f"-- (capture failed: {type(exc).__name__}: {exc})")
+            continue
+        try:
+            op.state_forwards(app_label, state)
+        except Exception:
+            pass
+    for sql, params in dry.captured:
+        rendered = sql.rstrip().rstrip(";")
+        if params:
+            print(f"{rendered}; -- params: {params}")
+        else:
+            print(f"{rendered};")
 
 
 def cmd_diff(args):
@@ -2628,6 +2851,40 @@ def main():
         help="DATABASES alias to introspect (default: 'default').",
     )
     isp.set_defaults(func=cmd_inspectdb)
+
+    # migrations-graph
+    mg_graph = sub.add_parser(
+        "migrations-graph",
+        help=(
+            "Render the migration dependency graph in Mermaid or DOT "
+            "format. Useful for spotting branched / orphan migrations."
+        ),
+    )
+    mg_graph.add_argument("--settings", default=None)
+    mg_graph.add_argument(
+        "--format",
+        choices=("mermaid", "dot"),
+        default="mermaid",
+        help="Output format. Default 'mermaid'.",
+    )
+    mg_graph.set_defaults(func=cmd_migrations_graph)
+
+    # reset (DEV ONLY)
+    rst = sub.add_parser(
+        "reset",
+        help=(
+            "Drop every applied migration and re-apply them from scratch. "
+            "Refuses to run against production-looking DATABASES — pass "
+            "--force to override."
+        ),
+    )
+    rst.add_argument("--settings", default=None)
+    rst.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the safety check that blocks resets against non-dev DBs.",
+    )
+    rst.set_defaults(func=cmd_reset)
 
     # doctor
     doc = sub.add_parser(

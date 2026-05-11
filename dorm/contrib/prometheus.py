@@ -32,6 +32,7 @@ loop. Apps that need richer / configurable buckets should swap to
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
@@ -147,8 +148,18 @@ def _label_pairs(**labels: str) -> str:
     return "{" + ",".join(parts) + "}"
 
 
+_pool_saturation_log = logging.getLogger("dorm.contrib.prometheus.pool")
+
+
 def _pool_lines() -> list[str]:
-    """Best-effort poll of every active sync alias's pool stats."""
+    """Best-effort poll of every active sync alias's pool stats.
+
+    Also emits a saturation gauge (``pool_in_use / pool_max``, in
+    ``[0, 1]``) and logs a WARNING when an alias crosses
+    ``settings.POOL_SATURATION_WARN`` (default 0.8) so ops dashboards
+    catch capacity pressure before the pool starts rejecting
+    checkouts.
+    """
     lines: list[str] = []
     try:
         from ..db.connection import _sync_connections, pool_stats
@@ -157,8 +168,19 @@ def _pool_lines() -> list[str]:
     aliases = list(_sync_connections.keys())
     if not aliases:
         return lines
+    try:
+        from ..conf import settings as _settings
+
+        warn_threshold = float(getattr(_settings, "POOL_SATURATION_WARN", 0.8))
+    except Exception:
+        warn_threshold = 0.8
     lines.append("# HELP dorm_pool_size Connections currently open in the pool.")
     lines.append("# TYPE dorm_pool_size gauge")
+    lines.append(
+        "# HELP dorm_pool_saturation Pool utilisation as fraction "
+        "(in_use / max_size). 1.0 = fully saturated."
+    )
+    lines.append("# TYPE dorm_pool_saturation gauge")
     for alias in aliases:
         try:
             stats = pool_stats(alias)
@@ -176,6 +198,28 @@ def _pool_lines() -> list[str]:
             lines.append(
                 f"dorm_pool_in_use{_label_pairs(alias=alias)} {in_use}"
             )
+        # Saturation: in_use / pool_max. ``pool_max`` is the configured
+        # ceiling, not the currently-open count, so the ratio stays
+        # meaningful even when the pool is still warming.
+        pool_max = stats.get("max_size") or stats.get("pool_max")
+        if pool_max:
+            try:
+                saturation = float(in_use or 0) / float(pool_max)
+            except (TypeError, ZeroDivisionError):
+                saturation = 0.0
+            lines.append(
+                f"dorm_pool_saturation{_label_pairs(alias=alias)} {saturation:.3f}"
+            )
+            if saturation >= warn_threshold:
+                _pool_saturation_log.warning(
+                    "pool %r is %.0f%% saturated (>%.0f%% threshold); "
+                    "in_use=%s max=%s",
+                    alias,
+                    saturation * 100.0,
+                    warn_threshold * 100.0,
+                    in_use,
+                    pool_max,
+                )
     return lines
 
 

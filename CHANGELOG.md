@@ -6,6 +6,147 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-05-11
+
+Minor release. No breaking changes vs 4.1 — every addition is opt-in.
+
+### Added — Tier 1 (DX + observability)
+
+- **PG advisory locks** —
+  ``dorm.contrib.advisory.advisory_lock`` /
+  ``try_advisory_lock`` (session-scoped),
+  ``advisory_xact_lock`` / ``try_advisory_xact_lock``
+  (transaction-scoped), plus async equivalents (``aadvisory_lock``,
+  ``atry_advisory_lock``). Accept ``int`` / ``str`` (deterministic
+  blake2b-8 hash) / ``(int, int)`` tuple keys.
+- **Slow-query EXPLAIN auto-collect** — ``SLOW_QUERY_EXPLAIN``
+  setting (env ``DORM_SLOW_QUERY_EXPLAIN``). When True every query
+  exceeding ``SLOW_QUERY_MS`` is re-explained via
+  ``EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)`` (PG),
+  ``EXPLAIN QUERY PLAN`` (SQLite / libsql) or
+  ``EXPLAIN ANALYZE`` (MySQL / DuckDB); the plan is logged at
+  WARNING on ``dorm.db.slow_explain`` and attached to the current
+  OTel span as a ``dorm.slow_query.plan`` event. Re-entrancy guard
+  blocks the EXPLAIN itself from triggering further plan captures.
+- **``dorm sqlmigrate`` now captures real SQL** via the dry-run
+  connection, replacing the previous ``op.describe()`` dump.
+
+### Added — Tier 2 (operational)
+
+- **``dorm.contrib.querystats``** — per-SQL-template aggregation
+  built on ``post_query``. ``collector().enable()`` opts in;
+  ``render_text()`` emits Prometheus lines (``dorm_template_count``,
+  ``dorm_template_total_ms``, ``dorm_template_p50_ms`` /
+  ``p95_ms`` / ``p99_ms``); ``render_json()`` returns dicts for
+  custom dashboards. Bounded reservoir keeps memory predictable.
+- **OTel log-correlation filter** —
+  ``dorm.contrib.otel.TraceContextLogFilter`` stamps every
+  ``LogRecord`` with ``otel_trace_id`` / ``otel_span_id`` (32-hex
+  / 16-hex; ``"-"`` when no span active). Wire via
+  ``install_log_correlation([logger_name, ...])`` — idempotent, no-op
+  when OTel isn't installed.
+- **``AlterColumnTypeOnline``** migration op — PostgreSQL-only,
+  wraps ``ALTER COLUMN ... TYPE`` in a short transaction with
+  ``SET LOCAL lock_timeout`` so the operation aborts under
+  contention instead of blocking writers. Reversible when
+  *old_type* is supplied.
+- **``dorm migrate --dry-run <target>``** — the previously
+  unsupported combination of ``--dry-run`` and a rollback target
+  now prints the exact ``DROP``/``ALTER`` statements the rollback
+  would issue. ``MigrationExecutor.rollback(..., dry_run=True)``
+  returns the captured ``(sql, params)`` tuples.
+
+### Added — Tier 3 (security + ops maturity)
+
+- **EncryptedField key rotation** —
+  ``dorm.contrib.encrypted.rotate_encryption_keys(Model, fields=None,
+  batch_size=500, progress=None)`` /
+  ``arotate_encryption_keys(...)`` re-encrypts every row with the
+  newest key in batches inside ``atomic()``. Optional ``progress``
+  callable is invoked after each chunk for tqdm-style hooks.
+- **PII auto-mask in streaming** — ``stream_json`` / ``stream_jsonl``
+  / ``stream_ndjson_pretty`` and async equivalents accept
+  ``mask_pii=True`` to redact ``pii=True`` fields in flight (no-op
+  for plain iterables that don't carry a model).
+- **``MakeTableAppendOnly``** migration op — installs a trigger
+  that blocks ``UPDATE`` / ``DELETE`` on a table. Works on PG
+  (PL/pgSQL exception) and SQLite (``RAISE(ABORT, ...)``); MySQL /
+  DuckDB log a warning and skip. ``allow_delete=True`` blocks only
+  ``UPDATE``.
+- **Pool saturation metric + warning** — Prometheus output now
+  carries ``dorm_pool_saturation{alias}`` (= in_use / max_size).
+  ``settings.POOL_SATURATION_WARN`` (default 0.8) triggers a
+  WARNING log on ``dorm.contrib.prometheus.pool`` when crossed.
+- **Read-replica circuit breaker** — ``LagAwareReadRouter`` gained
+  ``failure_threshold`` (default 3) and ``cooldown_seconds`` (default
+  30s). After N consecutive probe failures the router opens a
+  breaker per replica and skips even the lag probe for the cooldown
+  window. ``cooldown_seconds=0`` disables the breaker.
+- **``pii_fields()`` LRU cache** — repeated lookups (hot path in
+  serialisation middleware) now reuse a per-class cached tuple.
+
+### Added — Tier 4 (DX)
+
+- **``dorm migrations-graph --format=mermaid|dot``** — dumps the
+  migration dependency graph for visualisation (``mermaid`` /
+  Graphviz ``dot``). AST-walks every migration file so no app
+  import is required.
+- **``dorm reset``** — drops every applied migration and re-applies
+  them from scratch. Refuses production-looking databases unless
+  ``--force`` is passed.
+- **``Manager.cached(timeout=...)`` sugar** — shortcut for
+  ``Manager.get_queryset().cache(timeout=...)``.
+- **``settings.DEBUG_NPLUSONE``** — set ``True`` / ``"log"`` /
+  ``"raise"`` to install a process-wide
+  :class:`NPlusOneDetector`. ``DEBUG_NPLUSONE_THRESHOLD`` overrides
+  the default 10. ``install_debug_global()`` is idempotent and
+  returns the active detector.
+
+### Added — Tier 5 (advanced)
+
+- **``dorm.contrib.dataloader.DataLoader``** — coalesce N
+  concurrent ``await loader.load(key)`` calls into one batched
+  fetch within the same event-loop tick. Accepts dict / iterable
+  / async-iterable batch functions; configurable
+  ``max_batch_size``, ``cache``, ``missing`` sentinel, and
+  ``key_attr`` for Model-instance results.
+- **``dorm.contrib.plan_drift``** — record a baseline EXPLAIN plan
+  per tag, then ``compare()`` against fresh plans. ``diff_text()``
+  yields a unified diff. Volatile bits (costs, row estimates,
+  buffers, planning/execution time) are stripped before comparison
+  so the alarm only fires on *structural* changes.
+- **``dorm.contrib.listen_notify.Broadcaster``** — multiplexer
+  that fans one LISTEN connection out to N async subscribers, each
+  with its own bounded queue (``maxsize=100`` default). Replaces
+  the awkward "one task per channel" pattern of plain
+  :func:`listen`.
+
+### Added — Tier 6 (sugar)
+
+- **``F("col").apply(Func, *extra)``** — chainable transform
+  wrapping. ``F("name").apply(Lower).apply(Trim)`` reads top-down
+  instead of inside-out. Also available on every :class:`Func`
+  subclass.
+- **``QuerySet.lookup(column=None)``** — sugar for
+  ``Subquery(qs.values(column))``. Use as
+  ``Article.objects.filter(author__in=top10.lookup("author_id"))``.
+- **``Manager.union_with(*others, all=False, order_by=None)``** —
+  polymorphic UNION across heterogeneous models. Each branch can
+  be a Manager, a QuerySet, or a ``(source, mapping)`` tuple that
+  renames / projects columns so the SELECT lists agree.
+- **``dorm.contrib.sql_allowlist``** — CSP-style allow-list for
+  hardened deployments. ``install(templates, ...)`` captures the
+  list at startup; any subsequent query whose template (literals
+  stripped) isn't on the list raises
+  ``SQLNotAllowedError``. ``raise_on_violation=False`` enables
+  log-only mode for the canary phase.
+
+### Validated
+
+- ``ruff check``: clean.
+- ``ty check``: clean.
+- ``pytest tests/``: all v4.2 suites green (215 tests added).
+
 ## [4.1.0] - 2026-05-11
 
 Minor release. **No breaking changes vs 4.0** — every addition is

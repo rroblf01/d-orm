@@ -491,6 +491,84 @@ class BaseManager(Generic[_T]):
     ) -> int:
         return self.get_queryset().bulk_update_when(cases, default=default)
 
+    def union_with(
+        self,
+        *others: Any,
+        all: bool = False,
+        order_by: list[str] | None = None,
+    ) -> Any:
+        """Build a polymorphic UNION across this manager and *others*.
+
+        Each entry in *others* may be:
+
+        - another :class:`~dorm.Manager` — its default queryset is used.
+        - a :class:`~dorm.QuerySet` — used as-is.
+        - a ``(model_or_queryset, {"column": "expr_or_alias", ...})``
+          tuple — the mapping renames / projects columns so the
+          per-branch SELECT lists agree (UNION's only requirement).
+
+        ``all=True`` emits ``UNION ALL`` (keep duplicates, no dedupe
+        cost). ``order_by`` is appended on the outer query.
+
+        Returns a :class:`~dorm.queryset.CombinedQuerySet` whose
+        iteration yields plain dict rows — the original model class
+        identity is lost during UNION, so callers typically apply a
+        ``type_marker`` annotation per branch to tell the rows apart.
+        """
+        from .queryset import QuerySet
+
+        def _to_qs(source: Any) -> QuerySet[Any]:
+            if isinstance(source, QuerySet):
+                return source
+            # Manager-like — delegate to its default queryset.
+            getter = getattr(source, "get_queryset", None)
+            if callable(getter):
+                return getter()
+            raise TypeError(
+                "union_with: expected QuerySet, Manager, or "
+                f"(model_or_qs, mapping) tuple; got {type(source).__name__}"
+            )
+
+        branches: list[QuerySet[Any]] = [self.get_queryset()]
+        for other in others:
+            if (
+                isinstance(other, tuple)
+                and len(other) == 2
+                and isinstance(other[1], dict)
+            ):
+                source, mapping = other
+                qs = _to_qs(source)
+                projection = {
+                    target: expr if hasattr(expr, "as_sql") else expr
+                    for target, expr in mapping.items()
+                }
+                qs = qs.annotate(**projection).values(*projection.keys())
+                branches.append(qs)
+            else:
+                branches.append(_to_qs(other))
+
+        head = branches[0]
+        rest = branches[1:]
+        combined = head.union(*rest, all=all)
+        if order_by:
+            combined = combined.order_by(*order_by)
+        return combined
+
+    def cached(
+        self,
+        *,
+        timeout: int | None = None,
+        using: str = "default",
+    ):
+        """Sugar for ``self.get_queryset().cache(timeout=...)``.
+
+        Returns a fresh queryset whose first materialisation populates
+        the cache and whose subsequent materialisations re-use it.
+        Drop-in for ``Model.objects.cached(timeout=60)`` chains that
+        would otherwise read ``Model.objects.all().cache(timeout=60)``.
+        """
+        return self.get_queryset().cache(timeout=timeout, using=using)
+
     async def abulk_update_when(
         self,
         cases: list[tuple[Any, dict[str, Any]]],

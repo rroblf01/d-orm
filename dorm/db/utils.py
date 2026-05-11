@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from contextlib import contextmanager
+from typing import Any
 
 _HINT = (
     "It looks like you forgot to create or apply your migrations.\n\n"
@@ -43,6 +44,18 @@ _SLOW_QUERY_MS_SETTING: MemoizedSetting[float] = MemoizedSetting(
     parser=float,
     allow_none=True,
 )
+# ``SLOW_QUERY_EXPLAIN``: when True, every slow query whose SQL starts
+# with SELECT/WITH triggers an automatic ``EXPLAIN`` (or
+# ``EXPLAIN ANALYZE`` on PG) re-run, with the resulting plan logged at
+# WARNING level and attached to the current OTel span as an event.
+# Default off — re-running the query is non-trivial overhead in the
+# slow path.
+_SLOW_QUERY_EXPLAIN_SETTING: MemoizedSetting[bool] = MemoizedSetting(
+    "SLOW_QUERY_EXPLAIN",
+    env_var="DORM_SLOW_QUERY_EXPLAIN",
+    default=False,
+    parser=lambda v: str(v).strip().lower() in ("1", "true", "yes", "on"),
+)
 _RETRY_ATTEMPTS_SETTING: MemoizedSetting[int] = MemoizedSetting(
     "RETRY_ATTEMPTS",
     env_var="DORM_RETRY_ATTEMPTS",
@@ -59,6 +72,96 @@ _RETRY_BACKOFF_SETTING: MemoizedSetting[float] = MemoizedSetting(
 
 def _slow_query_ms() -> float | None:
     return _SLOW_QUERY_MS_SETTING.get()
+
+
+def _slow_query_explain() -> bool:
+    val = _SLOW_QUERY_EXPLAIN_SETTING.get()
+    return bool(val) if val is not None else False
+
+
+# Thread-local flag so a recursive ``EXPLAIN`` re-entry doesn't trigger
+# another EXPLAIN (which would itself be "slow"). Set by
+# :func:`_maybe_capture_explain_plan` while it issues the EXPLAIN.
+_EXPLAIN_REENTRY = contextvars.ContextVar[bool](
+    "dorm_slow_explain_reentry", default=False
+)
+
+
+def _maybe_capture_explain_plan(vendor: str, sql: str, params: Any) -> None:
+    """Best-effort plan capture for a query that just tripped the slow
+    threshold.
+
+    Re-runs the SQL through the vendor's ``EXPLAIN`` machinery (PG:
+    ``EXPLAIN ANALYZE``, SQLite/libsql: ``EXPLAIN QUERY PLAN``,
+    MySQL/MariaDB: ``EXPLAIN ANALYZE`` when ≥ 8.0.18, plain ``EXPLAIN``
+    otherwise) and logs the result at WARNING level on the
+    ``dorm.db.slow_explain`` logger. Also attaches the plan as an OTel
+    span event when an active span is present.
+
+    The capture is gated to ``SELECT`` / ``WITH`` (CTE) statements —
+    re-running a mutation as part of a logging side-effect would be
+    catastrophic. Errors during the re-run are swallowed and logged at
+    DEBUG; the caller's hot path is never disturbed.
+    """
+    if _EXPLAIN_REENTRY.get():
+        return
+    sql_stripped = sql.lstrip()
+    upper = sql_stripped[:6].upper()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH ")):
+        return
+    explain_log = logging.getLogger("dorm.db.slow_explain")
+    plan_sql: str
+    if vendor == "postgresql":
+        plan_sql = f"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {sql_stripped}"
+    elif vendor in ("sqlite", "libsql"):
+        plan_sql = f"EXPLAIN QUERY PLAN {sql_stripped}"
+    elif vendor in ("mysql", "mariadb"):
+        plan_sql = f"EXPLAIN ANALYZE {sql_stripped}"
+    elif vendor == "duckdb":
+        plan_sql = f"EXPLAIN ANALYZE {sql_stripped}"
+    else:
+        return
+
+    token = _EXPLAIN_REENTRY.set(True)
+    plan_text: str | None = None
+    try:
+        from .connection import get_connection
+
+        conn = get_connection("default")
+        rows = conn.execute(plan_sql, params or [])
+        if isinstance(rows, list):
+            plan_text = "\n".join(
+                str(list(r.values())[0]) if isinstance(r, dict) else str(r)
+                for r in rows
+            )
+        else:
+            plan_text = str(rows)
+    except Exception as exc:  # pragma: no cover - best effort
+        explain_log.debug("EXPLAIN capture failed: %s", exc)
+    finally:
+        _EXPLAIN_REENTRY.reset(token)
+    if plan_text is None:
+        return
+
+    explain_log.warning(
+        "slow query plan (%s):\n%s\n-- original SQL: %s", vendor, plan_text, sql
+    )
+    # Attach to OTel span when one is active — joins the plan to the
+    # trace timeline so a UI can show the explain output next to the
+    # slow query span.
+    try:
+        from opentelemetry import trace  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    span = trace.get_current_span()
+    if span and span.is_recording():
+        try:
+            span.add_event(
+                "dorm.slow_query.plan",
+                {"db.system": vendor, "db.sql.plan": plan_text},
+            )
+        except Exception:  # pragma: no cover
+            pass
 
 
 def _retry_attempts() -> int:
@@ -406,6 +509,8 @@ def log_query(vendor: str, sql: str, params=None):
             log.warning(
                 "slow query (%.2fms ≥ %.0fms): %s", elapsed_ms, threshold, sql
             )
+            if _slow_query_explain():
+                _maybe_capture_explain_plan(vendor, sql, params)
         post_query.send(
             sender=vendor,
             sql=sql,

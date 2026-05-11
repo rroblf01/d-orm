@@ -237,6 +237,128 @@ class EncryptedFieldMixin:
         return value
 
 
+def rotate_encryption_keys(
+    model_cls: type,
+    fields: list[str] | None = None,
+    *,
+    batch_size: int = 500,
+    progress: Any = None,
+) -> int:
+    """Re-encrypt every row of *model_cls* using the current head key
+    (``FIELD_ENCRYPTION_KEYS[0]``).
+
+    Use after rotating the keys list: prepend the new key, run this
+    helper, then retire the trailing legacy keys once every column has
+    been re-written. The recipe keeps the application available
+    throughout — :func:`_decrypt` still accepts the legacy ciphertext
+    on read, while writes go through the new key.
+
+    Args:
+        model_cls: model with one or more ``Encrypted*Field`` columns.
+        fields: optional explicit list of column attnames to rotate.
+            When ``None``, walks the model meta and rotates every
+            ``EncryptedFieldMixin`` instance.
+        batch_size: rows per chunk. Each chunk is rewritten inside an
+            :func:`dorm.transaction.atomic` block, so a crash mid-
+            rotation leaves at most one chunk half-applied (recoverable
+            by re-running the rotation — re-encrypting an already-new
+            ciphertext is a no-op).
+        progress: optional callable invoked with ``(rotated_so_far,
+            total_rows_seen)`` after each chunk. Drop-in for ``tqdm``.
+
+    Returns the number of rows touched.
+    """
+    from .. import transaction
+
+    meta = model_cls._meta  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    if fields is None:
+        target_fields = [
+            f for f in meta.fields if isinstance(f, EncryptedFieldMixin)
+        ]
+    else:
+        target_fields = [meta.get_field(n) for n in fields]
+        for f in target_fields:
+            if not isinstance(f, EncryptedFieldMixin):
+                raise TypeError(
+                    f"rotate_encryption_keys: field {f.name!r} on "
+                    f"{model_cls.__name__} is not an EncryptedField."
+                )
+    if not target_fields:
+        return 0
+
+    pk_attname = meta.pk.attname
+    manager = model_cls.objects  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    rotated = 0
+    seen = 0
+    while True:
+        # Walk by primary-key range; the existing iterator() chunks
+        # SELECTs efficiently and avoids loading the whole table into
+        # memory.
+        chunk = list(manager.order_by(pk_attname).all()[seen : seen + batch_size])
+        if not chunk:
+            break
+        with transaction.atomic():
+            for inst in chunk:
+                inst.save(update_fields=[f.name for f in target_fields])
+                rotated += 1
+        seen += len(chunk)
+        if progress is not None:
+            try:
+                progress(rotated, seen)
+            except Exception:  # pragma: no cover - user-supplied
+                pass
+    return rotated
+
+
+async def arotate_encryption_keys(
+    model_cls: type,
+    fields: list[str] | None = None,
+    *,
+    batch_size: int = 500,
+    progress: Any = None,
+) -> int:
+    """Async counterpart of :func:`rotate_encryption_keys`."""
+    from .. import transaction
+
+    meta = model_cls._meta  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    if fields is None:
+        target_fields = [
+            f for f in meta.fields if isinstance(f, EncryptedFieldMixin)
+        ]
+    else:
+        target_fields = [meta.get_field(n) for n in fields]
+        for f in target_fields:
+            if not isinstance(f, EncryptedFieldMixin):
+                raise TypeError(
+                    f"arotate_encryption_keys: field {f.name!r} on "
+                    f"{model_cls.__name__} is not an EncryptedField."
+                )
+    if not target_fields:
+        return 0
+
+    pk_attname = meta.pk.attname
+    manager = model_cls.objects  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    rotated = 0
+    seen = 0
+    while True:
+        chunk = [
+            obj async for obj in manager.order_by(pk_attname).all()[seen : seen + batch_size]
+        ]
+        if not chunk:
+            break
+        async with transaction.aatomic():
+            for inst in chunk:
+                await inst.asave(update_fields=[f.name for f in target_fields])
+                rotated += 1
+        seen += len(chunk)
+        if progress is not None:
+            try:
+                progress(rotated, seen)
+            except Exception:  # pragma: no cover
+                pass
+    return rotated
+
+
 class EncryptedCharField(EncryptedFieldMixin, CharField):
     """``CharField`` that stores ciphertext on disk.
 
@@ -255,4 +377,6 @@ __all__ = [
     "EncryptedCharField",
     "EncryptedTextField",
     "EncryptedFieldMixin",
+    "rotate_encryption_keys",
+    "arotate_encryption_keys",
 ]

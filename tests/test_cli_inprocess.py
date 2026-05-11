@@ -260,8 +260,10 @@ def test_cmd_migrate_dry_run_does_not_apply(capsys, cli_env: Path):
     assert not get_connection().table_exists("shop_product")
 
 
-def test_cmd_migrate_dry_run_with_target_errors(capsys, cli_env: Path):
-    """Mixing --dry-run with a specific target is unsupported and exits 1."""
+def test_cmd_migrate_dry_run_with_target_prints_rollback_sql(capsys, cli_env: Path):
+    """Combining --dry-run with a target prints the SQL the rollback
+    *would* execute (v4.2+). Previously this combination errored
+    with exit 1; the new behaviour mirrors the forward dry-run path."""
     _make_settings(cli_env, apps=["shop"])
     _make_app(
         cli_env,
@@ -272,13 +274,17 @@ def test_cmd_migrate_dry_run_with_target_errors(capsys, cli_env: Path):
     )
     cli.cmd_makemigrations(argparse.Namespace(apps=["shop"], empty=False, name=None, settings="settings"))
     capsys.readouterr()
+    # Apply forward so a rollback target is meaningful.
+    cli.cmd_migrate(argparse.Namespace(
+        app_label="shop", target=None, verbosity=1, dry_run=False, settings="settings",
+    ))
+    capsys.readouterr()
 
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_migrate(argparse.Namespace(
-            app_label="shop", target="0001", verbosity=1, dry_run=True, settings="settings",
-        ))
-    assert exc.value.code == 1
-    assert "--dry-run is not supported with a target" in capsys.readouterr().out
+    cli.cmd_migrate(argparse.Namespace(
+        app_label="shop", target="zero", verbosity=1, dry_run=True, settings="settings",
+    ))
+    out = capsys.readouterr().out
+    assert "Rollback SQL" in out or "Would unapply" in out
 
 
 def test_cmd_migrate_no_migrations_dir(capsys, cli_env: Path):

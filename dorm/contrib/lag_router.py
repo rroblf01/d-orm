@@ -55,6 +55,11 @@ class _ReplicaState:
     last_lag_seconds: float
     last_check_at: float
     healthy: bool
+    # Circuit-breaker counters — track consecutive probe failures so a
+    # dead replica isn't re-probed every ``cache_seconds`` (and the
+    # network round-trip cost amortises during an outage).
+    consecutive_failures: int = 0
+    open_until: float = 0.0
 
 
 class LagAwareReadRouter:
@@ -79,18 +84,31 @@ class LagAwareReadRouter:
         replicas: list[str],
         max_lag_seconds: float = 2.0,
         cache_seconds: float = 5.0,
+        failure_threshold: int = 3,
+        cooldown_seconds: float = 30.0,
         rng: random.Random | None = None,
     ) -> None:
+        """``failure_threshold`` consecutive probe failures opens a
+        circuit-breaker for ``cooldown_seconds`` per replica. While the
+        breaker is open, the router skips the alias outright (no probe)
+        — saves the cost of re-discovering a dead replica every
+        cache window. ``cooldown_seconds=0`` disables the breaker."""
         if not replicas:
             raise ValueError("LagAwareReadRouter requires at least one replica")
         if max_lag_seconds <= 0:
             raise ValueError("max_lag_seconds must be > 0")
         if cache_seconds <= 0:
             raise ValueError("cache_seconds must be > 0")
+        if failure_threshold < 1:
+            raise ValueError("failure_threshold must be >= 1")
+        if cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds must be >= 0")
         self.primary = primary
         self.replicas = list(replicas)
         self.max_lag_seconds = max_lag_seconds
         self.cache_seconds = cache_seconds
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
         self._rng = rng or random.Random()
         self._state: dict[str, _ReplicaState] = {}
         self._lock = threading.Lock()
@@ -130,11 +148,13 @@ class LagAwareReadRouter:
         now = _time.monotonic()
         with self._lock:
             cached = self._state.get(alias)
-            if (
-                cached is not None
-                and (now - cached.last_check_at) < self.cache_seconds
-            ):
-                return cached.healthy
+            if cached is not None:
+                # Circuit-breaker open → trust the cached unhealthy
+                # state until the cooldown elapses.
+                if cached.open_until and now < cached.open_until:
+                    return False
+                if (now - cached.last_check_at) < self.cache_seconds:
+                    return cached.healthy
 
         # Probe outside the lock — the network call can take tens of
         # milliseconds and we don't want to serialise every reader on
@@ -143,18 +163,33 @@ class LagAwareReadRouter:
         lag = self._measure_lag(alias)
         with self._lock:
             healthy = lag is not None and lag <= self.max_lag_seconds
+            prev = self._state.get(alias)
+            consecutive = prev.consecutive_failures if prev else 0
+            consecutive = 0 if healthy else consecutive + 1
+            open_until = 0.0
+            if (
+                not healthy
+                and self.cooldown_seconds > 0
+                and consecutive >= self.failure_threshold
+            ):
+                open_until = now + self.cooldown_seconds
             self._state[alias] = _ReplicaState(
                 alias=alias,
                 last_lag_seconds=lag if lag is not None else float("inf"),
                 last_check_at=now,
                 healthy=healthy,
+                consecutive_failures=consecutive,
+                open_until=open_until,
             )
         if not healthy:
             _log.info(
-                "lag_router: replica %r unhealthy (lag=%s, threshold=%.1fs)",
+                "lag_router: replica %r unhealthy (lag=%s, threshold=%.1fs%s)",
                 alias,
                 "?" if lag is None else f"{lag:.2f}s",
                 self.max_lag_seconds,
+                f", breaker open for {self.cooldown_seconds:.0f}s"
+                if open_until
+                else "",
             )
         return healthy
 
@@ -208,6 +243,8 @@ class LagAwareReadRouter:
                 "lag_seconds": st.last_lag_seconds,
                 "healthy": st.healthy,
                 "checked_at": st.last_check_at,
+                "consecutive_failures": st.consecutive_failures,
+                "breaker_open": bool(st.open_until),
             }
         return out
 

@@ -201,4 +201,88 @@ def uninstrument() -> None:
     _SPAN_BY_QUERY.clear()
 
 
-__all__ = ["instrument", "uninstrument"]
+class TraceContextLogFilter:
+    """``logging.Filter`` that stamps every record with the active
+    trace/span ids — joins application logs to the OTel trace timeline.
+
+    Adds two attributes to each :class:`~logging.LogRecord`:
+
+    - ``otel_trace_id`` — 32-hex trace id, ``"-"`` when no span active.
+    - ``otel_span_id``  — 16-hex span id, ``"-"`` when no span active.
+
+    Wire into the logging config so the formatter can reference the
+    new attributes::
+
+        import logging
+        from dorm.contrib.otel import TraceContextLogFilter
+
+        handler = logging.StreamHandler()
+        handler.addFilter(TraceContextLogFilter())
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s [trace=%(otel_trace_id)s "
+            "span=%(otel_span_id)s] %(name)s: %(message)s"
+        ))
+        logging.getLogger().addHandler(handler)
+
+    No-op when ``opentelemetry-api`` is not importable — the filter
+    still attaches the ``"-"`` placeholders so the formatter doesn't
+    crash with a ``KeyError``.
+    """
+
+    def __init__(self) -> None:
+        try:
+            from opentelemetry import trace  # type: ignore[import-not-found]
+
+            self._get_current_span = trace.get_current_span
+            self._invalid_span_id = trace.INVALID_SPAN_ID
+            self._enabled = True
+        except ImportError:
+            self._get_current_span = None
+            self._invalid_span_id = 0
+            self._enabled = False
+
+    def filter(self, record) -> bool:  # noqa: A003 - logging.Filter API
+        # Use setattr so the type-checker doesn't insist these
+        # attributes exist on the LogRecord base type (they're our
+        # extension fields, consulted by the formatter).
+        setattr(record, "otel_trace_id", "-")
+        setattr(record, "otel_span_id", "-")
+        if not self._enabled or self._get_current_span is None:
+            return True
+        try:
+            span = self._get_current_span()
+            ctx = span.get_span_context()
+            if ctx and ctx.span_id and ctx.span_id != self._invalid_span_id:
+                setattr(record, "otel_trace_id", format(ctx.trace_id, "032x"))
+                setattr(record, "otel_span_id", format(ctx.span_id, "016x"))
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return True
+
+
+def install_log_correlation(logger_names: list[str] | None = None) -> None:
+    """Attach :class:`TraceContextLogFilter` to the root logger
+    (or each named logger when *logger_names* is supplied).
+
+    Idempotent — repeat calls don't pile up duplicate filters on the
+    same logger.
+    """
+    import logging
+
+    targets = (
+        [logging.getLogger(n) for n in logger_names]
+        if logger_names
+        else [logging.getLogger()]
+    )
+    for log in targets:
+        if any(isinstance(f, TraceContextLogFilter) for f in log.filters):
+            continue
+        log.addFilter(TraceContextLogFilter())
+
+
+__all__ = [
+    "instrument",
+    "uninstrument",
+    "TraceContextLogFilter",
+    "install_log_correlation",
+]

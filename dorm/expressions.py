@@ -132,6 +132,21 @@ class F:
     def __neg__(self):
         return CombinedExpression(Value(0), "-", self)
 
+    def apply(self, func_cls, *extra):
+        """Wrap this F-reference in a :class:`~dorm.functions.Func`
+        subclass. The wrapper's :meth:`apply` is chainable.
+
+        ``F("name").apply(Lower).apply(Trim)`` is equivalent to
+        ``Trim(Lower(F("name")))`` but reads in evaluation order.
+        Extra positional arguments forward to the wrapper's
+        constructor — useful for ``Substr`` and friends::
+
+            F("name").apply(Substr, 1, 4)
+            # ↓ equivalent to:
+            Substr(F("name"), 1, 4)
+        """
+        return func_cls(self, *extra)
+
     def __repr__(self):
         return f"F({self.name!r})"
 
@@ -155,6 +170,26 @@ class RawSQL:
 
     def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
         return self.sql, list(self.params)
+
+
+class _SubqueryLookup:
+    """Shortcut returned by :meth:`Subquery.lookup`. Yields a sentinel
+    that the QuerySet filter compiler recognises as "embed this
+    subquery in an ``IN (…)`` clause without the caller having to spell
+    ``__in=Subquery(qs.values("col"))`` out."""
+
+    def __init__(self, queryset: Any, column: str | None) -> None:
+        self.queryset = queryset
+        self.column = column
+
+    def as_sql(self, table_alias: str | None = None, **kwargs: Any) -> tuple[str, list]:
+        qs = self.queryset
+        if self.column is not None:
+            qs = qs.values(self.column)
+        return Subquery(qs).as_sql(table_alias, **kwargs)
+
+    def __repr__(self) -> str:
+        return f"_SubqueryLookup({self.queryset!r}, column={self.column!r})"
 
 
 class OuterRef:
