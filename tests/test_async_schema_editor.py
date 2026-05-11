@@ -16,7 +16,14 @@ class _Widget(dorm.Model):
 
 @pytest.fixture(autouse=True)
 def fresh_db(tmp_path):
+    """Private SQLite per test so each DDL run starts clean. Restore
+    the conftest settings on teardown so the next PG test in the
+    suite still resolves to the right alias."""
+    from dorm.conf import settings
     from dorm.db.connection import _async_connections, _sync_connections
+
+    saved_db = {alias: dict(cfg) for alias, cfg in settings.DATABASES.items()}
+    saved_apps = list(settings.INSTALLED_APPS)
 
     _sync_connections.clear()
     _async_connections.clear()
@@ -26,6 +33,7 @@ def fresh_db(tmp_path):
         INSTALLED_APPS=["tests"],
     )
     yield
+    dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
     _sync_connections.clear()
     _async_connections.clear()
 

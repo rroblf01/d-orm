@@ -20,11 +20,20 @@ class _Score(dorm.Model):
 
 @pytest.fixture(autouse=True)
 def fresh_schema(tmp_path):
+    """Use a fresh SQLite for the bulk_update_when round-trip checks
+    (need a real DB so the CASE/WHEN SQL actually runs). Snapshot the
+    conftest settings on entry and restore them on teardown so the
+    next PG test in the suite isn't blindsided by a stale SQLite
+    alias."""
+    from dorm.conf import settings
     from dorm.db.connection import (
         _async_connections,
         _sync_connections,
         get_connection,
     )
+
+    saved_db = {alias: dict(cfg) for alias, cfg in settings.DATABASES.items()}
+    saved_apps = list(settings.INSTALLED_APPS)
 
     _sync_connections.clear()
     _async_connections.clear()
@@ -36,6 +45,7 @@ def fresh_schema(tmp_path):
     with SchemaEditor(get_connection()) as se:
         se.create_model(_Score)
     yield
+    dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
     _sync_connections.clear()
     _async_connections.clear()
 

@@ -2850,9 +2850,9 @@ class QuerySet(Generic[_T]):
                 default={"label": "C", "featured": False},
             )
 
-        Generates one round-trip per affected column — the trade-off
-        is one ``UPDATE`` per column vs one ``UPDATE`` per row in a
-        naive Python loop.
+        Compiles into a single ``UPDATE`` statement carrying one
+        ``CASE`` per touched column — one round-trip total, regardless
+        of how many fields appear in the cases.
         """
         if not cases:
             return 0

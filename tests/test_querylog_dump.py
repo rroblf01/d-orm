@@ -19,7 +19,14 @@ class _Item(dorm.Model):
 
 @pytest.fixture(autouse=True)
 def fresh_schema(tmp_path):
+    """Reconfigure dorm against a fresh SQLite for the dump round-trip
+    tests, then restore the conftest backend on teardown so later PG
+    tests in the suite still see their alias."""
+    from dorm.conf import settings
     from dorm.db.connection import _async_connections, _sync_connections, get_connection
+
+    saved_db = {alias: dict(cfg) for alias, cfg in settings.DATABASES.items()}
+    saved_apps = list(settings.INSTALLED_APPS)
 
     _sync_connections.clear()
     _async_connections.clear()
@@ -31,6 +38,7 @@ def fresh_schema(tmp_path):
     with SchemaEditor(get_connection()) as se:
         se.create_model(_Item)
     yield
+    dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
     _sync_connections.clear()
     _async_connections.clear()
 

@@ -17,16 +17,10 @@ from typing import Any
 
 import pytest
 
-import dorm
 from dorm.contrib.asgi import (
     NPlusOneMiddleware,
     OTelDormMiddleware,
     QueryBudgetMiddleware,
-)
-
-dorm.configure(
-    DATABASES={"default": {"ENGINE": "sqlite", "NAME": ":memory:"}},
-    INSTALLED_APPS=["tests"],
 )
 
 

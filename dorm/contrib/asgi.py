@@ -69,6 +69,18 @@ class QueryBudgetMiddleware:
     Exceptions from inside the budget propagate unchanged; the budget
     cleanup runs in a ``finally`` so a 5xx response still releases the
     DB connection cleanly.
+
+    .. note::
+
+       When *timeout_ms* is set and the configured backend is
+       PostgreSQL, :func:`dorm.budget.abudget` opens an implicit
+       ``aatomic()`` block so it can ``SET LOCAL statement_timeout``.
+       This means **every write inside one request is wrapped in a
+       single transaction**: a 5xx response rolls back every write
+       together. Set ``timeout_ms=None`` to opt out of the implicit
+       transaction (and the statement-timeout feature). SQLite and
+       other backends are unaffected — *timeout_ms* is a no-op
+       there.
     """
 
     def __init__(

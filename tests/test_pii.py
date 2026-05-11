@@ -1,5 +1,17 @@
-"""Tests for the PII helpers and field flag."""
+"""Tests for the PII helpers and field flag.
+
+The conftest's session-scoped ``configure_dorm`` fixture handles
+``dorm.configure(...)`` for the entire suite — we deliberately do not
+re-configure at module-import time here. Tests that need a private
+SQLite (so they can ``CREATE TABLE`` for the per-file model) wrap the
+re-configure in a fixture that restores the prior settings on
+teardown; otherwise the next PG test in the suite would silently see
+a SQLite alias and fail with ``NotImplementedError`` from
+``_ensure_postgres``.
+"""
 from __future__ import annotations
+
+import pytest
 
 import dorm
 from dorm.contrib.pii import (
@@ -8,12 +20,25 @@ from dorm.contrib.pii import (
     mask_dict,
     mask_instance,
     pii_fields,
+    reset_cache,
 )
 
-dorm.configure(
-    DATABASES={"default": {"ENGINE": "sqlite", "NAME": ":memory:"}},
-    INSTALLED_APPS=["tests"],
-)
+
+@pytest.fixture
+def restore_settings():
+    """Snapshot DATABASES + INSTALLED_APPS so a test that reconfigures
+    dorm doesn't leak the change into the next test in the suite."""
+    from dorm.conf import settings
+
+    saved_db = {alias: dict(cfg) for alias, cfg in settings.DATABASES.items()}
+    saved_apps = list(settings.INSTALLED_APPS)
+    yield
+    dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
+    from dorm.db.connection import _async_connections, _sync_connections
+
+    _sync_connections.clear()
+    _async_connections.clear()
+    reset_cache()
 
 
 class PIIPerson(dorm.Model):
@@ -108,8 +133,10 @@ class TestMaskDict:
 
 
 class TestAnonymizeRow:
-    def test_anonymize_persists(self, tmp_path, monkeypatch):
-        # Spin up a real sqlite to verify the save side-effect.
+    def test_anonymize_persists(self, tmp_path, restore_settings):
+        # Spin up a real sqlite to verify the save side-effect — the
+        # ``restore_settings`` fixture undoes the reconfigure on
+        # teardown so the next test sees the conftest backend again.
         db = tmp_path / "pii.db"
         dorm.configure(
             DATABASES={"default": {"ENGINE": "sqlite", "NAME": str(db)}},

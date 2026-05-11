@@ -8,7 +8,13 @@ import dorm
 
 @pytest.fixture(autouse=True)
 def fresh_db(tmp_path):
+    """Local SQLite per test + settings snapshot/restore so later PG
+    tests in the suite still resolve to the conftest backend."""
+    from dorm.conf import settings
     from dorm.db.connection import _async_connections, _sync_connections
+
+    saved_db = {alias: dict(cfg) for alias, cfg in settings.DATABASES.items()}
+    saved_apps = list(settings.INSTALLED_APPS)
 
     _sync_connections.clear()
     _async_connections.clear()
@@ -18,6 +24,7 @@ def fresh_db(tmp_path):
         INSTALLED_APPS=["tests"],
     )
     yield
+    dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
     _sync_connections.clear()
     _async_connections.clear()
 
