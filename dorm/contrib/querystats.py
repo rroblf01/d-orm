@@ -54,12 +54,18 @@ class TemplateStats:
     template: str
     count: int = 0
     total_ms: float = 0.0
-    # Reservoir of timings used for percentile estimation. Bounded to
-    # keep memory cost predictable on long-running apps — we use a
-    # simple deterministic sliding window (the last ``_RESERVOIR_MAX``
-    # samples) rather than a full reservoir sampler, which over-estimates
-    # tail latency under bursty traffic. The trade-off is acceptable
-    # for an ops dashboard.
+    # Reservoir of timings used for percentile estimation. Bounded
+    # to keep memory cost predictable on long-running apps.
+    #
+    # **Sliding window**: this is not a full reservoir sampler; we
+    # keep the *most recent* ``reservoir_max`` samples (oldest are
+    # discarded when the buffer is full). The percentiles therefore
+    # describe the **recent** latency distribution, not the
+    # cumulative one. That's almost always what an ops dashboard
+    # wants — a regression in the last 10 minutes is more actionable
+    # than a smoothed lifetime average — but it's worth knowing
+    # when ranking templates by total_ms vs p99_ms (totals are
+    # cumulative; percentiles are not).
     samples: list[float] = field(default_factory=list)
 
     def add(self, ms: float, *, reservoir_max: int) -> None:

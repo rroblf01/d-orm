@@ -276,7 +276,25 @@ def metrics_response() -> str:
                 )
 
     out.extend(_pool_lines())
+    out.extend(_querystats_lines())
     return "\n".join(out) + "\n"
+
+
+def _querystats_lines() -> list[str]:
+    """Embed the per-template snapshot from
+    :mod:`dorm.contrib.querystats` when the collector has been
+    enabled. Silently no-op when the module isn't loaded — keeps
+    the dependency direction strictly Prometheus → querystats."""
+    try:
+        from . import querystats
+    except ImportError:
+        return []
+    snapshot = querystats.collector().snapshot()
+    if not snapshot:
+        return []
+    # Reuse the helper's own renderer + split the text into lines so
+    # the result composes cleanly with the rest of metrics_response.
+    return querystats.render_text().splitlines()
 
 
 __all__ = [

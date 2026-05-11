@@ -141,11 +141,38 @@ Minor release. No breaking changes vs 4.1 — every addition is opt-in.
   ``SQLNotAllowedError``. ``raise_on_violation=False`` enables
   log-only mode for the canary phase.
 
+### Added — Polish round (release-blocker pass)
+
+- **Auto-install of `DEBUG_NPLUSONE`** — ``dorm.configure(DEBUG_NPLUSONE=...)``
+  now calls :func:`install_debug_global` automatically. Idempotent;
+  passing falsy values is a no-op.
+- **`dorm version`** — trivial CLI that prints ``djanorm <version>``.
+- **`dorm doctor` v4.2 audits** — flags `DEBUG_NPLUSONE` active
+  outside `DEBUG`, `SLOW_QUERY_EXPLAIN` with too-low
+  `SLOW_QUERY_MS`, `POOL_SATURATION_WARN` outside ``(0, 1)``,
+  `LagAwareReadRouter` with `cooldown_seconds=0`, and missing /
+  permissive `sql_allowlist` configuration.
+- **`querystats` embedded in `prometheus.metrics_response()`** —
+  per-template gauges land in the same payload as pool / query /
+  cache metrics. No separate endpoint required.
+- **`DataLoader.prime(key, value)` + `clear_all()`** — pre-load
+  values without batching; drop the whole cache.
+- **Async plan-drift APIs** — :func:`arecord_baseline` /
+  :func:`acompare` for symmetry with the sync forms.
+- **`sql_allowlist` capture-mode helpers** —
+  :func:`dump_captured` writes ``{allowed, rejected}`` JSON;
+  :func:`load_from_file` re-installs from the curated document;
+  :func:`allowed_templates` snapshots the current allow-list.
+- **Integration tests** — real-trigger verification for
+  :class:`MakeTableAppendOnly` and an end-to-end test of the slow-
+  query EXPLAIN path against a live SQLite connection.
+
 ### Validated
 
 - ``ruff check``: clean.
 - ``ty check``: clean.
-- ``pytest tests/``: all v4.2 suites green (215 tests added).
+- ``mkdocs build --strict``: clean.
+- ``pytest tests/``: 6889 passed, 153 skipped, 0 failures (serial).
 
 ## [4.1.0] - 2026-05-11
 

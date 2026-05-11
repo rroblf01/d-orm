@@ -187,9 +187,87 @@ def reset() -> None:
         _BASELINES.clear()
 
 
+async def _acapture_plan(
+    sql: str, params: list[Any] | None, using: str
+) -> str:
+    """Async counterpart of :func:`_capture_plan`."""
+    from ..db.connection import get_async_connection
+
+    conn = get_async_connection(using)
+    vendor = getattr(conn, "vendor", "sqlite")
+    if vendor == "postgresql":
+        plan_sql = f"EXPLAIN (FORMAT TEXT) {sql}"
+    elif vendor in ("sqlite", "libsql"):
+        plan_sql = f"EXPLAIN QUERY PLAN {sql}"
+    elif vendor in ("mysql", "mariadb", "duckdb"):
+        plan_sql = f"EXPLAIN {sql}"
+    else:
+        raise NotImplementedError(
+            f"plan_drift: vendor {vendor!r} has no portable EXPLAIN form."
+        )
+    rows = await conn.execute(plan_sql, params or [])
+    lines: list[str] = []
+    if isinstance(rows, list):
+        for r in rows:
+            if isinstance(r, dict):
+                values = r.values()
+            elif hasattr(r, "keys") and not isinstance(r, str):
+                try:
+                    values = [r[k] for k in r.keys()]
+                except Exception:
+                    values = [str(r)]
+            else:
+                lines.append(str(r))
+                continue
+            lines.append(
+                " ".join("" if v is None else str(v) for v in values)
+            )
+    else:
+        lines.append(str(rows))
+    return "\n".join(lines)
+
+
+async def arecord_baseline(
+    tag: str,
+    sql: str,
+    *,
+    params: list[Any] | None = None,
+    using: str = "default",
+) -> str:
+    """Async counterpart of :func:`record_baseline`."""
+    plan = await _acapture_plan(sql, params, using)
+    normalised = _strip_volatile(plan)
+    with _lock:
+        _BASELINES[tag] = normalised
+    return normalised
+
+
+async def acompare(
+    tag: str,
+    sql: str,
+    *,
+    params: list[Any] | None = None,
+    using: str = "default",
+) -> CompareResult:
+    """Async counterpart of :func:`compare`."""
+    with _lock:
+        baseline = _BASELINES.get(tag)
+    if baseline is None:
+        raise KeyError(f"no baseline recorded for tag {tag!r}")
+    current = _strip_volatile(await _acapture_plan(sql, params, using))
+    return CompareResult(
+        tag=tag,
+        baseline=baseline,
+        current=current,
+        drifted=baseline != current,
+    )
+
+
 __all__ = [
     "record_baseline",
     "compare",
+    "arecord_baseline",
+    "acompare",
     "diff_text",
     "baselines",
     "reset",

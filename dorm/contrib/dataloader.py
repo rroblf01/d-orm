@@ -45,12 +45,21 @@ class DataLoader(Generic[_K, _V]):
 
     Args:
         batch_fn: callable that accepts a ``list[K]`` and returns
-            either a plain dict ``{key: value}`` OR an awaitable that
-            resolves to the same shape OR an iterable / async-iterable
-            of ``(key, value)`` tuples OR a queryset-like object whose
-            iteration yields model instances (in which case
-            ``key_attr`` controls which attribute maps each instance
-            back to its key — defaults to ``"pk"``).
+            **any** of the following shapes (auto-detected):
+
+            - a plain ``dict[K, V]``;
+            - an awaitable that resolves to the same dict;
+            - a synchronous iterable of ``(K, V)`` tuples;
+            - a synchronous iterable of model instances (each with a
+              ``key_attr`` attribute the loader uses to map back to
+              the input key);
+            - an **async iterable** of model instances or tuples
+              (any object that exposes ``__aiter__``) — useful for
+              the dorm async queryset, which is itself an async
+              iterator.
+
+            ``key_attr`` (default ``"pk"``) selects the attribute used
+            to recover the input key from a model-instance result.
         max_batch_size: optional ceiling on the number of keys in one
             ``batch_fn`` invocation. When exceeded, the loader splits
             the batch into multiple concurrent calls.
@@ -106,11 +115,38 @@ class DataLoader(Generic[_K, _V]):
 
     def clear(self, key: _K | None = None) -> None:
         """Drop one cached entry (when *key* given) or every cached
-        entry (when omitted). Pending requests are untouched."""
+        entry (when omitted). Pending requests are untouched.
+
+        Equivalent to :meth:`clear_all` when *key* is None — the
+        named alias is provided for readability at call sites.
+        """
         if key is None:
             self._cache.clear()
         else:
             self._cache.pop(key, None)
+
+    def clear_all(self) -> None:
+        """Drop every cached entry. Same as ``clear(None)``."""
+        self._cache.clear()
+
+    def prime(self, key: _K, value: _V) -> None:
+        """Pre-load (*key*, *value*) into the cache so the next
+        ``load(key)`` skips the batch round-trip.
+
+        Useful after a fan-out write — feeding the just-inserted row
+        back into the loader avoids a redundant SELECT when the next
+        resolver asks for it. ``cache=False`` makes ``prime`` a
+        no-op; emit a warning so the caller can tell.
+        """
+        if not self._use_cache:
+            import logging
+
+            logging.getLogger("dorm.contrib.dataloader").warning(
+                "DataLoader.prime() called on a cache=False loader; "
+                "the value will not be served on the next load()."
+            )
+            return
+        self._cache[key] = value
 
     # ── Internals ───────────────────────────────────────────────────────────
 

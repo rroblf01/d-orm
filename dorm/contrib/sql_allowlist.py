@@ -165,9 +165,78 @@ def rejected_templates() -> list[str]:
         return list(_state.rejected)
 
 
+def allowed_templates() -> list[str]:
+    """Snapshot of the currently-installed allow-list — useful for
+    diff-ing against ``rejected_templates()`` in the canary phase."""
+    with _lock:
+        return sorted(_state.templates)
+
+
+def dump_captured(path: str, *, include_allowed: bool = True) -> str:
+    """Write the current allow-list (and rejected templates) to *path*
+    as a JSON document.
+
+    The schema is::
+
+        {
+            "allowed": ["SELECT ? FROM users", ...],
+            "rejected": ["DELETE FROM users WHERE id = ?", ...]
+        }
+
+    Callers typically use this during a canary phase: run traffic
+    against ``install([...], raise_on_violation=False)``, dump the
+    union of ``allowed`` + ``rejected`` to disk, prune by hand, then
+    feed the curated file back in via :func:`load_from_file` for the
+    enforcement phase.
+    """
+    import json
+
+    with _lock:
+        payload = {
+            "rejected": list(_state.rejected),
+        }
+        if include_allowed:
+            payload["allowed"] = sorted(_state.templates)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    return path
+
+
+def load_from_file(
+    path: str,
+    *,
+    allow_ddl: bool = False,
+    raise_on_violation: bool = True,
+    field: str = "allowed",
+) -> int:
+    """Install the allow-list from a JSON file (the same shape
+    :func:`dump_captured` writes). Returns the number of templates
+    loaded.
+
+    *field* selects which key carries the templates ('allowed' by
+    default; pass 'rejected' to load the captured violations
+    verbatim, e.g. for re-auditing).
+    """
+    import json
+
+    with open(path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    templates = list(payload.get(field, []))
+    install(
+        templates,
+        allow_ddl=allow_ddl,
+        raise_on_violation=raise_on_violation,
+    )
+    return len(templates)
+
+
 __all__ = [
     "install",
     "uninstall",
     "rejected_templates",
+    "allowed_templates",
+    "dump_captured",
+    "load_from_file",
     "SQLNotAllowedError",
 ]

@@ -255,6 +255,18 @@ class Settings:
         for key, value in kwargs.items():
             setattr(self, key, value)
         self._configured = True
+        # Auto-install the global N+1 detector when the caller passed
+        # ``DEBUG_NPLUSONE`` so users don't have to remember to call
+        # ``install_debug_global()`` separately. Import is lazy so the
+        # nplusone contrib module isn't pulled into the hot path for
+        # apps that never opt in.
+        if "DEBUG_NPLUSONE" in kwargs and kwargs["DEBUG_NPLUSONE"]:
+            try:
+                from .contrib.nplusone import install_debug_global
+
+                install_debug_global()
+            except Exception:  # pragma: no cover - best effort
+                pass
 
     def __getattr__(self, name):
         # Distinguish "dorm not configured" from "configured but the

@@ -1642,6 +1642,81 @@ def cmd_doctor(args):
             "(3s) is a safer baseline unless you have a reason to disable."
         )
 
+    # 10. (4.2+) Production-mode guards for newly added v4.2 features.
+    is_debug = bool(getattr(settings, "DEBUG", False))
+    if not is_debug:
+        # DEBUG_NPLUSONE in non-DEBUG installs aborts requests at the
+        # first violation — almost always wrong outside dev.
+        nplusone_mode = getattr(settings, "DEBUG_NPLUSONE", False)
+        if nplusone_mode:
+            warnings.append(
+                "DEBUG_NPLUSONE is active outside DEBUG mode. The detector "
+                "ties up a signal receiver for the lifetime of the process "
+                "and, in 'raise' mode, aborts requests on the first finding. "
+                "Restrict to dev / staging."
+            )
+        # SLOW_QUERY_EXPLAIN re-runs slow queries to capture plans —
+        # doubles their cost. Useful in staging; risky in prod.
+        if getattr(settings, "SLOW_QUERY_EXPLAIN", False):
+            slow_ms = getattr(settings, "SLOW_QUERY_MS", None)
+            if not slow_ms or float(slow_ms) < 100:
+                warnings.append(
+                    "SLOW_QUERY_EXPLAIN=True without a meaningful SLOW_QUERY_MS "
+                    "(>= 100ms). Every captured slow query is re-explained, "
+                    "doubling its DB cost — set SLOW_QUERY_MS to a value high "
+                    "enough that genuinely slow queries get the treatment."
+                )
+        # CSP-style allow-list: in prod the strong recommendation is
+        # to install it without the DDL bypass; absence isn't an
+        # error but it's a defence-in-depth opportunity worth a note.
+        try:
+            from .contrib import sql_allowlist as _sal
+
+            if not _sal._state.enabled:
+                info.append(
+                    "dorm.contrib.sql_allowlist is not active — consider "
+                    "installing it as a defence-in-depth layer once you've "
+                    "captured the production template set (canary phase)."
+                )
+            elif _sal._state.allow_ddl:
+                info.append(
+                    "sql_allowlist is active but allows DDL — fine during "
+                    "rolling deploys, but flip allow_ddl=False once "
+                    "migrations have settled."
+                )
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    # 11. (4.2+) Pool saturation knob sanity.
+    sat = getattr(settings, "POOL_SATURATION_WARN", 0.8)
+    try:
+        sat_f = float(sat)
+    except (TypeError, ValueError):
+        sat_f = 0.0
+    if sat_f <= 0 or sat_f >= 1.0:
+        info.append(
+            f"POOL_SATURATION_WARN={sat!r} is outside (0, 1) — the warning "
+            "will either fire on every poll or never. Pick a fraction "
+            "between ~0.6 and ~0.9."
+        )
+
+    # 12. (4.2+) LagAwareReadRouter circuit-breaker sanity. Best-effort
+    # — only fires when an explicit router instance is registered.
+    routers = getattr(settings, "DATABASE_ROUTERS", []) or []
+    try:
+        from .contrib.lag_router import LagAwareReadRouter as _LR
+
+        for r in routers:
+            if isinstance(r, _LR) and getattr(r, "cooldown_seconds", 1) == 0:
+                info.append(
+                    "LagAwareReadRouter configured with cooldown_seconds=0 — "
+                    "the per-replica circuit breaker is effectively disabled, "
+                    "so a dead replica will be probed every cache window. "
+                    "Set cooldown_seconds=30 (or higher) to amortise."
+                )
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     # ── Output
     print(f"dorm doctor — {len(warnings)} warning(s), {len(info)} note(s)")
     print()
@@ -1660,6 +1735,15 @@ def cmd_doctor(args):
         return
     if warnings:
         sys.exit(1)
+
+
+def cmd_version(args):
+    """Print the installed dorm package version. Useful in support
+    tickets and CI logs that want to capture the toolchain shape
+    in a single line."""
+    from . import __version__
+
+    print(f"djanorm {__version__}")
 
 
 def cmd_dumpdata(args):
@@ -2885,6 +2969,13 @@ def main():
         help="Bypass the safety check that blocks resets against non-dev DBs.",
     )
     rst.set_defaults(func=cmd_reset)
+
+    # version
+    ver = sub.add_parser(
+        "version",
+        help="Print the installed dorm package version.",
+    )
+    ver.set_defaults(func=cmd_version)
 
     # doctor
     doc = sub.add_parser(

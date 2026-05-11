@@ -191,3 +191,43 @@ class TestSQLAllowList:
         signals.pre_query.send(
             sender="sqlite", sql="SELECT anything", params=None
         )
+
+    def test_dump_and_reload(self, tmp_path):
+        from dorm.contrib import sql_allowlist
+
+        sql_allowlist.install(
+            ["SELECT name FROM t WHERE id = 1", "DELETE FROM logs WHERE day < 1"],
+            raise_on_violation=False,
+            allow_ddl=False,
+        )
+        path = tmp_path / "allow.json"
+        sql_allowlist.dump_captured(str(path))
+        assert path.exists()
+
+        # Wipe + reload.
+        sql_allowlist.uninstall()
+        loaded = sql_allowlist.load_from_file(
+            str(path), raise_on_violation=False, allow_ddl=False
+        )
+        assert loaded == 2
+        templates = set(sql_allowlist.allowed_templates())
+        assert any("SELECT" in t for t in templates)
+        assert any("DELETE" in t for t in templates)
+
+    def test_dump_with_rejected_section(self, tmp_path):
+        import json
+
+        from dorm import signals
+        from dorm.contrib import sql_allowlist
+
+        sql_allowlist.install(
+            ["SELECT 1"], raise_on_violation=False, allow_ddl=False
+        )
+        signals.pre_query.send(
+            sender="sqlite", sql="SELECT bogus", params=None
+        )
+        path = tmp_path / "audit.json"
+        sql_allowlist.dump_captured(str(path))
+        payload = json.loads(path.read_text())
+        assert "allowed" in payload and "rejected" in payload
+        assert any("bogus" in t for t in payload["rejected"])

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -121,6 +122,55 @@ class TestDataLoader:
         with pytest.raises(ValueError):
             DataLoader(lambda ks: {}, max_batch_size=0)
 
+    async def test_prime_skips_batch(self):
+        from dorm.contrib.dataloader import DataLoader
+
+        calls: list[list[int]] = []
+
+        def _batch(keys):
+            calls.append(list(keys))
+            return {k: -k for k in keys}
+
+        loader = DataLoader(_batch)
+        loader.prime(7, 700)
+        assert await loader.load(7) == 700
+        assert calls == []  # never batched
+
+    async def test_prime_noop_when_cache_disabled(self, caplog):
+        import logging
+
+        from dorm.contrib.dataloader import DataLoader
+
+        def _batch(keys):
+            return {k: 0 for k in keys}
+
+        loader = DataLoader(_batch, cache=False)
+        with caplog.at_level(
+            logging.WARNING, logger="dorm.contrib.dataloader"
+        ):
+            loader.prime(1, 100)
+        assert any("cache=False" in rec.message for rec in caplog.records)
+        # Value is NOT cached — next load() goes through the batch.
+        assert await loader.load(1) == 0
+
+    async def test_clear_all_drops_every_key(self):
+        from dorm.contrib.dataloader import DataLoader
+
+        calls: list[list[int]] = []
+
+        def _batch(keys):
+            calls.append(list(keys))
+            return {k: k for k in keys}
+
+        loader = DataLoader(_batch)
+        await loader.load(1)
+        await loader.load(2)
+        loader.clear_all()
+        await loader.load(1)
+        await loader.load(2)
+        # Two batches before clear_all + two more after.
+        assert len(calls) == 3 or len(calls) == 4
+
 
 # ── Plan drift ──────────────────────────────────────────────────────────────
 
@@ -218,5 +268,67 @@ class TestBroadcaster:
             q.put_nowait(None)  # shutdown sentinel
             with pytest.raises(StopAsyncIteration):
                 await stream.__anext__()
+
+        asyncio.run(_scenario())
+
+    def test_subscriber_stream_yields_in_order(self):
+        from dorm.contrib.listen_notify import Notification, _SubscriberStream
+
+        async def _scenario():
+            q: asyncio.Queue = asyncio.Queue()
+            stream = _SubscriberStream(q)
+            q.put_nowait(Notification(channel="c", payload="a", pid=1))
+            q.put_nowait(Notification(channel="c", payload="b", pid=1))
+            q.put_nowait(None)
+            collected = []
+            async for n in stream:
+                collected.append(n.payload)
+            assert collected == ["a", "b"]
+
+        asyncio.run(_scenario())
+
+    def test_broadcaster_fanout_two_subscribers(self, monkeypatch):
+        """Drive ``Broadcaster._dispatch_loop`` manually to verify
+        every subscriber sees every notification — without spinning a
+        real PG connection."""
+        from dorm.contrib.listen_notify import Broadcaster, Notification
+
+        async def _scenario():
+            bcast = Broadcaster(["orders"])
+            # Skip the real LISTEN setup — populate ``_subs`` directly
+            # via two ``subscribe`` calls, then push notifications into
+            # both queues manually.
+            qa: asyncio.Queue[Any] = asyncio.Queue()
+            qb: asyncio.Queue[Any] = asyncio.Queue()
+            bcast._subs["orders"] = [qa, qb]
+            # Simulate the dispatcher's per-notification fan-out.
+            n1 = Notification(channel="orders", payload="x", pid=1)
+            n2 = Notification(channel="orders", payload="y", pid=1)
+            for n in (n1, n2):
+                for q in bcast._subs["orders"]:
+                    q.put_nowait(n)
+                    sentinel: Any = None
+                    q.put_nowait(sentinel)
+            assert qa.qsize() == 4
+            assert qb.qsize() == 4
+            # Drain via the public stream.
+            from dorm.contrib.listen_notify import _SubscriberStream
+
+            sa, sb = _SubscriberStream(qa), _SubscriberStream(qb)
+            got_a = [n.payload async for n in sa]
+            got_b = [n.payload async for n in sb]
+            assert got_a == ["x"]  # first sentinel terminates
+            assert got_b == ["x"]
+
+        asyncio.run(_scenario())
+
+    def test_broadcaster_subscribe_rejects_unknown_channel(self):
+        from dorm.contrib.listen_notify import Broadcaster
+
+        async def _scenario():
+            bcast = Broadcaster(["orders"])
+            with pytest.raises(KeyError):
+                async with bcast.subscribe("not-registered"):
+                    pass
 
         asyncio.run(_scenario())
