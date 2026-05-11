@@ -23,6 +23,7 @@ from __future__ import annotations
 import functools
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 
@@ -40,14 +41,30 @@ class TokenBucket:
     storage by subclassing.
     """
 
-    def __init__(self, *, rate_per_second: float, burst: int) -> None:
+    def __init__(
+        self,
+        *,
+        rate_per_second: float,
+        burst: int,
+        max_keys: int = 100_000,
+    ) -> None:
+        """*max_keys* caps the per-key map so workloads with
+        unbounded key cardinality (per-IP, per-token) can't leak
+        memory. When the cap is hit, the least-recently-touched key
+        is dropped — its bucket implicitly resets to full burst on
+        the next ``allow`` call, so the cap is observable as
+        occasional "leniency" near saturation rather than denied
+        requests."""
         if rate_per_second <= 0:
             raise ValueError("rate_per_second must be > 0")
         if burst < 1:
             raise ValueError("burst must be >= 1")
+        if max_keys < 1:
+            raise ValueError("max_keys must be >= 1")
         self.rate = rate_per_second
         self.burst = burst
-        self._buckets: dict[str, tuple[float, float]] = {}
+        self.max_keys = max_keys
+        self._buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
         self._lock = threading.Lock()
 
     def allow(self, key: str) -> bool:
@@ -58,11 +75,14 @@ class TokenBucket:
             tokens, last = self._buckets.get(key, (float(self.burst), now))
             elapsed = max(0.0, now - last)
             tokens = min(self.burst, tokens + elapsed * self.rate)
-            if tokens >= 1.0:
-                self._buckets[key] = (tokens - 1.0, now)
-                return True
-            self._buckets[key] = (tokens, now)
-            return False
+            granted = tokens >= 1.0
+            new_tokens = tokens - 1.0 if granted else tokens
+            self._buckets[key] = (new_tokens, now)
+            self._buckets.move_to_end(key)
+            # Evict LRU when above the cap.
+            while len(self._buckets) > self.max_keys:
+                self._buckets.popitem(last=False)
+            return granted
 
     def reset(self, key: str | None = None) -> None:
         """Drop one key (when given) or every key (when omitted)."""

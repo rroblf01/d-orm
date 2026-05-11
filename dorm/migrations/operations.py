@@ -1825,14 +1825,19 @@ class AddCheckConstraintOnline(Operation):
     ) -> None:
         vendor = getattr(connection, "vendor", "sqlite")
         if vendor == "postgresql":
-            connection.execute_script(
-                f'ALTER TABLE "{self.table}" '
-                f'ADD CONSTRAINT "{self.name}" CHECK ({self.check}) NOT VALID'
-            )
-            connection.execute_script(
-                f'ALTER TABLE "{self.table}" '
-                f'VALIDATE CONSTRAINT "{self.name}"'
-            )
+            # Wrap both halves in one transaction. Without atomicity,
+            # a VALIDATE failure (existing-row violation) leaves the
+            # NOT VALID constraint adopted but unvalidated — schema
+            # drift the user has to clean up by hand.
+            with connection.atomic():
+                connection.execute_script(
+                    f'ALTER TABLE "{self.table}" '
+                    f'ADD CONSTRAINT "{self.name}" CHECK ({self.check}) NOT VALID'
+                )
+                connection.execute_script(
+                    f'ALTER TABLE "{self.table}" '
+                    f'VALIDATE CONSTRAINT "{self.name}"'
+                )
             return
         # Fallback: plain ADD CONSTRAINT (likely a table rewrite).
         connection.execute_script(

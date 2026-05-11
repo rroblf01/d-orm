@@ -175,6 +175,13 @@ class TestSeederMigration:
 
 
 class TestAddCheckConstraintOnline:
+    class _NoopAtomic:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
     class _FakeConn:
         vendor = "postgresql"
 
@@ -183,6 +190,9 @@ class TestAddCheckConstraintOnline:
 
         def execute_script(self, sql: str) -> None:
             self.scripts.append(sql)
+
+        def atomic(self):
+            return TestAddCheckConstraintOnline._NoopAtomic()
 
     def test_pg_emits_two_phase(self):
         from dorm.migrations.operations import AddCheckConstraintOnline

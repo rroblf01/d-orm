@@ -51,6 +51,12 @@ from .outbox import OutboxEvent, OutboxRelay, record_event
 _log = logging.getLogger("dorm.contrib.tasks")
 
 
+class _TaskNotReady(Exception):
+    """Raised by the worker handler when an event's ``eta`` is in the
+    future. Surfaces as a normal handler failure to the relay — the
+    relay's retry-with-backoff path then re-checks on the next pass."""
+
+
 _TASK_REGISTRY: dict[str, "Task"] = {}
 
 
@@ -166,6 +172,29 @@ class TaskQueue:
             payload = event.payload
             if isinstance(payload, str):
                 payload = json.loads(payload)
+            # Respect ``eta`` written by ``Task.delay(eta=…)``. The
+            # OutboxRelay scans pending rows without knowing about
+            # ETA semantics, so the gate fires here: skip rows whose
+            # ETA is still in the future and raise so the relay
+            # bumps the attempt count + leaves the row pending. The
+            # relay's exponential-backoff retry path then naturally
+            # serves as the rescheduler.
+            eta_raw = payload.get("eta") if isinstance(payload, dict) else None
+            if eta_raw:
+                try:
+                    eta = _dt.datetime.fromisoformat(eta_raw)
+                except ValueError:
+                    eta = None
+                if eta is not None:
+                    now = _dt.datetime.now(_dt.timezone.utc)
+                    # Normalise naive datetimes to UTC.
+                    if eta.tzinfo is None:
+                        eta = eta.replace(tzinfo=_dt.timezone.utc)
+                    if eta > now:
+                        raise _TaskNotReady(
+                            f"task {event.event_type!r} scheduled for "
+                            f"{eta.isoformat()}; current {now.isoformat()}"
+                        )
             args = payload.get("args", []) or []
             kwargs = payload.get("kwargs", {}) or {}
             task_.func(*args, **kwargs)
@@ -308,17 +337,24 @@ def _parse_cron_field(spec: str, lo: int, hi: int) -> set[int]:
     out: set[int] = set()
     for part in spec.split(","):
         step = 1
+        had_step = False
         if "/" in part:
             base, step_s = part.split("/", 1)
             step = int(step_s)
             if step < 1:
                 raise ValueError(f"cron step must be >= 1, got {step}")
             part = base
+            had_step = True
         if part in ("*", ""):
             rng = range(lo, hi + 1, step)
         elif "-" in part:
             a, b = part.split("-", 1)
             rng = range(int(a), int(b) + 1, step)
+        elif had_step:
+            # Standard cron: ``a/N`` means "from a to hi in steps of
+            # N", e.g. ``0/5`` in a minute field matches
+            # ``0, 5, 10, …, 55``.
+            rng = range(int(part), hi + 1, step)
         else:
             n = int(part)
             rng = range(n, n + 1)

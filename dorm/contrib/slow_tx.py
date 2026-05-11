@@ -7,6 +7,16 @@ Wraps :func:`dorm.transaction.atomic` so atomic blocks that exceed
 Activate by calling :func:`install` once at process start. The
 detector is opt-in because every atomic exit pays a small timing
 cost; production deployments can flip it on without code changes.
+
+.. warning::
+
+   ``install()`` monkey-patches :func:`dorm.transaction.atomic`.
+   Modules that imported the function via ``from dorm.transaction
+   import atomic`` before ``install()`` ran still hold the *original*
+   reference and bypass the timing wrapper. Call ``install()`` as
+   early as possible — typically the first executable line of your
+   settings module — so every later import sees the patched
+   function.
 """
 from __future__ import annotations
 
