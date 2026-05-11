@@ -151,6 +151,36 @@ def _label_pairs(**labels: str) -> str:
 _pool_saturation_log = logging.getLogger("dorm.contrib.prometheus.pool")
 
 
+# Process-wide pool-warmup timing record so the Prometheus snapshot
+# can expose ``dorm_pool_warmup_seconds`` — alerting on cold-start
+# regressions in autoscaled deployments.
+_warmup_seconds: dict[str, float] = {}
+
+
+def record_pool_warmup(alias: str, seconds: float) -> None:
+    """Record the wall-clock cost of pre-warming the pool for *alias*.
+
+    Called by ``dorm.contrib.pool_autoscale.warmup_pool`` — exposes
+    its measured duration as the Prometheus gauge
+    ``dorm_pool_warmup_seconds{alias=...}``.
+    """
+    _warmup_seconds[alias] = float(seconds)
+
+
+def _warmup_lines() -> list[str]:
+    if not _warmup_seconds:
+        return []
+    out = [
+        "# HELP dorm_pool_warmup_seconds Wall-clock time spent pre-warming the pool.",
+        "# TYPE dorm_pool_warmup_seconds gauge",
+    ]
+    for alias, secs in _warmup_seconds.items():
+        out.append(
+            f"dorm_pool_warmup_seconds{_label_pairs(alias=alias)} {secs:.6f}"
+        )
+    return out
+
+
 def _pool_lines() -> list[str]:
     """Best-effort poll of every active sync alias's pool stats.
 
@@ -276,6 +306,7 @@ def metrics_response() -> str:
                 )
 
     out.extend(_pool_lines())
+    out.extend(_warmup_lines())
     out.extend(_querystats_lines())
     return "\n".join(out) + "\n"
 
@@ -299,6 +330,7 @@ def _querystats_lines() -> list[str]:
 
 __all__ = [
     "install",
+    "record_pool_warmup",
     "uninstall",
     "metrics_response",
     "record_cache_hit",

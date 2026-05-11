@@ -187,9 +187,29 @@ def generate_short_lived_token(*, prefix: str = "tok_") -> str:
     return prefix + secrets.token_urlsafe(32)
 
 
+def rotate_short_lived_token(
+    existing_token: str | None, *, prefix: str = "tok_"
+) -> tuple[str, str | None]:
+    """Generate a fresh short-lived token and return ``(new_token,
+    old_token)``.
+
+    Caller is responsible for persisting both:
+
+    - Insert *new_token* with a fresh expiry.
+    - Mark *old_token* as revoked (or delete it) once every active
+      session has had a chance to refresh.
+
+    The pair return shape encourages the dual-token grace window
+    pattern: the old token keeps validating until its TTL elapses,
+    avoiding logout storms when many clients refresh at once.
+    """
+    return generate_short_lived_token(prefix=prefix), existing_token
+
+
 __all__ = [
     "PasswordResetTokenGenerator",
     "default_token_generator",
     "generate_short_lived_token",
+    "rotate_short_lived_token",
     "DEFAULT_TIMEOUT_SECONDS",
 ]

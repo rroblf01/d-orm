@@ -6,6 +6,135 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-05-11
+
+Minor release. No breaking changes vs 4.2 — every addition is opt-in.
+
+### Added — Tier 1 (strategic)
+
+- **Cross-vendor UPSERT** —
+  ``Manager.upsert(objs, unique_fields=[...])`` /
+  ``aupsert(...)`` sugar over
+  ``bulk_create(update_conflicts=True)``. Default
+  ``update_fields`` excludes PK + unique columns.
+- **Temporal tables** — ``@temporal`` decorator builds a
+  ``<Model>Temporal`` mirror with ``valid_from`` / ``valid_to`` /
+  ``operation`` columns. ``post_save`` / ``post_delete`` receivers
+  close the previous open row and open a new one; the free function
+  :func:`dorm.contrib.temporal.as_of(Model, ts)` returns the
+  point-in-time snapshot.
+- **``dorm.contrib.tasks``** — Celery-lite background task runner
+  built on the outbox + LISTEN/NOTIFY. ``TaskQueue``,
+  ``@task(queue, name=...)`` decorator, ``.delay(...)`` enqueue.
+  Workers fall back to polling when LISTEN/NOTIFY isn't available.
+
+### Added — Tier 2 (extra field types)
+
+- **``dorm.contrib.extra_fields.MoneyField``** — Decimal column
+  paired with a fixed ISO-4217 currency code; assignment accepts
+  :class:`Money` / Decimal / int / str.
+- **``SemverField``** — validates SemVer 2.0.0 grammar at assignment.
+- **``PhoneField``** — E.164-shaped number with whitespace /
+  punctuation stripping.
+- **``ColorField``** — ``#RRGGBB`` / ``#RRGGBBAA`` hex string,
+  upper-cased on storage.
+- **``JSONSchemaField``** — ``JSONField`` validated against a
+  user-supplied JSON Schema at assignment time. Requires the
+  optional ``jsonschema`` dep.
+
+### Added — Tier 3 (async/sync ergonomics)
+
+- **``SyncDataLoader``** — synchronous sibling of the async
+  :class:`DataLoader`. Same key-coalescing pattern, explicit
+  :meth:`flush` boundary, ``prime()`` / ``clear_all()`` parity.
+- **``dorm.contrib.background.BackgroundTasks``** — bounded async
+  task scheduler for fire-and-forget work inside one request.
+  Configurable concurrency, swallow-or-raise semantics, cancel-all
+  on shutdown.
+
+### Added — Tier 4 (distributed transactions)
+
+- **``dorm.contrib.saga``** — :class:`Saga` + :class:`Step`. Each
+  step runs in its own ``atomic()`` block; compensations fire in
+  reverse order on failure. ``SagaRun`` records the per-run audit
+  trail (completed / compensated / failure / context).
+- **``dorm.contrib.two_phase.two_phase_commit``** — XA-style 2PC
+  over PostgreSQL ``PREPARE TRANSACTION``. PG-only; raises
+  :class:`TwoPhaseError` on phase-1 or phase-2 failure.
+- **``dorm.contrib.inbox``** — :class:`InboxRecord` abstract model
+  + ``@idempotent`` decorator that guarantees exactly-once
+  processing via a unique-key constraint on ``(message_id,
+  handler_name)``.
+
+### Added — Tier 5 (observability / perf)
+
+- **Plan-drift history** — every :func:`compare` /
+  :func:`acompare` call is appended to a bounded ring (50 / tag).
+  ``history(tag=None)`` reads it back; ``clear_history`` flushes.
+- **Pool-warmup gauge** —
+  ``dorm.contrib.pool_autoscale.warmup_pool`` now records its
+  duration via ``record_pool_warmup(alias, seconds)`` and the
+  Prometheus snapshot exposes ``dorm_pool_warmup_seconds{alias}``.
+- **``RowCache``** — process-local LRU cache keyed by PK with
+  automatic invalidation on ``post_save`` / ``post_delete``.
+  Bounded, opt-out via ``invalidate_on_write=False``.
+- **N+1 fix suggestions** —
+  ``dorm.contrib.nplusone.suggest_fix(template, model_hint=...)``
+  returns a human-readable recommendation (``select_related`` for
+  FK, ``prefetch_related`` for reverse / M2M).
+
+### Added — Tier 6 (DX)
+
+- **``dorm init --template``** — scaffolding cookiecutter-style
+  templates. Ships ``fastapi-postgres`` and ``litestar-sqlite``
+  out of the box.
+
+### Added — Tier 7 (sugar)
+
+- **``F.coalesce(*defaults)``** — sugar for ``Coalesce(F(...),
+  ...)``. Reads top-down vs nested constructor.
+- **``subtree_filter()``** — convenience wrapper over
+  :func:`descendants_cte` that splices a ``WHERE`` predicate
+  around the recursive CTE.
+
+### Added — Tier 8 (security)
+
+- **``dorm.contrib.anonymizer``** — batch row rewrite for safe
+  dumps / GDPR. Built-in strategies (``redact`` /
+  ``random_email`` / ``random_phone``) + arbitrary
+  ``Callable[[Any], Any]`` strategies. Per-batch ``atomic()``,
+  optional progress callback.
+- **``rotate_short_lived_token(existing)``** —
+  ``dorm.contrib.auth.tokens`` helper returning ``(new, old)``
+  for the dual-token grace-window rotation pattern.
+- **Extensible SQL-log sensitive patterns** —
+  ``dorm.db.utils.add_sensitive_pattern("ssn", "credit_card")``
+  extends the log-redactor's substring list; ``reset_sensitive_patterns()``
+  restores the built-in tuple.
+
+### Deferred (won't land in 4.3)
+
+- **MSSQL / SQL Server backend** — requires a live driver + server
+  for safe integration; scoped for 4.4.
+- **ClickHouse read-only backend** — same rationale.
+- **Spanner backend** — same rationale.
+- **Composite Foreign Keys** — refactor of the query compiler;
+  scoped for 4.4.
+- **TimescaleDB hypertable helpers** — needs the PG extension
+  available in test infra.
+- **``dorm shell --notebook``** — Jupyter kernel; scoped for 4.4.
+- **``pytest-djanorm`` factories** — change to the sibling package
+  rather than the main wheel.
+- **Migration squash preserving ``RunPython``** — high-risk for
+  data ops; needs targeted incident review first.
+
+### Validated
+
+- ``ruff check``: clean.
+- ``ty check``: clean.
+- ``mkdocs build --strict``: clean.
+- ``pytest tests/``: every new v4.3 suite green (~120 new tests).
+
 ## [4.2.0] - 2026-05-11
 
 Minor release. No breaking changes vs 4.1 — every addition is opt-in.

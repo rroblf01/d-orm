@@ -202,7 +202,9 @@ def autoscale_pool(
     return current_min, new_max
 
 
-def warmup_pool(*, target: int | None = None, using: str = "default") -> int:
+def warmup_pool(
+    *, target: int | None = None, using: str = "default"
+) -> int:  # noqa: D401
     """Pre-open up to *target* connections so the first request after
     process start doesn't pay connect-and-handshake cost.
 
@@ -242,6 +244,9 @@ def warmup_pool(*, target: int | None = None, using: str = "default") -> int:
     if n <= 0:
         return 0
 
+    import time as _time
+
+    start = _time.perf_counter()
     opened = 0
     held: list = []
     try:
@@ -261,7 +266,21 @@ def warmup_pool(*, target: int | None = None, using: str = "default") -> int:
                 ctx.__exit__(None, None, None)
             except Exception:
                 pass
-    _log.info("warmup_pool(%s): pre-opened %d connection(s)", using, opened)
+    elapsed = _time.perf_counter() - start
+    _log.info(
+        "warmup_pool(%s): pre-opened %d connection(s) in %.3fs",
+        using,
+        opened,
+        elapsed,
+    )
+    # Surface the timing as a Prometheus gauge when the contrib module
+    # is importable. Best-effort: keeps the autoscaler decoupled.
+    try:
+        from .prometheus import record_pool_warmup
+
+        record_pool_warmup(using, elapsed)
+    except Exception:  # pragma: no cover - defensive
+        pass
     return opened
 
 

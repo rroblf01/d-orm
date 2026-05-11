@@ -14,7 +14,7 @@ Works with **SQLite**, **PostgreSQL**, **CockroachDB** (4.1+), **MySQL / MariaDB
 
 **Sibling packages**: [`pytest-djanorm`](pytest-djanorm/) (test fixtures) and [`djanorm-mypy`](djanorm-mypy/) (mypy plugin) ship in their own packages so the main wheel never pulls dev tooling.
 
-Release notes for every version live in [CHANGELOG.md](CHANGELOG.md). For the **4.2** highlights see [docs/v4_2.md](docs/v4_2.en.md); the **4.1** highlights live in [docs/v4_1.md](docs/v4_1.en.md); the **4.0** highlights live in [docs/v4_0.md](docs/v4_0.en.md); upgrading from 3.3 → 4.0 is documented in [docs/upgrading-to-4.0.md](docs/upgrading-to-4.0.en.md). 4.1 → 4.2 needs no code changes.
+Release notes for every version live in [CHANGELOG.md](CHANGELOG.md). For the **4.3** highlights see [docs/v4_3.md](docs/v4_3.en.md); the **4.2** highlights live in [docs/v4_2.md](docs/v4_2.en.md); the **4.1** highlights live in [docs/v4_1.md](docs/v4_1.en.md); the **4.0** highlights live in [docs/v4_0.md](docs/v4_0.en.md); upgrading from 3.3 → 4.0 is documented in [docs/upgrading-to-4.0.md](docs/upgrading-to-4.0.en.md). 4.2 → 4.3 needs no code changes.
 
 ## Installation
 

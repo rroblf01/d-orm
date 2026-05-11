@@ -314,7 +314,7 @@ async def awith_transient_retry(
 # before each placeholder), so this only kicks in when the column itself
 # carries the secret — bulk inserts where the secret column is one
 # among many still get masked at that column's position.
-_SENSITIVE_COLUMN_PATTERNS = (
+_DEFAULT_SENSITIVE_PATTERNS: tuple[str, ...] = (
     "password",
     "passwd",
     "secret",
@@ -326,6 +326,36 @@ _SENSITIVE_COLUMN_PATTERNS = (
     "access_key",
     "private_key",
 )
+# Extensible: user code can extend the list at runtime via
+# :func:`add_sensitive_pattern`. Reads stay lock-free (immutable
+# tuples), writes serialise so a concurrent reader never observes a
+# half-built tuple.
+_SENSITIVE_COLUMN_PATTERNS = _DEFAULT_SENSITIVE_PATTERNS
+_sensitive_lock = __import__("threading").Lock()
+
+
+def add_sensitive_pattern(*patterns: str) -> None:
+    """Extend the column-name substring list used by the SQL-log
+    redactor. Idempotent — already-present patterns are skipped."""
+    global _SENSITIVE_COLUMN_PATTERNS
+    if not patterns:
+        return
+    with _sensitive_lock:
+        existing = set(_SENSITIVE_COLUMN_PATTERNS)
+        merged = list(_SENSITIVE_COLUMN_PATTERNS)
+        for p in patterns:
+            lower = p.lower()
+            if lower and lower not in existing:
+                existing.add(lower)
+                merged.append(lower)
+        _SENSITIVE_COLUMN_PATTERNS = tuple(merged)
+
+
+def reset_sensitive_patterns() -> None:
+    """Restore the built-in list. Useful between test runs."""
+    global _SENSITIVE_COLUMN_PATTERNS
+    with _sensitive_lock:
+        _SENSITIVE_COLUMN_PATTERNS = _DEFAULT_SENSITIVE_PATTERNS
 
 
 _INSERT_RE = re.compile(

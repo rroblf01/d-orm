@@ -1127,8 +1127,97 @@ class User(dorm.Model):
 """
 
 
+_TEMPLATES: dict[str, dict[str, str]] = {
+    "fastapi-postgres": {
+        "settings.py": (
+            "import os\n"
+            "import dorm\n\n"
+            "DATABASES = {\n"
+            "    'default': dorm.parse_database_url(\n"
+            "        os.environ.get('DATABASE_URL',\n"
+            "                       'postgresql://localhost/app'),\n"
+            "    ),\n"
+            "}\n"
+            "INSTALLED_APPS = ['app']\n"
+        ),
+        "app/__init__.py": "",
+        "app/models.py": (
+            "import dorm\n\n\n"
+            "class Item(dorm.Model):\n"
+            "    name = dorm.CharField(max_length=80)\n"
+            "    created_at = dorm.DateTimeField(auto_now_add=True)\n"
+        ),
+        "app/main.py": (
+            "from fastapi import FastAPI\n"
+            "from .models import Item\n\n"
+            "app = FastAPI()\n\n\n"
+            "@app.get('/items')\n"
+            "async def list_items():\n"
+            "    return [\n"
+            "        {'id': i.id, 'name': i.name}\n"
+            "        async for i in Item.objects.all()\n"
+            "    ]\n"
+        ),
+    },
+    "litestar-sqlite": {
+        "settings.py": (
+            "DATABASES = {\n"
+            "    'default': {'ENGINE': 'sqlite', 'NAME': 'db.sqlite3'},\n"
+            "}\n"
+            "INSTALLED_APPS = ['app']\n"
+        ),
+        "app/__init__.py": "",
+        "app/models.py": (
+            "import dorm\n\n\n"
+            "class Item(dorm.Model):\n"
+            "    name = dorm.CharField(max_length=80)\n"
+        ),
+        "app/main.py": (
+            "from litestar import Litestar, get\n"
+            "from dorm.contrib.litestar import dorm_plugin\n"
+            "from .models import Item\n\n\n"
+            "@get('/items')\n"
+            "async def list_items() -> list[dict]:\n"
+            "    return [\n"
+            "        {'id': i.id, 'name': i.name}\n"
+            "        async for i in Item.objects.all()\n"
+            "    ]\n\n"
+            "app = Litestar(\n"
+            "    route_handlers=[list_items],\n"
+            "    plugins=[dorm_plugin()],\n"
+            ")\n"
+        ),
+    },
+}
+
+
 def cmd_init(args):
+    template = getattr(args, "template", None)
     cwd = Path.cwd()
+    if template is not None:
+        if template not in _TEMPLATES:
+            print(
+                f"Unknown template {template!r}. Available: "
+                f"{', '.join(sorted(_TEMPLATES))}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        for rel, content in _TEMPLATES[template].items():
+            dest = cwd / rel
+            if dest.exists():
+                print(f"{dest} already exists — leaving it untouched.")
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
+            print(f"Created {dest}")
+        print()
+        print(f"Template {template!r} scaffolded. Next:")
+        print("  pip install 'djanorm[postgresql]' fastapi" if "fastapi" in template
+              else "  pip install 'djanorm[sqlite,litestar]'")
+        print("  dorm makemigrations app")
+        print("  dorm migrate")
+        return
+
     settings_path = cwd / "settings.py"
     if settings_path.exists():
         print(f"settings.py already exists at {settings_path} — leaving it untouched.")
@@ -2864,6 +2953,16 @@ def main():
             "Name of an app to scaffold alongside settings.py. Creates "
             "NAME/ (if missing), NAME/__init__.py, and NAME/models.py "
             "with an example User model."
+        ),
+    )
+    ini.add_argument(
+        "--template",
+        default=None,
+        choices=sorted(_TEMPLATES),
+        help=(
+            "Scaffold from a named template instead of the minimal "
+            "settings.py + app pair. Available: "
+            f"{', '.join(sorted(_TEMPLATES))}."
         ),
     )
     ini.set_defaults(func=cmd_init)

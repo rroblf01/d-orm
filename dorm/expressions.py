@@ -147,6 +147,18 @@ class F:
         """
         return func_cls(self, *extra)
 
+    def coalesce(self, *defaults):
+        """Sugar for :class:`~dorm.functions.Coalesce` —
+        ``F("nick").coalesce("(no nickname)")`` reads top-down vs the
+        nested constructor form ``Coalesce(F("nick"),
+        Value("(no nickname)"))``."""
+        from .functions import Coalesce
+
+        wrapped = [
+            d if hasattr(d, "as_sql") else Value(d) for d in defaults
+        ]
+        return Coalesce(self, *wrapped)
+
     def __repr__(self):
         return f"F({self.name!r})"
 

@@ -275,6 +275,58 @@ async def adetect(
         yield detector
 
 
+def suggest_fix(template: str, model_hint: str | None = None) -> str:
+    """Return a human-readable suggestion for fixing the N+1 detected
+    by *template*.
+
+    The function inspects the template shape (``SELECT ... WHERE
+    <fk>_id = ?`` → suggest ``select_related``; ``SELECT ... WHERE
+    <fk>_id IN (?)`` after a ``LIMIT`` → suggest ``prefetch_related``)
+    and assembles a string the user can paste into their queryset
+    chain. Heuristics — not perfect, but better than the generic
+    "use select_related" lecture.
+    """
+    import re
+
+    # FK lookup pattern: ``WHERE "table"."col_id" = ?``.
+    m = re.search(
+        r'WHERE\s+"?[\w]+"?\."?(?P<col>\w+_id)"?\s*=\s*\?',
+        template,
+        re.IGNORECASE,
+    )
+    if m:
+        col = m.group("col")
+        attr = col[:-3]  # strip ``_id``
+        prefix = f"on model {model_hint!r}: " if model_hint else ""
+        return (
+            f"{prefix}likely missing select_related({attr!r}). Chain "
+            f".select_related({attr!r}) on the parent queryset to pull "
+            f"the related row in one JOIN instead of N follow-ups."
+        )
+    # Reverse / M2M lookup: ``WHERE "table"."<col>_id" IN (?)``.
+    m = re.search(
+        r'WHERE\s+"?[\w]+"?\."?(?P<col>\w+_id)"?\s+IN\s*\(',
+        template,
+        re.IGNORECASE,
+    )
+    if m:
+        col = m.group("col")
+        attr = col[:-3]
+        prefix = f"on model {model_hint!r}: " if model_hint else ""
+        return (
+            f"{prefix}likely missing prefetch_related on the reverse "
+            f"relation for {attr!r}. Chain "
+            f".prefetch_related(<reverse_name>) on the parent queryset "
+            f"to batch the follow-up SELECTs."
+        )
+    return (
+        "Inspect the call site: a tight loop over instances + an attribute "
+        "access that triggers a per-row SELECT typically points at a "
+        "missing select_related (FK / O2O) or prefetch_related "
+        "(reverse FK / M2M)."
+    )
+
+
 def install_debug_global() -> NPlusOneDetector | None:
     """Activate a long-lived :class:`NPlusOneDetector` when
     ``settings.DEBUG_NPLUSONE`` is set.
@@ -327,6 +379,7 @@ _GLOBAL_DEBUG_DETECTOR: NPlusOneDetector | None = None
 __all__ = [
     "NPlusOneDetector",
     "install_debug_global",
+    "suggest_fix",
     "NPlusOneError",
     "adetect",
     "assert_no_nplusone",

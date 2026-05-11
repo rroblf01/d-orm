@@ -491,6 +491,40 @@ class BaseManager(Generic[_T]):
     ) -> int:
         return self.get_queryset().bulk_update_when(cases, default=default)
 
+    def upsert(
+        self,
+        objs: list[_T],
+        unique_fields: list[str],
+        *,
+        update_fields: list[str] | None = None,
+        batch_size: int = 1000,
+        returning: bool = False,
+    ) -> list[_T]:
+        return self.get_queryset().upsert(
+            objs,
+            unique_fields,
+            update_fields=update_fields,
+            batch_size=batch_size,
+            returning=returning,
+        )
+
+    async def aupsert(
+        self,
+        objs: list[_T],
+        unique_fields: list[str],
+        *,
+        update_fields: list[str] | None = None,
+        batch_size: int = 1000,
+        returning: bool = False,
+    ) -> list[_T]:
+        return await self.get_queryset().aupsert(
+            objs,
+            unique_fields,
+            update_fields=update_fields,
+            batch_size=batch_size,
+            returning=returning,
+        )
+
     def union_with(
         self,
         *others: Any,

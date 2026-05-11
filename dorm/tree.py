@@ -215,9 +215,63 @@ def ancestors(
     return conn.execute(sql, params)
 
 
+def subtree_filter(
+    model: Any,
+    *,
+    parent_field: str = "parent_id",
+    root_pk: Any,
+    where_sql: str | None = None,
+    where_params: list[Any] | None = None,
+    pk_column: str = "id",
+    using: str = "default",
+) -> list[Any]:
+    """Walk the subtree rooted at *root_pk* and return rows that also
+    satisfy a filter predicate.
+
+    Convenience wrapper over :func:`descendants_cte` that splices a
+    ``WHERE`` clause around the recursive query — useful for
+    questions like "every active child of node 42" without writing
+    the CTE shell by hand.
+
+    Args:
+        model: the dorm model holding the tree.
+        parent_field: column name of the FK pointing at the parent.
+        root_pk: starting node — its subtree (inclusive) is walked.
+        where_sql: optional ``WHERE`` predicate (e.g.
+            ``"is_active = %s"``). The CTE alias is named ``d``;
+            reference columns via unqualified names.
+        where_params: parameters for *where_sql*.
+        pk_column: physical PK column name.
+        using: connection alias.
+
+    Returns the raw row list produced by the underlying execute.
+    """
+    from .db.connection import get_connection
+
+    conn = get_connection(using)
+    cte = descendants_cte(
+        model, parent_field=parent_field, root_pk=root_pk, pk_column=pk_column
+    )
+    cte_q = _quote("descendants", kind="subtree_filter name")
+    pk = _quote(pk_column, kind="subtree_filter pk_column")
+    parent = _quote(parent_field, kind="subtree_filter parent_field")
+
+    select = (
+        f"WITH RECURSIVE {cte_q} AS ({cte.sql}) "
+        f"SELECT {pk} AS pk, {parent} AS parent_id FROM {cte_q} d"
+    )
+    if where_sql:
+        select += f" WHERE {where_sql}"
+    params = list(cte.params) + list(where_params or [])
+    if conn.vendor != "postgresql":
+        select = select.replace("%s", "?")
+    return conn.execute(select, params)
+
+
 __all__ = [
     "ancestors",
     "ancestors_cte",
     "descendants",
     "descendants_cte",
+    "subtree_filter",
 ]

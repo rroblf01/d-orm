@@ -74,6 +74,11 @@ class CompareResult:
 _BASELINES: dict[str, str] = {}
 _lock = threading.Lock()
 
+# History of every comparison, retained in a bounded ring per tag.
+# Useful for "show me the last N drift events" dashboards.
+_HISTORY_MAX = 50
+_HISTORY: dict[str, list["CompareResult"]] = {}
+
 
 def _capture_plan(sql: str, params: list[Any] | None, using: str) -> str:
     from ..db.connection import get_connection
@@ -152,12 +157,46 @@ def compare(
     if baseline is None:
         raise KeyError(f"no baseline recorded for tag {tag!r}")
     current = _strip_volatile(_capture_plan(sql, params, using))
-    return CompareResult(
+    result = CompareResult(
         tag=tag,
         baseline=baseline,
         current=current,
         drifted=baseline != current,
     )
+    _record_history(result)
+    return result
+
+
+def _record_history(result: "CompareResult") -> None:
+    with _lock:
+        bucket = _HISTORY.setdefault(result.tag, [])
+        bucket.append(result)
+        if len(bucket) > _HISTORY_MAX:
+            del bucket[: len(bucket) - _HISTORY_MAX]
+
+
+def history(tag: str | None = None) -> list["CompareResult"]:
+    """Return the bounded history of comparisons (last 50 per tag).
+
+    Without *tag*, returns a flat list across every tag, ordered by
+    insertion. With *tag*, returns only that tag's bucket.
+    """
+    with _lock:
+        if tag is not None:
+            return list(_HISTORY.get(tag, ()))
+        flat: list[CompareResult] = []
+        for bucket in _HISTORY.values():
+            flat.extend(bucket)
+        return flat
+
+
+def clear_history(tag: str | None = None) -> None:
+    """Drop comparison history. Without *tag*, drops every bucket."""
+    with _lock:
+        if tag is None:
+            _HISTORY.clear()
+        else:
+            _HISTORY.pop(tag, None)
 
 
 def diff_text(result: CompareResult) -> str:
@@ -270,6 +309,8 @@ __all__ = [
     "acompare",
     "diff_text",
     "baselines",
+    "history",
+    "clear_history",
     "reset",
     "CompareResult",
 ]

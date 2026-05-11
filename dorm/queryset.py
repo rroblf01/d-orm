@@ -2833,6 +2833,96 @@ class QuerySet(Generic[_T]):
             self._invalidate_cache_after_bulk_write()
         return count
 
+    def upsert(
+        self,
+        objs: list[_T],
+        unique_fields: list[str],
+        *,
+        update_fields: list[str] | None = None,
+        batch_size: int = 1000,
+        returning: bool = False,
+    ) -> list[_T]:
+        """Cross-vendor UPSERT (INSERT-or-UPDATE).
+
+        Sugar over :meth:`bulk_create(update_conflicts=True)` that
+        smooths the per-backend differences:
+
+        - PostgreSQL / SQLite emit ``INSERT ... ON CONFLICT (uniques)
+          DO UPDATE SET ...``.
+        - MySQL / MariaDB emit ``INSERT ... ON DUPLICATE KEY UPDATE``
+          (``unique_fields`` is implied by the table's unique indexes).
+        - libsql / DuckDB inherit the SQLite path.
+
+        Args:
+            objs: instances to upsert.
+            unique_fields: list of field names that determine row
+                identity. Required — picking the conflict target
+                wrong silently overwrites unrelated rows.
+            update_fields: optional column list to refresh on conflict.
+                When ``None``, every non-unique non-pk field is updated.
+            batch_size: rows per INSERT statement; keeps per-statement
+                parameter count bounded under PG / SQLite limits.
+            returning: when True, returns the inserted-or-updated rows
+                refreshed from the database (PG / SQLite only).
+
+        Returns the list of upserted instances (possibly empty when
+        backends without RETURNING are used and ``returning=False``).
+        """
+        if not objs:
+            return []
+        if not unique_fields:
+            raise ValueError("upsert(): unique_fields is required")
+        if update_fields is None:
+            # Default: everything except PK + unique-field columns.
+            pk = self.model._meta.pk.attname
+            uniques_set = set(unique_fields)
+            update_fields = [
+                f.name
+                for f in self.model._meta.fields
+                if f.name != pk and f.name not in uniques_set
+                and not getattr(f, "many_to_many", False)
+            ]
+        return self.bulk_create(
+            objs,
+            batch_size=batch_size,
+            update_conflicts=True,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+            returning=list(self.model._meta.fields) if returning else None,
+        )
+
+    async def aupsert(
+        self,
+        objs: list[_T],
+        unique_fields: list[str],
+        *,
+        update_fields: list[str] | None = None,
+        batch_size: int = 1000,
+        returning: bool = False,
+    ) -> list[_T]:
+        """Async counterpart of :meth:`upsert`."""
+        if not objs:
+            return []
+        if not unique_fields:
+            raise ValueError("aupsert(): unique_fields is required")
+        if update_fields is None:
+            pk = self.model._meta.pk.attname
+            uniques_set = set(unique_fields)
+            update_fields = [
+                f.name
+                for f in self.model._meta.fields
+                if f.name != pk and f.name not in uniques_set
+                and not getattr(f, "many_to_many", False)
+            ]
+        return await self.abulk_create(
+            objs,
+            batch_size=batch_size,
+            update_conflicts=True,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+            returning=list(self.model._meta.fields) if returning else None,
+        )
+
     def bulk_update_when(
         self,
         cases: list[tuple[Any, dict[str, Any]]],
