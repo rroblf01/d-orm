@@ -31,6 +31,7 @@ Quick start:
 
 from .conf import configure, parse_database_url, settings
 from . import budget, signals, transaction
+from .transaction import aconnection_for, connection_for
 from .budget import BudgetExceeded
 from .models import ReadOnlyModelError
 from .db.connection import ahealth_check, health_check, pool_stats
@@ -224,7 +225,7 @@ from .validators import (
     validate_email,
 )
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 __all__ = [
     # Config
     "configure",
@@ -238,6 +239,8 @@ __all__ = [
     "health_check",
     "ahealth_check",
     "pool_stats",
+    "connection_for",
+    "aconnection_for",
     # Signals
     "Signal",
     "pre_save",

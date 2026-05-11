@@ -131,16 +131,58 @@ def _build_history_model(model_cls: type) -> type:
     return type(f"{model_cls.__name__}Historical", (Model,), history_attrs)
 
 
+def _history_mask_pii() -> bool:
+    """Resolve ``settings.HISTORY_MASK_PII`` — opt-in flag that replaces
+    every value bound to a ``pii=True`` field with ``"[REDACTED]"`` (or
+    ``None`` for non-string columns) in the snapshot dict. Default is
+    False so existing audit trails keep their previous behaviour."""
+    try:
+        from ..conf import settings
+
+        return bool(getattr(settings, "HISTORY_MASK_PII", False))
+    except Exception:
+        return False
+
+
+def _redacted_value_for(field: Any) -> Any:
+    """Return the masked replacement value for *field*. Strings get
+    the human-readable sentinel; everything else falls back to ``None``
+    to avoid type-coercion errors when the history row hits the
+    database."""
+    from ..fields import (
+        CharField,
+        EmailField,
+        SlugField,
+        TextField,
+        URLField,
+    )
+
+    if isinstance(field, (CharField, TextField, EmailField, SlugField, URLField)):
+        return "[REDACTED]"
+    return None
+
+
 def _snapshot_kwargs(instance, src_meta) -> dict[str, Any]:
     """Pull every field's current Python value off *instance* into a
     plain dict. Used to seed the history row's ``create()`` call so
-    the row captures the post-save / pre-delete state."""
+    the row captures the post-save / pre-delete state.
+
+    When ``settings.HISTORY_MASK_PII`` is True, any field flagged
+    ``pii=True`` is replaced with a sentinel ("[REDACTED]" for string
+    fields, ``None`` for others). Useful for GDPR-style audit logs
+    that need to retain the *fact* of a change without persisting the
+    sensitive payload.
+    """
+    mask = _history_mask_pii()
     out: dict[str, Any] = {}
     for f in src_meta.fields:
         # Skip M2M (no column on the source row anyway).
         if getattr(f, "many_to_many", False):
             continue
-        out[f.name] = instance.__dict__.get(f.attname)
+        value = instance.__dict__.get(f.attname)
+        if mask and getattr(f, "pii", False) and value is not None:
+            value = _redacted_value_for(f)
+        out[f.name] = value
     return out
 
 

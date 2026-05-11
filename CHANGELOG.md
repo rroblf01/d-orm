@@ -6,6 +6,148 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-05-11
+
+Minor release. **No breaking changes vs 4.0** — every addition is
+opt-in or zero-cost when unused.
+
+### Added — CockroachDB backend
+
+- New ``ENGINE = "cockroachdb"`` resolves to
+  ``dorm.db.backends.cockroach.CockroachDBDatabaseWrapper`` (sync) and
+  ``CockroachDBAsyncDatabaseWrapper`` (async). The wrappers subclass
+  the PostgreSQL pair so every PG-only ORM code path
+  (``CreatePGEnum``, ``CreatePartitionedTable``, ``copy_from``,
+  ``execute_streaming``, …) keeps working unchanged. Default port is
+  patched to ``26257``; ``vendor`` stays ``"postgresql"`` so vendor
+  checks fire transparently. A new ``dialect`` attribute (``"cockroachdb"``)
+  is the opt-in escape hatch for Cockroach-specific divergence.
+- ``dorm.contrib.cockroach.retry_on_serialization`` /
+  ``aretry_on_serialization`` — bounded retry loop with exponential
+  backoff and jitter for SQLSTATE ``40001`` /
+  ``40003``. The matching ``@with_retry`` decorator auto-detects
+  coroutine functions and supports bare or parametrised syntax.
+- Reuses the ``[postgresql]`` extra — no new driver dependency.
+
+### Added — Async schema editor
+
+- ``dorm.migrations.schema.AsyncSchemaEditor`` mirrors
+  :class:`SchemaEditor` for fully-async stacks. Every DDL helper
+  (``acreate_model`` / ``adelete_model`` / ``aadd_field`` /
+  ``aremove_field`` / ``aalter_field`` / ``aexecute``) offloads to
+  :func:`asyncio.to_thread`, so a FastAPI / Litestar startup hook can
+  bootstrap a schema without blocking the event loop. The context-
+  manager protocol is async (``async with``).
+
+### Added — PostgreSQL Row-Level Security migration ops
+
+- ``EnableRowLevelSecurity`` / ``DisableRowLevelSecurity`` —
+  ``ALTER TABLE … ENABLE|DISABLE ROW LEVEL SECURITY``.
+- ``ForceRowLevelSecurity`` — apply policies to the table owner too
+  (recommended for multi-tenant deployments).
+- ``CreatePolicy`` / ``DropPolicy`` / ``AlterPolicy`` — full RLS
+  policy lifecycle. ``CreatePolicy`` enforces a non-empty ``using=``
+  on SELECT / UPDATE / DELETE / ALL policies (and ``check=`` on
+  INSERT) so a typo doesn't accidentally produce an unconstrained
+  policy. ``DropPolicy`` / ``AlterPolicy`` accept ``reverse_*`` /
+  ``previous_*`` kwargs for reversibility.
+- All five ops are PostgreSQL-only and no-op on every other backend
+  so caller code stays portable. Identifiers are double-quoted and
+  control-character-rejected before splicing into DDL.
+
+### Added — PII field tagging
+
+- New ``pii=True`` flag on :class:`~dorm.fields.Field` registers the
+  column as personally-identifiable information. No effect on the
+  SQL layer — consumed by the new ``dorm.contrib.pii`` helpers and
+  the audit-log masking path below.
+- ``dorm.contrib.pii.pii_fields(Model)`` / ``has_pii_fields(Model)``
+  introspection helpers; ``mask_instance(instance)`` mutates an
+  in-memory row to replace PII fields with ``"[REDACTED]"`` (strings)
+  / ``None`` (everything else). ``mask_dict(Model, row)`` does the
+  same on a raw ``values()``-style dict. ``anonymize_row(instance)`` /
+  ``aanonymize_row(instance)`` mask and ``save()`` for GDPR-style
+  right-to-be-forgotten flows.
+- ``settings.HISTORY_MASK_PII = True`` opts every
+  ``@track_history``-tagged model into automatic PII masking on the
+  audit row — the *fact* of the change persists, the sensitive
+  payload doesn't.
+
+### Added — PgBouncer transaction-pool compatibility shim
+
+- New ``PGBOUNCER_MODE`` database setting. Accepts ``True`` /
+  ``"transaction"`` / ``"statement"`` / ``"session"`` (= off).
+  Disables psycopg's server-side prepared-statement cache by forcing
+  ``prepare_threshold=None`` on every connection, defending against
+  the "prepared statement S_1 already exists" failure that PgBouncer
+  in transaction-pool mode otherwise triggers.
+- Logs a warning when the setting overrides an explicit
+  ``PREPARE_THRESHOLD`` so a misconfigured deployment is observable.
+
+### Added — Framework-agnostic ASGI middleware
+
+- ``dorm.contrib.asgi.QueryBudgetMiddleware`` wraps every HTTP
+  request in :func:`dorm.budget.abudget`. Non-HTTP scopes
+  (``lifespan``, ``websocket``) bypass.
+- ``dorm.contrib.asgi.NPlusOneMiddleware`` opens a
+  :class:`~dorm.contrib.nplusone.NPlusOneDetector` per request. Log-
+  only by default (``raise_on_detect=False``) — surfaces accidental
+  N+1 patterns to ops without breaking production traffic.
+- ``dorm.contrib.asgi.OTelDormMiddleware`` opens a parent span around
+  each request so every dorm-emitted DB span is parented under the
+  originating HTTP request. No-op when ``opentelemetry-api`` isn't
+  installed.
+
+### Added — Litestar plugin
+
+- ``dorm.contrib.litestar.DormPlugin`` (and the ``dorm_plugin()``
+  shortcut) wires the three ASGI middlewares with Litestar's
+  ``DefineMiddleware`` and registers async startup / shutdown hooks
+  that pre-warm the connection pool and drain it cleanly on
+  shutdown.
+
+### Added — Public `connection_for(alias)` / `aconnection_for(alias)`
+
+- New ``dorm.connection_for("default")`` /
+  ``dorm.aconnection_for("default")`` return the sync / async
+  backend wrapper. Mirrors Django's ``connections['default']`` and
+  replaces the previously private ``_connection_for``.
+
+### Added — `QuerySet.bulk_update_when` / `abulk_update_when`
+
+- New helper that compiles a list of ``(Q, {field: value})`` cases
+  into a single ``UPDATE … SET col = CASE WHEN … THEN … END WHERE …``
+  statement. Useful for state-machine transitions and bulk
+  re-labelling. Optional ``default={field: value}`` kwarg renders
+  the ``ELSE`` branch; without it, a field's column is preserved
+  (``ELSE col``) for rows that no condition matches.
+- ``QuerySet.update`` now accepts :class:`~dorm.functions.Case`
+  expressions directly so the manual form (``Case`` / ``When``)
+  stays available for callers that prefer it.
+
+### Added — QueryLog dumps
+
+- ``QueryLog.dump_json(path=None)`` returns or writes the captured
+  records as a JSON array.
+- ``QueryLog.dump_jsonl(path)`` streams one JSON object per line —
+  memory-bounded for production capture.
+- ``QueryLog.dump_parquet(path)`` via ``pyarrow`` for big-data
+  replay (DuckDB / ClickHouse / Spark friendly). Pyarrow is an
+  optional install — the helper raises a clear ``ImportError``
+  when absent.
+- Parameters are excluded by default; pass ``include_params=True``
+  on each helper to opt in. Pair with
+  :func:`dorm.contrib.pii.mask_dict` for a per-column redaction
+  pass before persisting.
+
+### Validated
+
+- ``ruff check``: clean.
+- ``ty check``: clean.
+- ``pytest tests/``: every new test green; pre-existing PG
+  partitioning / skip_locked tests remain flaky under ``pytest -n 4``
+  (unchanged from 4.0).
+
 ## [4.0.0] - 2026-05-05
 
 Major release. Consolidates everything we've shipped between 3.3 and

@@ -93,6 +93,37 @@ def _to_pyformat(sql: str) -> str:
     return "".join(out)
 
 
+_PGBOUNCER_MODES = frozenset({"transaction", "statement"})
+
+
+def _coerce_pgbouncer_mode(value: Any) -> str | None:
+    """Normalise the ``PGBOUNCER_MODE`` setting.
+
+    Accepted values:
+
+    - ``False`` / ``None`` / empty string → ``None`` (off).
+    - ``True`` → ``"transaction"`` (the most common pgbouncer mode).
+    - ``"transaction"`` / ``"statement"`` → kept as-is. ``"session"``
+      mode is functionally identical to no pgbouncer at all for our
+      purposes (the connection isn't multiplexed) so we treat it as
+      off.
+    """
+    if not value:
+        return None
+    if value is True:
+        return "transaction"
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _PGBOUNCER_MODES:
+            return lowered
+        if lowered == "session":
+            return None
+    raise ValueError(
+        f"PGBOUNCER_MODE must be False/True/'transaction'/'statement'/'session'; "
+        f"got {value!r}"
+    )
+
+
 def _build_dsn(settings: dict) -> dict:
     dsn = {
         "host": settings.get("HOST", "localhost"),
@@ -135,15 +166,40 @@ class PostgreSQLDatabaseWrapper:
         # connections. Default-on for safety; turn off for high-throughput
         # apps where the ~ms overhead matters more than transparent reconnect.
         self._pool_check = bool(settings.get("POOL_CHECK", True))
+        # PGBOUNCER mode: when True (or when settings.PGBOUNCER_MODE is
+        # ``"transaction"`` / ``"statement"``), force ``prepare_threshold=None``
+        # so psycopg never issues ``PREPARE`` / ``DEALLOCATE``. PgBouncer in
+        # transaction-pooling mode reuses the same backend connection across
+        # client transactions, so server-side prepared statements survive
+        # past the client that allocated them and fail on the next reuse
+        # ("prepared statement S_1 already exists" / "does not exist"). The
+        # shim is opt-in because turning it on disables a real PG
+        # performance feature.
+        self._pgbouncer_mode = _coerce_pgbouncer_mode(
+            settings.get("PGBOUNCER_MODE", False)
+        )
         # PREPARE_THRESHOLD controls server-side prepared-statement caching.
         # ``None`` defers to psycopg's default (5 — i.e. cache after the 5th
         # execution of the same SQL shape). Set to ``0`` for "always prepare"
         # on workloads dominated by repeated SELECT/UPDATE shapes, or to a
         # higher value when most queries are unique.
         prep = settings.get("PREPARE_THRESHOLD")
-        self._prepare_threshold: int | None = (
-            int(prep) if prep is not None else None
-        )
+        if self._pgbouncer_mode:
+            # Hard override — even if the caller explicitly passed
+            # PREPARE_THRESHOLD, transaction-pool mode forbids prepared
+            # statements. Log loudly so a misconfigured deployment is
+            # observable, but don't crash: returning to plain PG by flipping
+            # PGBOUNCER_MODE back off must not require a restart.
+            if prep is not None:
+                _lifecycle.warning(
+                    "PGBOUNCER_MODE=%r overrides PREPARE_THRESHOLD=%r; "
+                    "prepared statements are disabled.",
+                    self._pgbouncer_mode,
+                    prep,
+                )
+            self._prepare_threshold: int | None = None
+        else:
+            self._prepare_threshold = int(prep) if prep is not None else None
         self._pool = None
         self._pool_lock = threading.Lock()
         self._local = threading.local()  # per-instance atomic state per thread
@@ -180,6 +236,12 @@ class PostgreSQLDatabaseWrapper:
                 conn_kwargs: dict[str, Any] = {"row_factory": dict_row}
                 if self._prepare_threshold is not None:
                     conn_kwargs["prepare_threshold"] = self._prepare_threshold
+                elif self._pgbouncer_mode:
+                    # PgBouncer transaction-pool mode: forbid prepared
+                    # statements outright. psycopg treats ``None`` as
+                    # "disabled", but we must pass it explicitly because
+                    # the library's own default (5) re-enables prep.
+                    conn_kwargs["prepare_threshold"] = None
                 pool_kwargs: dict[str, Any] = dict(
                     min_size=self._min_size,
                     max_size=self._max_size,
@@ -600,10 +662,21 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._max_idle = float(settings.get("MAX_IDLE", 600.0))
         self._max_lifetime = float(settings.get("MAX_LIFETIME", 3600.0))
         self._pool_check = bool(settings.get("POOL_CHECK", True))
-        prep = settings.get("PREPARE_THRESHOLD")
-        self._prepare_threshold: int | None = (
-            int(prep) if prep is not None else None
+        self._pgbouncer_mode = _coerce_pgbouncer_mode(
+            settings.get("PGBOUNCER_MODE", False)
         )
+        prep = settings.get("PREPARE_THRESHOLD")
+        if self._pgbouncer_mode:
+            if prep is not None:
+                _lifecycle.warning(
+                    "PGBOUNCER_MODE=%r overrides PREPARE_THRESHOLD=%r "
+                    "(async); prepared statements are disabled.",
+                    self._pgbouncer_mode,
+                    prep,
+                )
+            self._prepare_threshold: int | None = None
+        else:
+            self._prepare_threshold = int(prep) if prep is not None else None
         self._pool = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pool_lock = asyncio.Lock()
@@ -673,6 +746,12 @@ class PostgreSQLAsyncDatabaseWrapper:
                 conn_kwargs: dict[str, Any] = {"row_factory": dict_row}
                 if self._prepare_threshold is not None:
                     conn_kwargs["prepare_threshold"] = self._prepare_threshold
+                elif self._pgbouncer_mode:
+                    # PgBouncer transaction-pool mode: forbid prepared
+                    # statements outright. psycopg treats ``None`` as
+                    # "disabled", but we must pass it explicitly because
+                    # the library's own default (5) re-enables prep.
+                    conn_kwargs["prepare_threshold"] = None
                 pool_kwargs: dict[str, Any] = dict(
                     min_size=self._min_size,
                     max_size=self._max_size,

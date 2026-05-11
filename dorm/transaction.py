@@ -504,6 +504,36 @@ def _connection_for(using: str = "default"):
     return get_connection(using)
 
 
+def connection_for(using: str = "default"):
+    """Return the sync :class:`DatabaseWrapper` for *using*.
+
+    Public, opt-in handle for callers that need direct access to the
+    backend wrapper — typically to issue vendor-specific DDL via
+    :meth:`execute_script` or to wire a custom routing helper. The
+    object returned is the same singleton served by
+    :func:`dorm.db.connection.get_connection`; the dedicated public
+    name makes the intent obvious in user code (mirrors Django's
+    ``connections['default']``).
+
+    Usage::
+
+        from dorm import connection_for
+
+        conn = connection_for("replica")
+        rows = conn.execute("SELECT 1")
+    """
+    return _connection_for(using)
+
+
+async def aconnection_for(using: str = "default"):
+    """Async counterpart of :func:`connection_for` — returns the
+    async wrapper served by
+    :func:`dorm.db.connection.get_async_connection`."""
+    from .db.connection import get_async_connection
+
+    return get_async_connection(using)
+
+
 def savepoint(using: str = "default") -> str:
     """Create a savepoint inside the current transaction. Returns the
     savepoint ID (a unique-per-process token suitable for SQL

@@ -2448,13 +2448,18 @@ class QuerySet(Generic[_T]):
 
     def update(self, **kwargs: Any) -> int:
         from .expressions import CombinedExpression, F, Value
+        from .functions import Case
 
         connection = self._get_connection()
         col_kwargs = {}
         for k, v in kwargs.items():
             try:
                 field = self.model._meta.get_field(k)
-                if isinstance(v, (F, Value, CombinedExpression)):
+                # ``Case`` carries its own SQL emitter via ``as_sql`` —
+                # treat it the same as ``F`` / ``Value`` / arithmetic
+                # combinations so callers can write
+                # ``qs.update(status=Case(When(...), ...))`` directly.
+                if isinstance(v, (F, Value, CombinedExpression, Case)):
                     col_kwargs[field.column] = v
                 else:
                     col_kwargs[field.column] = field.get_db_prep_value(v)
@@ -2809,6 +2814,100 @@ class QuerySet(Generic[_T]):
         if count:
             self._invalidate_cache_after_bulk_write()
         return count
+
+    def bulk_update_when(
+        self,
+        cases: list[tuple[Any, dict[str, Any]]],
+        *,
+        default: dict[str, Any] | None = None,
+    ) -> int:
+        """Apply per-condition ``UPDATE ... SET col = CASE WHEN <cond>
+        THEN <val> ... END`` against the queryset's current filter.
+
+        Args:
+            cases: list of ``(condition, values)`` tuples. The
+                *condition* is a :class:`~dorm.Q` instance (or a dict
+                interpreted as a Q kwargs payload); *values* is a
+                ``{field_name: value}`` mapping with the assignments
+                that fire when the condition matches.
+            default: optional ``{field_name: value}`` mapping used as
+                the ``ELSE`` branch of every generated ``CASE``. A
+                field present in *cases* but absent from *default*
+                keeps its current value (``ELSE <col>``) — matching
+                the Django ``Case(default=F(col))`` idiom.
+
+        Returns the number of rows touched (one row may match more
+        than one condition; only the first wins, per SQL ``CASE``
+        semantics).
+
+        Example::
+
+            Article.objects.filter(published=True).bulk_update_when(
+                [
+                    (Q(score__gte=90), {"label": "A", "featured": True}),
+                    (Q(score__gte=70), {"label": "B"}),
+                ],
+                default={"label": "C", "featured": False},
+            )
+
+        Generates one round-trip per affected column — the trade-off
+        is one ``UPDATE`` per column vs one ``UPDATE`` per row in a
+        naive Python loop.
+        """
+        if not cases:
+            return 0
+        from .expressions import F, Q, Value
+        from .functions import Case, When
+
+        # Normalise each condition to a ``Q`` so the rest of the code
+        # can treat the list uniformly.
+        normalised: list[tuple[Q, dict[str, Any]]] = []
+        for cond, values in cases:
+            if not values:
+                continue
+            if isinstance(cond, dict):
+                cond = Q(**cond)
+            elif not isinstance(cond, Q):
+                raise TypeError(
+                    "bulk_update_when: each condition must be a Q "
+                    f"or dict; got {type(cond).__name__}"
+                )
+            normalised.append((cond, values))
+        if not normalised:
+            return 0
+
+        # Build the per-column ``Case`` expression. A field shows up
+        # in the UPDATE iff at least one branch sets it.
+        fields_touched: list[str] = []
+        for _, values in normalised:
+            for fname in values:
+                if fname not in fields_touched:
+                    fields_touched.append(fname)
+        default = default or {}
+
+        update_kwargs: dict[str, Any] = {}
+        for fname in fields_touched:
+            whens: list[When] = []
+            for cond, values in normalised:
+                if fname not in values:
+                    continue
+                v = values[fname]
+                if not hasattr(v, "as_sql"):
+                    v = Value(v)
+                whens.append(When(cond, then=v))
+            if not whens:
+                continue
+            if fname in default:
+                d_val = default[fname]
+                if not hasattr(d_val, "as_sql"):
+                    d_val = Value(d_val)
+            else:
+                d_val = F(fname)
+            update_kwargs[fname] = Case(*whens, default=d_val)
+
+        if not update_kwargs:
+            return 0
+        return self.update(**update_kwargs)
 
     def in_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
         if not id_list:
@@ -3619,6 +3718,61 @@ class QuerySet(Generic[_T]):
         if objs:
             await self._ainvalidate_cache_after_bulk_write()
         return objs
+
+    async def abulk_update_when(
+        self,
+        cases: list[tuple[Any, dict[str, Any]]],
+        *,
+        default: dict[str, Any] | None = None,
+    ) -> int:
+        """Async counterpart of :meth:`bulk_update_when`."""
+        if not cases:
+            return 0
+        from .expressions import F, Q, Value
+        from .functions import Case, When
+
+        normalised: list[tuple[Q, dict[str, Any]]] = []
+        for cond, values in cases:
+            if not values:
+                continue
+            if isinstance(cond, dict):
+                cond = Q(**cond)
+            elif not isinstance(cond, Q):
+                raise TypeError(
+                    "abulk_update_when: each condition must be a Q "
+                    f"or dict; got {type(cond).__name__}"
+                )
+            normalised.append((cond, values))
+        if not normalised:
+            return 0
+        fields_touched: list[str] = []
+        for _, values in normalised:
+            for fname in values:
+                if fname not in fields_touched:
+                    fields_touched.append(fname)
+        default = default or {}
+        update_kwargs: dict[str, Any] = {}
+        for fname in fields_touched:
+            whens: list[When] = []
+            for cond, values in normalised:
+                if fname not in values:
+                    continue
+                v = values[fname]
+                if not hasattr(v, "as_sql"):
+                    v = Value(v)
+                whens.append(When(cond, then=v))
+            if not whens:
+                continue
+            if fname in default:
+                d_val = default[fname]
+                if not hasattr(d_val, "as_sql"):
+                    d_val = Value(d_val)
+            else:
+                d_val = F(fname)
+            update_kwargs[fname] = Case(*whens, default=d_val)
+        if not update_kwargs:
+            return 0
+        return await self.aupdate(**update_kwargs)
 
     async def abulk_update(
         self, objs: list[_T], fields: list[str], batch_size: int = 1000

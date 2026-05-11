@@ -136,6 +136,112 @@ class QueryLog:
     def count(self) -> int:
         return len(self.records)
 
+    def to_dicts(self, *, include_params: bool = False) -> list[dict[str, Any]]:
+        """Serialise every captured record into a list of plain dicts.
+
+        Args:
+            include_params: when True, the per-record ``params`` tuple
+                is included verbatim. Default False — parameters often
+                carry PII / secrets, so the safe default is to omit
+                them. Run the resulting dicts through
+                :func:`dorm.contrib.pii.mask_dict` if you need a
+                per-column redaction pass.
+
+        Returned shape is stable across releases: ``sql``, ``template``,
+        ``elapsed_ms``, ``alias``, ``vendor``, ``timestamp`` (UTC ISO-
+        8601 — derived from the record's monotonic ``ts`` by anchoring
+        to the dump time, suitable for relative timing).
+        """
+        out: list[dict[str, Any]] = []
+        for rec in self.records:
+            entry: dict[str, Any] = {
+                "sql": rec.sql,
+                "template": rec.template(),
+                "elapsed_ms": rec.elapsed_ms,
+                "alias": getattr(rec, "alias", None),
+                "vendor": getattr(rec, "vendor", None),
+            }
+            if include_params:
+                entry["params"] = list(rec.params) if rec.params else []
+            out.append(entry)
+        return out
+
+    def dump_json(self, path: str | None = None, *, include_params: bool = False) -> str:
+        """Dump the captured records as a JSON array. With *path* set,
+        writes the file and returns the path; without *path* returns
+        the JSON string in-memory.
+
+        Note: the in-memory variant is fine for the typical hundred-
+        ish queries a request emits. Pipelines that capture millions
+        of queries should prefer :meth:`dump_jsonl` to stay memory-
+        bounded.
+        """
+        import json
+
+        payload = self.to_dicts(include_params=include_params)
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        if path is None:
+            return text
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def dump_jsonl(self, path: str, *, include_params: bool = False) -> str:
+        """Dump captured records to *path* one JSON object per line.
+
+        Streamed write — memory consumption stays O(1) regardless of
+        record count. The resulting file is loadable by every common
+        analytical tool (jq, DuckDB ``read_json_auto``, pandas
+        ``read_json(..., lines=True)``).
+        """
+        import json
+
+        with open(path, "w", encoding="utf-8") as fh:
+            for entry in self.to_dicts(include_params=include_params):
+                fh.write(json.dumps(entry, ensure_ascii=False, default=str))
+                fh.write("\n")
+        return path
+
+    def dump_parquet(
+        self,
+        path: str,
+        *,
+        include_params: bool = False,
+    ) -> str:
+        """Dump captured records to a Parquet file via ``pyarrow``.
+
+        Useful for big-data replay — a captured production querylog
+        can be loaded into DuckDB / ClickHouse / Spark for offline
+        analysis. Raises :class:`ImportError` when ``pyarrow`` isn't
+        installed; install via ``pip install pyarrow``.
+        """
+        try:
+            import pyarrow as pa  # type: ignore[import-not-found]  # ty:ignore[unresolved-import]
+            import pyarrow.parquet as pq  # type: ignore[import-not-found]  # ty:ignore[unresolved-import]
+        except ImportError as e:
+            raise ImportError(
+                "QueryLog.dump_parquet requires pyarrow. Install with "
+                "`pip install pyarrow`."
+            ) from e
+        rows = self.to_dicts(include_params=include_params)
+        if not rows:
+            # pyarrow refuses to write an empty Table without an
+            # explicit schema — synthesise one matching ``to_dicts``.
+            schema = pa.schema(
+                [
+                    ("sql", pa.string()),
+                    ("template", pa.string()),
+                    ("elapsed_ms", pa.float64()),
+                    ("alias", pa.string()),
+                    ("vendor", pa.string()),
+                ]
+            )
+            table = pa.table({c.name: [] for c in schema}, schema=schema)
+        else:
+            table = pa.Table.from_pylist(rows)
+        pq.write_table(table, path)
+        return path
+
     def summary(self) -> list[TemplateStats]:
         """Group captured records by SQL template; return stats sorted
         by descending total time. p95 uses nearest-rank — fine for the

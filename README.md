@@ -8,13 +8,13 @@
 
 A Django-inspired ORM for Python with full **synchronous and asynchronous** support. The same API you know from Django, without depending on the full framework.
 
-Works with **SQLite**, **PostgreSQL**, **MySQL / MariaDB**, **libsql / Turso** and (4.0+) **DuckDB** for embedded analytics. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related` / `FilteredRelation`), aggregations, DB functions, async-native ORM path, queryset & row caching, audit-trail tracking (`@track_history`), multi-tenancy (schema-level + row-level), recursive CTEs, full-text search, GIS, and Pydantic interop — all with real static typing (`Field[T]`).
+Works with **SQLite**, **PostgreSQL**, **CockroachDB** (4.1+), **MySQL / MariaDB**, **libsql / Turso** and (4.0+) **DuckDB** for embedded analytics. Ships with migrations + linter, atomic transactions, signals, validation, relationship loading (`select_related` / `prefetch_related` / `FilteredRelation`), aggregations, DB functions, async-native ORM path, queryset & row caching, audit-trail tracking (`@track_history`), multi-tenancy (schema-level + row-level + PG Row-Level Security ops), recursive CTEs, full-text search, GIS, and Pydantic interop — all with real static typing (`Field[T]`).
 
-**Production primitives**: query budget (HTTP SLA), circuit breaker, outbox pattern, hash sharding, idempotency keys, lag-aware read routing, async pool task affinity, online (zero-downtime) migrations, schema drift detection (`dorm diff`).
+**Production primitives**: query budget (HTTP SLA), circuit breaker, outbox pattern, hash sharding, idempotency keys, lag-aware read routing, async pool task affinity, online (zero-downtime) migrations, schema drift detection (`dorm diff`), **PgBouncer transaction-pool compatibility** (4.1+), **PII field tagging** (4.1+), **framework-agnostic ASGI middleware** + **Litestar plugin** (4.1+).
 
 **Sibling packages**: [`pytest-djanorm`](pytest-djanorm/) (test fixtures) and [`djanorm-mypy`](djanorm-mypy/) (mypy plugin) ship in their own packages so the main wheel never pulls dev tooling.
 
-Release notes for every version live in [CHANGELOG.md](CHANGELOG.md). For the **4.0** highlights see [docs/v4_0.md](docs/v4_0.en.md); upgrading from 3.3 → 4.0 is documented in [docs/upgrading-to-4.0.md](docs/upgrading-to-4.0.en.md).
+Release notes for every version live in [CHANGELOG.md](CHANGELOG.md). For the **4.1** highlights see [docs/v4_1.md](docs/v4_1.en.md); the **4.0** highlights live in [docs/v4_0.md](docs/v4_0.en.md); upgrading from 3.3 → 4.0 is documented in [docs/upgrading-to-4.0.md](docs/upgrading-to-4.0.en.md). 4.0 → 4.1 needs no code changes.
 
 ## Installation
 
@@ -31,11 +31,16 @@ pip install "djanorm[libsql]"
 # DuckDB (embedded analytics, 4.0+)
 pip install "djanorm[duckdb]"
 
+# CockroachDB (distributed SQL, 4.1+ — reuses the psycopg pipeline)
+pip install "djanorm[cockroachdb]"
+
 # Optional extras
 pip install "djanorm[redis]"      # queryset + row cache backend
 pip install "djanorm[encrypted]"  # AES-GCM EncryptedCharField/TextField
 pip install "djanorm[pydantic]"   # FastAPI-friendly DormSchema
 pip install "djanorm[s3]"         # FileField on AWS S3 / MinIO / R2 / B2
+pip install "djanorm[litestar]"   # DormPlugin: ASGI middleware + lifespan hooks (4.1+)
+pip install "djanorm[parquet]"    # QueryLog.dump_parquet via pyarrow (4.1+)
 
 # Dev tooling (sibling packages)
 pip install pytest-djanorm djanorm-mypy

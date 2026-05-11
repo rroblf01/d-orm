@@ -229,7 +229,7 @@ _ASYNC_BACKEND_CACHE: dict[str, Any] | None = None
 
 def _supported_engines() -> str:
     """List built-in + entry-point-registered engines for error messages."""
-    builtin = ["sqlite", "postgresql", "libsql", "mysql", "mariadb"]
+    builtin = ["sqlite", "postgresql", "cockroachdb", "libsql", "mysql", "mariadb", "duckdb"]
     extra: list[str] = []
     if _BACKEND_CACHE:
         extra.extend(sorted(_BACKEND_CACHE.keys()))
@@ -249,6 +249,11 @@ def _create_sync_connection(alias: str, db_settings: dict):
     if "sqlite" in engine:
         from .backends.sqlite import SQLiteDatabaseWrapper
         return SQLiteDatabaseWrapper(db_settings)
+    # Cockroach must beat the bare ``postgres`` match below — its wire
+    # protocol is PG-compatible but its default port is 26257.
+    if "cockroach" in engine:
+        from .backends.cockroach import CockroachDBDatabaseWrapper
+        return CockroachDBDatabaseWrapper(db_settings)
     if "postgresql" in engine or "postgres" in engine:
         from .backends.postgresql import PostgreSQLDatabaseWrapper
         return PostgreSQLDatabaseWrapper(db_settings)
@@ -282,6 +287,9 @@ def _create_async_connection(alias: str, db_settings: dict):
     if "sqlite" in engine:
         from .backends.sqlite import SQLiteAsyncDatabaseWrapper
         return SQLiteAsyncDatabaseWrapper(db_settings)
+    if "cockroach" in engine:
+        from .backends.cockroach import CockroachDBAsyncDatabaseWrapper
+        return CockroachDBAsyncDatabaseWrapper(db_settings)
     if "postgresql" in engine or "postgres" in engine:
         from .backends.postgresql import PostgreSQLAsyncDatabaseWrapper
         return PostgreSQLAsyncDatabaseWrapper(db_settings)

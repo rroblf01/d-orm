@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "4.0.0"
+version = "4.1.0"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -171,7 +171,20 @@ mysql = ["pymysql>=1.1.0", "aiomysql>=0.2.0"]
 # database. The Python client speaks DB-API and bundles the engine
 # binary, so no system-level install is required.
 duckdb = ["duckdb>=1.0"]
-all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted,mysql,auth-argon2]"]
+# Litestar ASGI plugin — ``dorm.contrib.litestar`` ships
+# ``DormPlugin`` for one-call middleware wiring. Pulls in
+# Litestar's core wheel; the rest of dorm doesn't import it,
+# so this extra stays opt-in.
+litestar = ["litestar>=2.10"]
+# Parquet dump for ``dorm.contrib.querylog.QueryLog.dump_parquet``.
+# Pyarrow is heavy; gate it behind its own extra so a typical
+# install doesn't pull a ~40 MB wheel.
+parquet = ["pyarrow>=14.0"]
+# CockroachDB backend reuses the PostgreSQL psycopg pipeline.
+# This alias makes ``pip install 'djanorm[cockroachdb]'`` work
+# without the user having to remember the underlying extra.
+cockroachdb = ["djanorm[postgresql]"]
+all = ["djanorm[dev,sqlite,postgresql,libsql,redis,pydantic,docs,otel,s3,image,pgvector,sqlite-vec,encrypted,mysql,auth-argon2,litestar,parquet]"]
 
 [project.scripts]
 dorm = "dorm.cli:main"
@@ -258,6 +271,10 @@ exclude = [
     # without hiding real errors elsewhere. CI installs ``duckdb``
     # for the dedicated DuckDB job.
     "dorm/db/backends/duckdb.py",
+    # Optional integrations — Litestar plugin imports ``litestar``
+    # (not a runtime dep); querylog Parquet dump imports ``pyarrow``
+    # inside a function body but ty still flags the resolution.
+    "dorm/contrib/litestar.py",
 ]
 
 [tool.uv.workspace]

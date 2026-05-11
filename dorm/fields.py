@@ -255,6 +255,7 @@ class Field(Generic[_T]):
         db_tablespace: str | None = None,
         db_comment: str | None = None,
         validators: list | None = None,
+        pii: bool = False,
     ):
         self.verbose_name = verbose_name
         self.name = name
@@ -264,6 +265,13 @@ class Field(Generic[_T]):
         self.blank = blank
         self.null = null
         self.db_index = db_index
+        # ``pii=True`` flags the column as personally-identifiable
+        # information. Consumed by ``dorm.contrib.history`` (audit-log
+        # masking), ``dorm.contrib.streaming`` (export filtering) and
+        # the ``dorm export-json-schema`` CLI (renders an
+        # ``"x-pii": true`` extension marker). Has no effect on the SQL
+        # layer — the column is created exactly the same way.
+        self.pii = bool(pii)
         self.default: Any = default
         # ``db_default`` lands on the column DDL as ``DEFAULT <literal>``,
         # making the database itself produce the value when the column
@@ -356,6 +364,7 @@ class Field(Generic[_T]):
             "db_tablespace": None,
             "db_comment": None,
             "validators": [],
+            "pii": False,
         }
         for attr, default in defaults.items():
             val = getattr(self, attr, default)

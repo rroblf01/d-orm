@@ -483,6 +483,22 @@ class BaseManager(Generic[_T]):
     def bulk_update(self, objs: list[_T], fields: list[str], batch_size: int = 1000) -> int:
         return self.get_queryset().bulk_update(objs, fields, batch_size)
 
+    def bulk_update_when(
+        self,
+        cases: list[tuple[Any, dict[str, Any]]],
+        *,
+        default: dict[str, Any] | None = None,
+    ) -> int:
+        return self.get_queryset().bulk_update_when(cases, default=default)
+
+    async def abulk_update_when(
+        self,
+        cases: list[tuple[Any, dict[str, Any]]],
+        *,
+        default: dict[str, Any] | None = None,
+    ) -> int:
+        return await self.get_queryset().abulk_update_when(cases, default=default)
+
     def in_bulk(self, id_list: list[Any], field_name: str = "pk") -> dict[Any, _T]:
         return self.get_queryset().in_bulk(id_list, field_name)
 

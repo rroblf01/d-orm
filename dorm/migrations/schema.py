@@ -166,4 +166,74 @@ class SchemaEditor:
             self.connection.execute_write(sql, params)
 
 
-__all__ = ["SchemaEditor"]
+class AsyncSchemaEditor:
+    """Async façade over :class:`SchemaEditor`.
+
+    Each DDL helper offloads the synchronous editor's work to
+    :func:`asyncio.to_thread`, mirroring the
+    :class:`~dorm.migrations.aexecutor.AsyncMigrationExecutor` design.
+    The connection passed in is the *sync* wrapper — the worker thread
+    drives real DB I/O against it. Use this from async startup hooks
+    (FastAPI, Litestar, edge runtimes) where the sync editor would
+    block the event loop.
+
+    The context-manager protocol is async (``async with`` /
+    ``__aenter__`` / ``__aexit__``); ``atomic=True`` runs every DDL
+    call inside a single ``connection.atomic()`` block, opened on the
+    worker thread.
+    """
+
+    def __init__(self, connection: Any, *, atomic: bool = False) -> None:
+        self._inner = SchemaEditor(connection, atomic=atomic)
+
+    @property
+    def connection(self) -> Any:
+        return self._inner.connection
+
+    async def __aenter__(self) -> "AsyncSchemaEditor":
+        import asyncio
+
+        await asyncio.to_thread(self._inner.__enter__)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        import asyncio
+
+        return await asyncio.to_thread(self._inner.__exit__, exc_type, exc, tb)
+
+    async def acreate_model(self, model_cls: type) -> None:
+        import asyncio
+
+        await asyncio.to_thread(self._inner.create_model, model_cls)
+
+    async def adelete_model(self, model_cls: type) -> None:
+        import asyncio
+
+        await asyncio.to_thread(self._inner.delete_model, model_cls)
+
+    async def aadd_field(self, model_cls: type, name: str, field: Any) -> None:
+        import asyncio
+
+        await asyncio.to_thread(self._inner.add_field, model_cls, name, field)
+
+    async def aremove_field(self, model_cls: type, name: str) -> None:
+        import asyncio
+
+        await asyncio.to_thread(self._inner.remove_field, model_cls, name)
+
+    async def aalter_field(
+        self, model_cls: type, name: str, field: Any
+    ) -> None:
+        import asyncio
+
+        await asyncio.to_thread(
+            self._inner.alter_field, model_cls, name, field
+        )
+
+    async def aexecute(self, sql: str, params: list | None = None) -> None:
+        import asyncio
+
+        await asyncio.to_thread(self._inner.execute, sql, params)
+
+
+__all__ = ["SchemaEditor", "AsyncSchemaEditor"]

@@ -2080,3 +2080,408 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
             parts.append(f"COMMENT '{escaped}'")
 
     return " ".join(parts)
+
+
+# ── PostgreSQL Row-Level Security ─────────────────────────────────────────────
+
+
+def _quote_ident(name: str) -> str:
+    """Defensive identifier quoter for RLS DDL. RLS policy / role names
+    flow from user-controlled migration files, so we double-quote and
+    escape any embedded quotes — same shape as PG ``quote_ident()``.
+    Names with control characters / nulls are rejected outright."""
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"Identifier must be a non-empty string; got {name!r}")
+    if "\x00" in name or any(c in name for c in "\r\n"):
+        raise ValueError(
+            f"Identifier {name!r} contains control characters."
+        )
+    return '"' + name.replace('"', '""') + '"'
+
+
+class EnableRowLevelSecurity(Operation):
+    """``ALTER TABLE ... ENABLE ROW LEVEL SECURITY``.
+
+    RLS is opt-in per table on PostgreSQL — without this op a table's
+    policies (see :class:`CreatePolicy`) are inert. Pair with
+    :class:`ForceRowLevelSecurity` when superuser / table-owner roles
+    must also be subject to policies (rare but useful for hardened
+    multi-tenant setups).
+
+    PostgreSQL-only — no-op on every other backend so caller code
+    stays portable.
+    """
+
+    reversible = True
+
+    def __init__(self, table: str) -> None:
+        self.table = table
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"ALTER TABLE {_quote_ident(self.table)} ENABLE ROW LEVEL SECURITY"
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"ALTER TABLE {_quote_ident(self.table)} DISABLE ROW LEVEL SECURITY"
+        )
+
+    def describe(self) -> str:
+        return f"Enable RLS on {self.table}"
+
+
+class DisableRowLevelSecurity(Operation):
+    """Inverse of :class:`EnableRowLevelSecurity`. PostgreSQL-only."""
+
+    reversible = True
+
+    def __init__(self, table: str) -> None:
+        self.table = table
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"ALTER TABLE {_quote_ident(self.table)} DISABLE ROW LEVEL SECURITY"
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"ALTER TABLE {_quote_ident(self.table)} ENABLE ROW LEVEL SECURITY"
+        )
+
+    def describe(self) -> str:
+        return f"Disable RLS on {self.table}"
+
+
+class ForceRowLevelSecurity(Operation):
+    """``ALTER TABLE ... FORCE ROW LEVEL SECURITY``.
+
+    By default PG exempts the table owner from RLS policies; with FORCE
+    enabled, the owner is subject to policies too. Recommended for
+    multi-tenant deployments where the application connects as the
+    table owner. Reverse direction is ``NO FORCE``.
+
+    PostgreSQL-only.
+    """
+
+    reversible = True
+
+    def __init__(self, table: str) -> None:
+        self.table = table
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"ALTER TABLE {_quote_ident(self.table)} FORCE ROW LEVEL SECURITY"
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"ALTER TABLE {_quote_ident(self.table)} NO FORCE ROW LEVEL SECURITY"
+        )
+
+    def describe(self) -> str:
+        return f"Force RLS on {self.table}"
+
+
+class CreatePolicy(Operation):
+    """``CREATE POLICY <name> ON <table> [...]``.
+
+    Args:
+        name: policy name; unique per table.
+        table: table the policy applies to.
+        command: one of ``"ALL"``, ``"SELECT"``, ``"INSERT"``,
+            ``"UPDATE"``, ``"DELETE"``. Defaults to ``"ALL"``.
+        roles: optional list of PostgreSQL role names the policy
+            applies to. Defaults to ``PUBLIC`` (all roles).
+        using: raw SQL expression for the ``USING`` clause (row-read
+            predicate). Required for ``SELECT`` / ``UPDATE`` /
+            ``DELETE`` / ``ALL`` policies.
+        check: raw SQL expression for the ``WITH CHECK`` clause
+            (row-write predicate). Required for ``INSERT`` /
+            ``UPDATE`` / ``ALL`` policies when you want to constrain
+            what new row data is allowed.
+        permissive: True (default) for the standard OR-combined
+            permissive policy; False emits a ``RESTRICTIVE`` policy
+            that AND-combines with other policies (PG 10+).
+
+    Both *using* and *check* expressions are spliced into DDL as-is —
+    they typically reference ``current_setting('app.tenant_id')`` or
+    ``current_user`` and so must come from trusted migration code, not
+    runtime user input.
+
+    PostgreSQL-only.
+    """
+
+    _COMMANDS = frozenset({"ALL", "SELECT", "INSERT", "UPDATE", "DELETE"})
+
+    reversible = True
+
+    def __init__(
+        self,
+        name: str,
+        table: str,
+        *,
+        command: str = "ALL",
+        roles: list[str] | None = None,
+        using: str | None = None,
+        check: str | None = None,
+        permissive: bool = True,
+    ) -> None:
+        cmd = command.upper()
+        if cmd not in self._COMMANDS:
+            raise ValueError(
+                f"CreatePolicy.command must be one of {sorted(self._COMMANDS)}; "
+                f"got {command!r}"
+            )
+        if using is None and cmd in ("SELECT", "UPDATE", "DELETE", "ALL"):
+            # The DB itself accepts a policy without USING (defaults to
+            # ``true``), but a silent default on a security-sensitive op
+            # is exactly the wrong default. Force the migration author
+            # to write it out.
+            raise ValueError(
+                f"CreatePolicy(command={cmd!r}) requires a 'using' "
+                "expression — RLS policies without an explicit predicate "
+                "are too easy to misread. Pass using='true' if you really "
+                "want an unconstrained policy."
+            )
+        if check is None and cmd in ("INSERT",):
+            raise ValueError(
+                "CreatePolicy(command='INSERT') requires a 'check' expression."
+            )
+        self.name = name
+        self.table = table
+        self.command = cmd
+        self.roles = list(roles) if roles else None
+        self.using = using
+        self.check = check
+        self.permissive = permissive
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        parts = [
+            "CREATE POLICY",
+            _quote_ident(self.name),
+            "ON",
+            _quote_ident(self.table),
+        ]
+        if not self.permissive:
+            parts.append("AS RESTRICTIVE")
+        parts.extend(["FOR", self.command])
+        if self.roles:
+            parts.append("TO " + ", ".join(_quote_ident(r) for r in self.roles))
+        if self.using is not None:
+            parts.append(f"USING ({self.using})")
+        if self.check is not None:
+            parts.append(f"WITH CHECK ({self.check})")
+        connection.execute_script(" ".join(parts))
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"DROP POLICY IF EXISTS {_quote_ident(self.name)} "
+            f"ON {_quote_ident(self.table)}"
+        )
+
+    def describe(self) -> str:
+        return f"Create RLS policy {self.name} on {self.table}"
+
+
+class DropPolicy(Operation):
+    """``DROP POLICY <name> ON <table>``.
+
+    Reverse direction recreates the policy from the supplied
+    *reverse_* arguments (same shape as :class:`CreatePolicy`'s
+    constructor). Pass them when reversibility matters.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        table: str,
+        *,
+        reverse_command: str | None = None,
+        reverse_roles: list[str] | None = None,
+        reverse_using: str | None = None,
+        reverse_check: str | None = None,
+        reverse_permissive: bool = True,
+    ) -> None:
+        self.name = name
+        self.table = table
+        self.reverse_command = reverse_command
+        self.reverse_roles = reverse_roles
+        self.reverse_using = reverse_using
+        self.reverse_check = reverse_check
+        self.reverse_permissive = reverse_permissive
+        self.reversible = reverse_command is not None
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        connection.execute_script(
+            f"DROP POLICY IF EXISTS {_quote_ident(self.name)} "
+            f"ON {_quote_ident(self.table)}"
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if not self.reversible:
+            raise NotImplementedError(
+                f"DropPolicy({self.name!r}) is irreversible — no "
+                "reverse_command supplied."
+            )
+        # Reuse CreatePolicy's emitter for symmetry.
+        recreate = CreatePolicy(
+            self.name,
+            self.table,
+            command=self.reverse_command or "ALL",
+            roles=self.reverse_roles,
+            using=self.reverse_using,
+            check=self.reverse_check,
+            permissive=self.reverse_permissive,
+        )
+        recreate.database_forwards(app_label, connection, from_state, to_state)
+
+    def describe(self) -> str:
+        return f"Drop RLS policy {self.name} on {self.table}"
+
+
+class AlterPolicy(Operation):
+    """``ALTER POLICY <name> ON <table>`` — change *roles*, *using*, or
+    *check*. Each kwarg is optional; only the supplied fragments are
+    emitted. PostgreSQL doesn't allow changing the ``command`` of an
+    existing policy — use :class:`DropPolicy` + :class:`CreatePolicy`
+    for that.
+
+    Reverse direction restores the *previous_* values when supplied.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        table: str,
+        *,
+        roles: list[str] | None = None,
+        using: str | None = None,
+        check: str | None = None,
+        previous_roles: list[str] | None = None,
+        previous_using: str | None = None,
+        previous_check: str | None = None,
+    ) -> None:
+        if roles is None and using is None and check is None:
+            raise ValueError(
+                "AlterPolicy requires at least one of roles=, using=, check=."
+            )
+        self.name = name
+        self.table = table
+        self.roles = roles
+        self.using = using
+        self.check = check
+        self.previous_roles = previous_roles
+        self.previous_using = previous_using
+        self.previous_check = previous_check
+        self.reversible = (
+            previous_roles is not None
+            or previous_using is not None
+            or previous_check is not None
+        )
+
+    def _emit(
+        self,
+        connection,
+        roles: list[str] | None,
+        using: str | None,
+        check: str | None,
+    ) -> None:
+        parts = [
+            "ALTER POLICY",
+            _quote_ident(self.name),
+            "ON",
+            _quote_ident(self.table),
+        ]
+        if roles is not None:
+            parts.append(
+                "TO " + (", ".join(_quote_ident(r) for r in roles) if roles else "PUBLIC")
+            )
+        if using is not None:
+            parts.append(f"USING ({using})")
+        if check is not None:
+            parts.append(f"WITH CHECK ({check})")
+        connection.execute_script(" ".join(parts))
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        self._emit(connection, self.roles, self.using, self.check)
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if not self.reversible:
+            raise NotImplementedError(
+                f"AlterPolicy({self.name!r}) is irreversible — no "
+                "previous_* fragments supplied."
+            )
+        if getattr(connection, "vendor", "sqlite") != "postgresql":
+            return
+        self._emit(
+            connection,
+            self.previous_roles if self.roles is not None else None,
+            self.previous_using if self.using is not None else None,
+            self.previous_check if self.check is not None else None,
+        )
+
+    def describe(self) -> str:
+        return f"Alter RLS policy {self.name} on {self.table}"
