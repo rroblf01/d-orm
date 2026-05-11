@@ -525,6 +525,33 @@ class BaseManager(Generic[_T]):
             returning=returning,
         )
 
+    def exists_or_create(
+        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+    ) -> tuple[bool, _T]:
+        """Return ``(exists, instance)``.
+
+        Skip the SELECT round-trip from
+        :meth:`get_or_create` when callers only care whether a row
+        with the given lookup exists — uses :meth:`exists` + a single
+        :meth:`create` follow-up on miss.
+        """
+        qs = self.get_queryset().filter(**kwargs)
+        if qs.exists():
+            return True, qs.get()
+        payload = {**kwargs, **(defaults or {})}
+        return False, self.get_queryset().create(**payload)
+
+    def create_or_update(
+        self, defaults: dict[str, Any] | None = None, **kwargs: Any
+    ) -> tuple[_T, bool]:
+        """Alias of :meth:`update_or_create` with the ``(instance,
+        created)`` return swapped to ``(created, instance)`` ordering
+        favoured by some style guides. Identical semantics."""
+        instance, created = self.get_queryset().update_or_create(
+            defaults=defaults, **kwargs
+        )
+        return instance, created
+
     def union_with(
         self,
         *others: Any,

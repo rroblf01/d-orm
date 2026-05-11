@@ -36,7 +36,11 @@ _log = logging.getLogger("dorm.contrib.inbox")
 
 class InboxRecord(Model):
     """Abstract inbox row. Subclass with a concrete ``Meta.db_table``
-    to materialise.
+    AND ``Meta.unique_together = [("message_id", "handler_name")]``
+    so the database serialises concurrent duplicate writes — without
+    the UNIQUE constraint, two workers racing on the same message
+    would both insert a row and the ``@idempotent`` decorator's
+    duplicate-detection would silently miss the race.
 
     Schema:
 
@@ -45,6 +49,14 @@ class InboxRecord(Model):
     - ``handler_name`` — handler that processed the message.
       Lets multiple handlers register against the same source.
     - ``processed_at`` — UTC timestamp.
+
+    Recommended concrete subclass::
+
+        class Inbox(InboxRecord):
+            class Meta:
+                db_table = "inbox"
+                # ← CRITICAL: prevents concurrent duplicate processing.
+                unique_together = [("message_id", "handler_name")]
     """
 
     message_id = _fields.CharField(max_length=255, db_index=True)

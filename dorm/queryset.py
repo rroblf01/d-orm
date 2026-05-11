@@ -2888,7 +2888,7 @@ class QuerySet(Generic[_T]):
             update_conflicts=True,
             update_fields=update_fields,
             unique_fields=unique_fields,
-            returning=list(self.model._meta.fields) if returning else None,
+            returning=[f.name for f in self.model._meta.fields if not getattr(f, "many_to_many", False)] if returning else None,
         )
 
     async def aupsert(
@@ -2920,7 +2920,7 @@ class QuerySet(Generic[_T]):
             update_conflicts=True,
             update_fields=update_fields,
             unique_fields=unique_fields,
-            returning=list(self.model._meta.fields) if returning else None,
+            returning=[f.name for f in self.model._meta.fields if not getattr(f, "many_to_many", False)] if returning else None,
         )
 
     def bulk_update_when(

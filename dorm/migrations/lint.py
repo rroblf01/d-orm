@@ -216,6 +216,71 @@ def _check_run_python(op: Any, file: "Path | str", suppressed: set[str]) -> Iter
     return ()
 
 
+def _check_irreversible_op(
+    op: Any, file: "Path | str", suppressed: set[str]
+) -> Iterable[Finding]:
+    """Generic check: any operation whose ``reversible`` attribute is
+    explicitly False fails ``dorm migrate --rollback``.
+
+    Distinct from DORM-M004 (RunPython-specific) because subclasses
+    like :class:`AddPGEnumValue` / :class:`DropPGEnum` /
+    :class:`AlterColumnTypeOnline` (when ``old_type=None``) also
+    surface this footgun.
+    """
+    if "DORM-M005" in suppressed:
+        return ()
+    if getattr(op, "reversible", True) is False:
+        return [
+            Finding(
+                code="DORM-M005",
+                file=file,
+                operation=_op_repr(op),
+                message=(
+                    "operation declares reversible=False — "
+                    "`dorm migrate --rollback` will refuse to undo it. "
+                    "Supply the reverse arguments (e.g. reverse_values=, "
+                    "old_type=, reverse_command=) or split the change "
+                    "into a separately-reversible migration."
+                ),
+            )
+        ]
+    return ()
+
+
+def _check_destructive_no_op(
+    op: Any, file: "Path | str", suppressed: set[str]
+) -> Iterable[Finding]:
+    """Catch destructive ops with reverse_code=RunSQL("").
+
+    Pattern: `RunSQL("DROP TABLE x", reverse_sql="")`. ``reverse_sql``
+    of empty string compiles cleanly but means "do nothing on roll
+    back" — i.e. the rollback silently leaves the schema broken.
+    """
+    if "DORM-M006" in suppressed:
+        return ()
+    sql = getattr(op, "sql", None)
+    reverse = getattr(op, "reverse_sql", None)
+    if not isinstance(sql, str) or not isinstance(reverse, str):
+        return ()
+    if reverse.strip() == "" and any(
+        kw in sql.upper() for kw in ("DROP TABLE", "DROP COLUMN", "TRUNCATE")
+    ):
+        return [
+            Finding(
+                code="DORM-M006",
+                file=file,
+                operation=_op_repr(op),
+                message=(
+                    "destructive RunSQL with empty reverse_sql — the "
+                    "rollback will be silently a no-op. Provide a "
+                    "matching CREATE / ADD COLUMN reverse_sql or mark "
+                    "the migration as deliberately irreversible."
+                ),
+            )
+        ]
+    return ()
+
+
 def lint_operations(
     operations: list[Any],
     *,
@@ -241,6 +306,10 @@ def lint_operations(
             result.findings.extend(_check_add_index(op, file, suppressed))
         elif isinstance(op, ops_mod.RunPython):
             result.findings.extend(_check_run_python(op, file, suppressed))
+        # v2 checks run on every op type — irreversibility is generic.
+        result.findings.extend(_check_irreversible_op(op, file, suppressed))
+        if isinstance(op, ops_mod.RunSQL):
+            result.findings.extend(_check_destructive_no_op(op, file, suppressed))
     return result
 
 

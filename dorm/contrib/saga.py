@@ -114,9 +114,41 @@ class Saga:
 
     def run(self, context: dict[str, Any] | None = None) -> SagaRun:
         """Execute the forward pass + automatic compensation on
-        failure. Returns the :class:`SagaRun` audit record."""
+        failure. Returns the :class:`SagaRun` audit record.
+
+        .. warning::
+
+           Calling ``Saga.run()`` inside an outer
+           :func:`dorm.transaction.atomic` block undoes the
+           durability guarantee: each step's atomic becomes a
+           savepoint, and if the outer transaction later rolls
+           back, **every** committed step (and its compensation)
+           rolls back with it. Saga steps are durable only when
+           the saga itself sits at the top of the call stack —
+           the runner emits a WARNING when nested.
+        """
         ctx: dict[str, Any] = context or {}
         run = SagaRun(context=ctx)
+        # Detect nested atomic and warn loudly. Different backend
+        # wrappers expose different attributes (``_atomic_conn`` on
+        # PG, ``_atomic_depth`` on SQLite); check both shapes.
+        try:
+            from ..db.connection import get_connection
+
+            conn = get_connection(self.using)
+            in_atomic = (
+                getattr(conn, "_atomic_conn", None) is not None
+                or getattr(conn, "_atomic_depth", 0) > 0
+            )
+            if in_atomic:
+                _log.warning(
+                    "Saga.run() called inside an outer atomic() block — "
+                    "step commits become savepoints and lose durability "
+                    "if the outer transaction rolls back. Move the Saga "
+                    "outside the atomic() if compensation must survive."
+                )
+        except Exception:  # pragma: no cover - best effort
+            pass
         for step in self.steps:
             try:
                 with transaction.atomic(using=self.using):

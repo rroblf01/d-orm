@@ -11,9 +11,27 @@ from .conf import _validate_dotted_path
 
 
 def _load_settings(settings_module: str):
-    """Import a Python settings module and configure dorm."""
+    """Import a Python settings module and configure dorm.
+
+    Profile selection: when *settings_module* is ``"settings"`` and
+    the env var ``DORM_PROFILE`` is set, the loader transparently
+    imports ``settings.<profile>`` instead — so
+    ``DORM_PROFILE=prod`` resolves to ``settings/prod.py``. This
+    matches the Django-flavoured ``settings/{dev,prod,test}.py``
+    layout without bespoke wiring per project.
+    """
     _validate_dotted_path(settings_module, kind="settings module")
-    module = importlib.import_module(settings_module)
+    import os as _os
+
+    profile = _os.environ.get("DORM_PROFILE")
+    if profile and "." not in settings_module:
+        candidate = f"{settings_module}.{profile}"
+        try:
+            module = importlib.import_module(candidate)
+        except ModuleNotFoundError:
+            module = importlib.import_module(settings_module)
+    else:
+        module = importlib.import_module(settings_module)
     # Add both the directory containing settings.py *and* its parent to
     # sys.path so apps are importable regardless of layout:
     #   - flat/nested:  apps live next to settings.py → need settings_dir

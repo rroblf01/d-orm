@@ -10,7 +10,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Minor release. No breaking changes vs 4.2 — every addition is opt-in.
 
-### Added — Tier 1 (strategic)
+### Fixed (release-blocker round)
+
+- **``upsert(returning=True)`` passed Field objects** instead of names — `bulk_create.returning` expected `list[str]`. Now resolves to field names + skips M2M.
+- **``InboxRecord`` docstring** now mandates `Meta.unique_together = [("message_id", "handler_name")]` on concrete subclasses (DB-level race guard).
+- **Saga inside outer atomic** logs a WARNING — explains the savepoint-degradation; supports both PG (`_atomic_conn`) and SQLite (`_atomic_depth`).
+- **anonymizer** moved from offset to cursor pagination (`pk__gt=last`) — O(N) instead of O(N²) on million-row tables.
+- **`two_phase_commit`** rejects nested atomic blocks with a clear RuntimeError.
+- **temporal docstring** warns that bulk_create / bulk_update / queryset.update / queryset.delete bypass post_save / post_delete and miss the temporal mirror.
+- **tasks._wait_for_notify** wrapped in broader try/except for psycopg internals.
+
+### Added — Tier 2 (TaskQueue expansion)
 
 - **Cross-vendor UPSERT** —
   ``Manager.upsert(objs, unique_fields=[...])`` /

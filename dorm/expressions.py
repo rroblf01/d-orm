@@ -159,6 +159,12 @@ class F:
         ]
         return Coalesce(self, *wrapped)
 
+    def between(self, low, high):
+        """Render an inclusive range predicate. Sugar for
+        ``Q(col__range=(low, high))`` when the caller is already
+        composing :class:`F` expressions for other clauses."""
+        return Q(**{f"{self.name}__range": (low, high)})
+
     def __repr__(self):
         return f"F({self.name!r})"
 

@@ -113,12 +113,16 @@ def anonymize_model(
     pk_attname = model_cls._meta.pk.attname  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     manager = model_cls.objects  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     field_names = list(strategies.keys())
-    seen = 0
     touched = 0
+    last_pk: Any = None
+    # Cursor pagination (``pk > last_pk``) is O(N) total instead of
+    # the O(N²) offset-pagination it replaces — critical when
+    # anonymising tables with millions of rows on PG.
     while True:
-        chunk = list(
-            manager.order_by(pk_attname).all()[seen : seen + batch_size]
-        )
+        qs = manager.order_by(pk_attname)
+        if last_pk is not None:
+            qs = qs.filter(**{f"{pk_attname}__gt": last_pk})
+        chunk = list(qs[:batch_size])
         if not chunk:
             break
         with transaction.atomic():
@@ -127,10 +131,10 @@ def anonymize_model(
                     inst.__dict__[fname] = fn(inst.__dict__.get(fname))
                 inst.save(update_fields=field_names)
                 touched += 1
-        seen += len(chunk)
+        last_pk = inst.__dict__.get(pk_attname)
         if progress is not None:
             try:
-                progress(touched, seen)
+                progress(touched, touched)
             except Exception:  # pragma: no cover
                 pass
     return touched

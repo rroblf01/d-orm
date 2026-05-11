@@ -92,6 +92,20 @@ def two_phase_commit(aliases: list[str]):
         raise ValueError("two_phase_commit requires at least one alias")
     for a in aliases:
         _require_pg(a)
+    # Reject nested atomic: 2PC needs to run BEGIN / PREPARE / COMMIT
+    # PREPARED on a connection it owns; an outer atomic block would
+    # have already taken the connection out of the pool and pinned it
+    # to a different transaction.
+    from ..db.connection import get_connection as _gc
+
+    for a in aliases:
+        if getattr(_gc(a), "_atomic_conn", None) is not None:
+            raise RuntimeError(
+                f"two_phase_commit({aliases!r}) cannot run while alias "
+                f"{a!r} is inside an atomic() block — the 2PC coordinator "
+                "must own the connection's transaction state. Exit the "
+                "atomic block first."
+            )
 
     # Global transaction id. PG accepts arbitrary strings (up to 200
     # bytes); the hex token keeps it short and collision-resistant.

@@ -284,4 +284,22 @@ def warmup_pool(
     return opened
 
 
-__all__ = ["PoolStats", "autoscale_pool", "read_pool_stats", "warmup_pool"]
+async def awarmup_pool(
+    *, target: int | None = None, using: str = "default"
+) -> int:
+    """Async counterpart of :func:`warmup_pool` for ASGI startup
+    hooks. Delegates to the sync helper via :func:`asyncio.to_thread`
+    so the FastAPI / Litestar event loop stays unblocked while the
+    pool warms in a worker thread."""
+    import asyncio
+
+    return await asyncio.to_thread(warmup_pool, target=target, using=using)
+
+
+__all__ = [
+    "PoolStats",
+    "autoscale_pool",
+    "read_pool_stats",
+    "warmup_pool",
+    "awarmup_pool",
+]

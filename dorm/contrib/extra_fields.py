@@ -262,6 +262,194 @@ class JSONSchemaField(_fields.JSONField):
         return name, path, args, kwargs
 
 
+_IP_RANGE_RE = re.compile(
+    r"^(?:\d{1,3}\.){3}\d{1,3}/(?:[0-9]|[1-2][0-9]|3[0-2])$"
+    r"|^([0-9a-fA-F:]+)/(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$"
+)
+
+
+class IPRangeField(_fields.CharField):
+    """CIDR / IP range column. Validates IPv4 / IPv6 notation on
+    assignment.
+
+    On PostgreSQL this could map to ``inet`` natively but the field
+    intentionally uses ``VARCHAR`` so callers writing portable code
+    don't end up with a per-vendor type. Validate at the Python
+    boundary, store text.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("max_length", 64)
+        super().__init__(**kwargs)
+
+    def to_python(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        if not _IP_RANGE_RE.match(value):
+            raise ValidationError(
+                f"IPRangeField: {value!r} is not a valid CIDR range."
+            )
+        return value
+
+
+_TZ_RE = re.compile(r"^[A-Za-z_]+(?:/[A-Za-z0-9_+\-]+)+$|^UTC$|^GMT$")
+
+
+class TimezoneField(_fields.CharField):
+    """IANA timezone name. Validates the shape (no full database of
+    timezones bundled — that's what ``zoneinfo`` is for at runtime).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("max_length", 64)
+        super().__init__(**kwargs)
+
+    def to_python(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        if not _TZ_RE.match(value):
+            raise ValidationError(
+                f"TimezoneField: {value!r} is not a valid IANA tz name."
+            )
+        return value
+
+
+class PathField(_fields.CharField):
+    """Filesystem-style path stored as text. Refuses parent-directory
+    traversal (``..``) and absolute Windows paths by default."""
+
+    def __init__(self, *, allow_traversal: bool = False, **kwargs: Any) -> None:
+        kwargs.setdefault("max_length", 4096)
+        self.allow_traversal = allow_traversal
+        super().__init__(**kwargs)
+
+    def to_python(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        if not self.allow_traversal and ".." in value.split("/"):
+            raise ValidationError(
+                f"PathField: {value!r} contains '..' segment; "
+                "allow_traversal=True to bypass."
+            )
+        return value
+
+    def deconstruct(self) -> tuple[Any, str, list, dict]:
+        name, path, args, kwargs = super().deconstruct()
+        if self.allow_traversal:
+            kwargs["allow_traversal"] = True
+        return name, path, args, kwargs
+
+
+class PercentageField(_fields.DecimalField):
+    """Decimal column constrained to ``[0, 100]``. ``max_digits`` /
+    ``decimal_places`` default to ``5`` / ``2`` so values like
+    ``99.99`` fit without surprise truncation."""
+
+    def __init__(
+        self,
+        *,
+        max_digits: int = 5,
+        decimal_places: int = 2,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            max_digits=max_digits, decimal_places=decimal_places, **kwargs
+        )
+
+    def to_python(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, decimal.Decimal):
+            try:
+                value = decimal.Decimal(str(value))
+            except decimal.InvalidOperation as e:
+                raise ValidationError(
+                    f"PercentageField: cannot parse {value!r} as Decimal."
+                ) from e
+        if value < 0 or value > 100:
+            raise ValidationError(
+                f"PercentageField: {value!r} outside [0, 100]."
+            )
+        return value
+
+
+# ISO-3166 alpha-2 country codes — bundled because the list is
+# bounded and rarely changes (a couple of revisions per decade).
+_ISO_3166 = frozenset(
+    """AF AX AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ
+    BM BT BO BQ BA BW BV BR IO BN BG BF BI CV KH CM CA KY CF TD CL CN CX CC CO
+    KM CD CG CK CR CI HR CU CW CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO
+    FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA
+    HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KR KW KG LA LV
+    LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME
+    MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY
+    PE PH PN PL PT PR QA RE RO RU RW BL SH KN LC MF PM VC WS SM ST SA SN RS SC
+    SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH SY TW TJ TZ TH TL TG TK
+    TO TT TN TR TM TC TV UG UA AE GB US UM UY UZ VU VE VN VG VI WF EH YE ZM ZW
+    """.split()
+)
+
+
+class CountryField(_fields.CharField):
+    """ISO-3166-1 alpha-2 country code (``"US"``, ``"GB"``, …).
+
+    Validates against the bundled list of currently-allocated codes.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("max_length", 2)
+        super().__init__(**kwargs)
+
+    def to_python(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        normalised = value.strip().upper()
+        if normalised not in _ISO_3166:
+            raise ValidationError(
+                f"CountryField: {value!r} is not a valid ISO-3166 alpha-2 code."
+            )
+        return normalised
+
+
+def autoslug(source_field: str) -> Any:
+    """Field-default factory that derives a URL-safe slug from another
+    field on the same model.
+
+    Usage::
+
+        class Article(dorm.Model):
+            title = dorm.CharField(max_length=200)
+            slug = dorm.SlugField(
+                max_length=200,
+                default=autoslug("title"),
+            )
+
+    The factory expects ``self.title`` to be set on the instance at
+    save time — call ``model.full_clean()`` or pass ``title=`` in the
+    constructor before ``save()`` to populate it first.
+    """
+    import unicodedata
+
+    def _factory(instance: Any = None) -> str:
+        if instance is None:
+            return ""
+        raw = getattr(instance, source_field, "") or ""
+        text = unicodedata.normalize("NFKD", str(raw))
+        text = text.encode("ascii", "ignore").decode("ascii").lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+        return slug or "untitled"
+
+    return _factory
+
+
 __all__ = [
     "Money",
     "MoneyField",
@@ -269,4 +457,10 @@ __all__ = [
     "PhoneField",
     "ColorField",
     "JSONSchemaField",
+    "IPRangeField",
+    "TimezoneField",
+    "PathField",
+    "PercentageField",
+    "CountryField",
+    "autoslug",
 ]

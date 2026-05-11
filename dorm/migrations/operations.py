@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     pass
@@ -1782,6 +1782,152 @@ class SetNotNullOnline(Operation):
 
     def __repr__(self) -> str:
         return f"SetNotNullOnline({self.model_name!r}, {self.column!r})"
+
+
+class AddCheckConstraintOnline(Operation):
+    """``ALTER TABLE ... ADD CONSTRAINT ... CHECK (...) NOT VALID``
+    followed by ``VALIDATE CONSTRAINT`` — adds a CHECK without an
+    ACCESS EXCLUSIVE lock that scans the whole table.
+
+    Recipe (PostgreSQL ≥ 12):
+
+    1. ``ADD CONSTRAINT name CHECK (expr) NOT VALID`` — adopts in
+       O(1), only a brief ACCESS EXCLUSIVE for catalog update.
+    2. ``VALIDATE CONSTRAINT name`` — scans existing rows under a
+       SHARE UPDATE EXCLUSIVE lock (readers / writers unblocked).
+
+    Reverse direction drops the constraint.
+
+    Args:
+        table: physical table name.
+        name: constraint name (must be unique per table).
+        check: raw SQL predicate spliced into ``CHECK (...)``.
+            Comes from trusted migration code, not runtime input.
+
+    PostgreSQL-only; other backends fall back to a plain
+    ``ADD CONSTRAINT`` which IS a table-rewrite-grade lock.
+    """
+
+    reversible = True
+
+    def __init__(self, table: str, name: str, check: str) -> None:
+        if not check:
+            raise ValueError("AddCheckConstraintOnline requires a non-empty check")
+        self.table = table
+        self.name = name
+        self.check = check
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        vendor = getattr(connection, "vendor", "sqlite")
+        if vendor == "postgresql":
+            connection.execute_script(
+                f'ALTER TABLE "{self.table}" '
+                f'ADD CONSTRAINT "{self.name}" CHECK ({self.check}) NOT VALID'
+            )
+            connection.execute_script(
+                f'ALTER TABLE "{self.table}" '
+                f'VALIDATE CONSTRAINT "{self.name}"'
+            )
+            return
+        # Fallback: plain ADD CONSTRAINT (likely a table rewrite).
+        connection.execute_script(
+            f'ALTER TABLE "{self.table}" '
+            f'ADD CONSTRAINT "{self.name}" CHECK ({self.check})'
+        )
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        connection.execute_script(
+            f'ALTER TABLE "{self.table}" DROP CONSTRAINT IF EXISTS "{self.name}"'
+        )
+
+    def describe(self) -> str:
+        return f"Add CHECK {self.name} on {self.table} online"
+
+
+class SeederMigration(Operation):
+    """Load rows from a JSON / dict fixture as part of a migration.
+
+    Wraps :func:`dorm.cli.cmd_loaddata`-style loading inside an
+    :class:`Operation` so data seeds can move through the same
+    migration pipeline as schema changes. Useful for reference data
+    (currencies, country codes, role taxonomies) that must exist
+    before app boot.
+
+    Args:
+        fixture: a list of ``{"model": "app.Model", "fields": {...}}``
+            dicts — same shape as ``dumpdata`` emits. Alternatively a
+            callable that returns such a list (lazy load).
+        reverse_fixture: optional payload applied on
+            ``database_backwards``. When ``None``, the operation is
+            irreversible. Symmetric with :class:`RunPython`.
+
+    The operation never inspects model state — fields are written
+    via ``Model.objects.create(**fields)`` so model validators fire
+    normally.
+    """
+
+    def __init__(
+        self,
+        fixture: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]],
+        *,
+        reverse_fixture: (
+            list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None
+        ) = None,
+    ) -> None:
+        self.fixture = fixture
+        self.reverse_fixture = reverse_fixture
+        self.reversible = reverse_fixture is not None
+
+    def state_forwards(self, app_label: str, state) -> None:
+        pass
+
+    def _apply(self, payload, connection) -> None:
+        from ..models import _model_registry
+
+        rows = payload() if callable(payload) else list(payload)
+        for entry in rows:
+            label = entry.get("model")
+            fields = entry.get("fields") or {}
+            if not label:
+                raise ValueError(
+                    "SeederMigration row missing 'model' key: " f"{entry!r}"
+                )
+            model = _model_registry.get(label)
+            if model is None:
+                raise LookupError(
+                    f"SeederMigration: model {label!r} not registered. "
+                    "INSTALLED_APPS must load this model before the "
+                    "migration runs."
+                )
+            pk = entry.get("pk")
+            if pk is not None:
+                fields = {**fields, model._meta.pk.attname: pk}
+            model.objects.create(**fields)
+
+    def database_forwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        self._apply(self.fixture, connection)
+
+    def database_backwards(
+        self, app_label: str, connection, from_state, to_state
+    ) -> None:
+        if self.reverse_fixture is None:
+            raise NotImplementedError(
+                "SeederMigration: no reverse_fixture supplied — operation "
+                "is irreversible."
+            )
+        self._apply(self.reverse_fixture, connection)
+
+    def describe(self) -> str:
+        return "Seed data via SeederMigration"
 
 
 class MakeTableAppendOnly(Operation):

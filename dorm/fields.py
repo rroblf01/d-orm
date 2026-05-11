@@ -896,8 +896,58 @@ class SlugField(CharField):
             raise ValidationError(f"'{value}' is not a valid slug.")
 
 
+def uuid7() -> uuid.UUID:
+    """Generate a draft RFC 9562 UUIDv7 — time-ordered random UUID.
+
+    Layout:
+
+    - 48-bit Unix milliseconds since epoch (big-endian).
+    - 4-bit version (= 7).
+    - 12-bit random.
+    - 2-bit variant (= ``10``).
+    - 62-bit random.
+
+    The leading-time prefix makes v7 PK-friendly (index-friendly,
+    cache-locality-friendly on B-tree insert) without the privacy
+    leak of v1 (no MAC address).
+    """
+    import os as _os
+    import time as _time
+
+    ms = int(_time.time() * 1000) & ((1 << 48) - 1)
+    rand_a = int.from_bytes(_os.urandom(2), "big") & 0x0FFF
+    rand_b = int.from_bytes(_os.urandom(8), "big") & ((1 << 62) - 1)
+    value = (
+        (ms << 80)
+        | (0x7 << 76)
+        | (rand_a << 64)
+        | (0b10 << 62)
+        | rand_b
+    )
+    return uuid.UUID(int=value)
+
+
 class UUIDField(Field[uuid.UUID]):
-    def __init__(self, **kwargs):
+    """UUID column. Default for *version* is left as None to let
+    callers pick the explicit factory (``uuid.uuid4`` /
+    :func:`uuid7`); ``version=7`` is sugar for
+    ``default=dorm.fields.uuid7``."""
+
+    def __init__(self, *, version: int | None = None, **kwargs):
+        if version is not None:
+            if "default" in kwargs:
+                raise ValueError(
+                    "UUIDField: pass version=N or default=fn, not both."
+                )
+            if version == 4:
+                kwargs["default"] = uuid.uuid4
+            elif version == 7:
+                kwargs["default"] = uuid7
+            else:
+                raise ValueError(
+                    f"UUIDField: version must be 4 or 7; got {version!r}."
+                )
+        self.version = version
         super().__init__(**kwargs)
 
     def to_python(self, value):
@@ -924,6 +974,13 @@ class UUIDField(Field[uuid.UUID]):
         if backend == "postgresql":
             return "UUID"
         return "VARCHAR(36)"
+
+    def deconstruct(self) -> tuple[Any, str, list, dict]:
+        name, path, args, kwargs = super().deconstruct()
+        if self.version is not None:
+            kwargs["version"] = self.version
+            kwargs.pop("default", None)
+        return name, path, args, kwargs
 
 
 class IPAddressField(Field[str]):

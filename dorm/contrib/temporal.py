@@ -39,6 +39,15 @@ Implementation notes:
 - Unlike ``@track_history``, the temporal manager surfaces the
   history under ``Model.objects.as_of()`` as a normal queryset —
   no separate API to learn.
+
+.. warning::
+
+   ``bulk_create`` / ``bulk_update`` / ``queryset.update`` /
+   ``queryset.delete`` do **not** fire per-row ``post_save`` /
+   ``post_delete`` signals — their writes will not land in the
+   temporal mirror automatically. Either avoid bulk operations on
+   temporal-tracked models, fire the signals manually with
+   :func:`record_history_for`-style helpers, or accept the gap.
 """
 from __future__ import annotations
 
