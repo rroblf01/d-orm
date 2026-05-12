@@ -6,6 +6,42 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.4.0] - 2026-05-12
+
+Minor release. No breaking changes vs 4.3 — every addition is opt-in.
+
+### Added — Tier 1 (compliance / security)
+
+- **``dorm.contrib.audit``** — class decorator ``@audited(fields=[...], actor_getter=...)`` builds a sibling ``<Name>Audit`` table and writes one row per changed field on every save / delete. Captures pre-image via ``pre_save`` (one extra SELECT per write); diff is emitted on ``post_save``. ``audit_history(instance)`` returns the audit queryset, newest first. Actor lookup failures + missing audit tables are swallowed so audit never breaks a save.
+- **``dorm.contrib.gdpr.erase_subject(model, pk, *, rules=None, cascade=[...])``** — atomic right-to-erasure helper. Default rules redact every ``CharField``/``TextField``/``EmailField`` on the subject row; ``cascade`` is an explicit allowlist of related models whose FK-referencing rows are rewritten with the same strategies. Returns a summary dict for audit. Idempotent against ``redact``; uses deterministic anonymizer strategies (``random_email`` / ``random_phone``) so re-runs converge.
+
+### Added — Tier 2 (query/DML ergonomics)
+
+- **``QuerySet.delete_batched(batch_size=N)``** / **``update_batched(batch_size=N, **fields)``** — keyset-paginated DML over the queryset's PK so a million-row purge / update doesn't hold a single transaction. Each batch runs in its own ``atomic()``. Manager-level shortcuts available on every model: ``Model.objects.delete_batched()`` / ``update_batched()``.
+- **``dorm.contrib.matview``** — PostgreSQL materialized view helpers: ``create_matview``, ``refresh_matview`` (sync + ``arefresh_matview``), ``drop_matview``, ``list_matviews``, ``matview_refresh_task`` (returns a zero-arg closure suitable for ``dorm.contrib.tasks``). Identifier + interval allowlist guards against injection.
+- **``dorm.contrib.timescale``** — TimescaleDB lifecycle wrappers: ``create_hypertable``, ``add_retention_policy``, ``remove_retention_policy``, ``add_compression_policy``, ``hypertables``. PG-only, with a strict interval allowlist on every interval-shaped argument.
+
+### Added — Tier 3 (distributed transactions)
+
+- **``dorm.contrib.outbox_cdc``** — broker-bound publishers for ``OutboxRelay``: ``LoggingPublisher`` (zero deps; smoke testing), ``KafkaPublisher`` (kafka-python), ``NatsPublisher`` (nats-py), ``RedisStreamPublisher``. Each exposes a ``__call__(row)`` interface that plugs straight into ``OutboxRelay.run(handler=...)``. Custom ``topic_resolver`` callable lets a row's destination diverge from its ``event_type``.
+- **``Saga.to_mermaid(title=...)``** / **``Saga.to_dot(title=...)``** — render any ``Saga`` as Mermaid or Graphviz source. Forward edges solid; compensation edges dashed; non-compensable steps styled with a red border so reviewers spot the irreversible ones at a glance.
+
+### Added — Tier 4 (CLI / DX)
+
+- **``dorm saga-graph``** — render a Saga instance ('module:attr' or 'module.attr') as Mermaid or DOT, with an optional ``--title``.
+- **``dorm models-tree``** — print an ASCII tree of every registered model grouped by app label, with FK / O2O / M2M edges annotated.
+- **``dorm.factories``** — built-in factory_boy-style helpers: ``Factory``, ``Sequence(fn)``, ``LazyFunction(fn)``, ``SubFactory(other, strategy="create"|"build")``. Per-class sequence counter; ``create_batch`` / ``build_batch`` / ``reset_sequence`` available.
+
+### Added — Tier 5 (ops introspection)
+
+- **``dorm.contrib.prepared_stmts``** — runtime control + introspection for PG prepared statements: ``set_threshold(n, alias=...)`` (rebuilds the pool), ``active_prepared(alias=...)`` (reads ``pg_prepared_statements``), ``deallocate_all(alias=...)`` (useful after a migration alters a column type).
+
+### Validated
+
+- ``ruff check``: clean.
+- ``ty check``: clean.
+- ``pytest tests/``: 7987 passed, 171 skipped. Coverage 85.85% (CI gate 85%).
+
 ## [4.3.0] - 2026-05-11
 
 Minor release. No breaking changes vs 4.2 — every addition is opt-in.

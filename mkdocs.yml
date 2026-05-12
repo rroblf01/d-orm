@@ -214,6 +214,13 @@ nav:
       - Sharding: api/sharding.md
       - Idempotency: api/idempotency.md
       - Lag-aware router: api/lag_router.md
+      - Audit trail (per-field): api/audit.md
+      - GDPR right-to-erasure: api/gdpr.md
+      - Materialised views (PG): api/matview.md
+      - TimescaleDB helpers: api/timescale.md
+      - Outbox CDC publishers: api/outbox_cdc.md
+      - Prepared statements (PG): api/prepared_stmts.md
+      - Factories (testing): api/factories.md
 
 markdown_extensions:
   - admonition

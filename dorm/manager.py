@@ -459,6 +459,20 @@ class BaseManager(Generic[_T]):
     def delete(self) -> tuple[int, dict[str, int]]:
         return self.get_queryset().delete()
 
+    def delete_batched(self, batch_size: int = 1000) -> int:
+        """Manager-level shortcut to
+        :meth:`QuerySet.delete_batched`. Delete every row of the
+        underlying table in keyset-paginated chunks."""
+        return self.get_queryset().delete_batched(batch_size=batch_size)
+
+    def update_batched(self, batch_size: int = 1000, **kwargs: Any) -> int:
+        """Manager-level shortcut to
+        :meth:`QuerySet.update_batched`. Apply the update across
+        the whole table in keyset-paginated chunks."""
+        return self.get_queryset().update_batched(
+            batch_size=batch_size, **kwargs
+        )
+
     def bulk_create(
         self,
         objs: list[_T],

@@ -2656,6 +2656,127 @@ def cmd_purge_deleted(args):
     print(f"\nTotal: {summary} {total} row(s) older than {args.older_than}.")
 
 
+def cmd_models_tree(args):
+    """Print an ASCII tree of every registered model grouped by app
+    label. Each node lists the model's FK / O2O / M2M edges with
+    an arrow pointing at the target.
+
+    Useful when a developer joins a project and wants to see the
+    relationship graph at a glance without booting an IDE.
+    """
+    sys.path.insert(0, os.getcwd())
+    settings_module = getattr(args, "settings", None)
+    if settings_module:
+        _load_settings(settings_module)
+    from .conf import settings as dorm_settings, _autodiscover_settings
+    if not dorm_settings._configured:
+        _autodiscover_settings()
+    _load_apps(getattr(dorm_settings, "INSTALLED_APPS", []) or [])
+
+    from .fields import ForeignKey, ManyToManyField, OneToOneField
+    from .models import _model_registry
+
+    # Group dotted ``<app>.<Model>`` entries by app label. The
+    # registry stores both the bare class name and the dotted form;
+    # filter to the dotted entries so each model surfaces once.
+    grouped: dict[str, list[Any]] = {}
+    for key, cls in _model_registry.items():
+        if "." not in key:
+            continue
+        meta = getattr(cls, "_meta", None)
+        if meta is None or getattr(meta, "abstract", False):
+            continue
+        grouped.setdefault(meta.app_label, []).append(cls)
+
+    if not grouped:
+        print("(no models registered)")
+        return
+
+    for app in sorted(grouped):
+        print(f"{app}/")
+        models = sorted(grouped[app], key=lambda c: c.__name__)
+        for i, cls in enumerate(models):
+            is_last_model = i == len(models) - 1
+            branch = "└── " if is_last_model else "├── "
+            print(f"  {branch}{cls.__name__}")
+            edges: list[tuple[str, str, str]] = []
+            for f in cls._meta.fields:
+                if isinstance(f, (ForeignKey, OneToOneField, ManyToManyField)):
+                    kind = (
+                        "M2M"
+                        if isinstance(f, ManyToManyField)
+                        else ("O2O" if isinstance(f, OneToOneField) else "FK")
+                    )
+                    target = getattr(f, "remote_field_to", None)
+                    target_name = (
+                        target.__name__ if isinstance(target, type) else str(target)
+                    )
+                    edges.append((kind, f.name, target_name))
+            if not edges:
+                continue
+            for j, (kind, fname, target) in enumerate(edges):
+                last_edge = j == len(edges) - 1
+                edge_branch = "└── " if last_edge else "├── "
+                prefix = "      " if is_last_model else "  │   "
+                print(f"{prefix}{edge_branch}{kind} {fname} → {target}")
+
+
+def cmd_saga_graph(args):
+    """Render a :class:`dorm.contrib.saga.Saga` instance as Mermaid
+    or DOT source.
+
+    *args.path* is a dotted reference to the saga: either
+    ``module.attr`` (the attribute is the Saga instance) or
+    ``module:attr`` (Setuptools entry-point style — both forms are
+    accepted because the colon form is the convention everywhere
+    else in Python tooling).
+    """
+    import importlib
+
+    spec = args.path
+    if ":" in spec:
+        module_path, attr_path = spec.split(":", 1)
+    else:
+        module_path, _, attr_path = spec.rpartition(".")
+    if not module_path or not attr_path:
+        print(
+            f"Error: --path must be 'module.attr' or 'module:attr'; got {spec!r}.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    sys.path.insert(0, os.getcwd())
+    try:
+        module = importlib.import_module(module_path)
+    except Exception as exc:
+        print(f"Error importing {module_path!r}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    obj: Any = module
+    for part in attr_path.split("."):
+        try:
+            obj = getattr(obj, part)
+        except AttributeError:
+            print(
+                f"Error: {module_path}.{attr_path} not found.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    from .contrib.saga import Saga
+
+    if not isinstance(obj, Saga):
+        print(
+            f"Error: {spec!r} resolved to a {type(obj).__name__}, not a Saga.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.format == "mermaid":
+        print(obj.to_mermaid(title=args.title))
+    elif args.format == "dot":
+        print(obj.to_dot(title=args.title))
+    else:
+        print(f"Error: unknown --format {args.format!r}", file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_help(args):
     args.parser.print_help()
 
@@ -3069,6 +3190,45 @@ def main():
         help="Output format. Default 'mermaid'.",
     )
     mg_graph.set_defaults(func=cmd_migrations_graph)
+
+    # saga-graph
+    sg = sub.add_parser(
+        "saga-graph",
+        help=(
+            "Render a Saga instance as Mermaid or DOT source. "
+            "Useful for documenting compensation paths."
+        ),
+    )
+    sg.add_argument(
+        "path",
+        help=(
+            "Dotted path to the Saga instance — either 'pkg.module.attr' "
+            "or 'pkg.module:attr'."
+        ),
+    )
+    sg.add_argument(
+        "--format",
+        choices=("mermaid", "dot"),
+        default="mermaid",
+        help="Output format. Default 'mermaid'.",
+    )
+    sg.add_argument(
+        "--title",
+        default=None,
+        help="Optional diagram title rendered as a header / comment.",
+    )
+    sg.set_defaults(func=cmd_saga_graph)
+
+    # models-tree
+    mt = sub.add_parser(
+        "models-tree",
+        help=(
+            "Print an ASCII tree of every registered model grouped "
+            "by app label, with FK / O2O / M2M edges annotated."
+        ),
+    )
+    mt.add_argument("--settings", default=None)
+    mt.set_defaults(func=cmd_models_tree)
 
     # reset (DEV ONLY)
     rst = sub.add_parser(

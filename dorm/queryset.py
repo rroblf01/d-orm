@@ -2507,6 +2507,76 @@ class QuerySet(Generic[_T]):
         self._invalidate_cache_after_bulk_write()
         return n
 
+    def delete_batched(self, batch_size: int = 1000) -> int:
+        """Delete every row matching the queryset in chunks of
+        *batch_size*, walking the table via keyset pagination on the
+        primary key. Each chunk runs in its own
+        :func:`dorm.transaction.atomic` block so a long-running
+        purge doesn't hold a single transaction (and the associated
+        row locks / WAL) for the duration of the operation.
+
+        Returns the total number of rows deleted. Unlike
+        :meth:`delete`, the batched variant does **not** walk
+        reverse-FK descriptors — pass an explicit ``ON DELETE
+        CASCADE`` at the schema level if the related tables need to
+        clean up, or invoke :meth:`delete_batched` separately on
+        each. Trading the FK-aware fan-out for predictable
+        per-batch latency is the whole point of the batched path.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        from . import transaction as _tx
+
+        pk_attname = self.model._meta.pk.attname
+        last_pk: Any = None
+        total = 0
+        while True:
+            qs = self.order_by(pk_attname)
+            if last_pk is not None:
+                qs = qs.filter(**{f"{pk_attname}__gt": last_pk})
+            pks = list(qs.values_list(pk_attname, flat=True)[:batch_size])
+            if not pks:
+                break
+            with _tx.atomic(using=self._db):
+                scoped = QuerySet(self.model, self._db).filter(
+                    **{f"{pk_attname}__in": pks}
+                )
+                count, _ = scoped.delete()
+            total += count
+            last_pk = pks[-1]
+        return total
+
+    def update_batched(self, batch_size: int = 1000, **kwargs: Any) -> int:
+        """Apply ``UPDATE … SET ...`` in chunks of *batch_size*,
+        walking the queryset by primary key. Same trade-off as
+        :meth:`delete_batched`: shorter locks / smaller WAL chunks
+        in exchange for forfeiting the single-statement atomicity
+        guarantee. Each batch is its own
+        :func:`dorm.transaction.atomic`."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        if not kwargs:
+            return 0
+        from . import transaction as _tx
+
+        pk_attname = self.model._meta.pk.attname
+        last_pk: Any = None
+        total = 0
+        while True:
+            qs = self.order_by(pk_attname)
+            if last_pk is not None:
+                qs = qs.filter(**{f"{pk_attname}__gt": last_pk})
+            pks = list(qs.values_list(pk_attname, flat=True)[:batch_size])
+            if not pks:
+                break
+            with _tx.atomic(using=self._db):
+                scoped = QuerySet(self.model, self._db).filter(
+                    **{f"{pk_attname}__in": pks}
+                )
+                total += scoped.update(**kwargs)
+            last_pk = pks[-1]
+        return total
+
     def delete(self) -> tuple[int, dict[str, int]]:
         from .exceptions import ProtectedError
         from .fields import CASCADE, DO_NOTHING, PROTECT, SET_DEFAULT, SET_NULL

@@ -163,6 +163,84 @@ class Saga:
             run.completed.append(step.name)
         return run
 
+    def to_mermaid(self, *, title: str | None = None) -> str:
+        """Render this saga as a Mermaid ``graph LR`` source string.
+
+        Forward edges are solid; compensation edges (each step back
+        to its predecessor) are dotted so reviewers can spot which
+        steps are reversible at a glance. Non-compensable steps get
+        a red border to signal manual-intervention-on-failure
+        territory.
+
+        Pipe the output to any Mermaid renderer
+        (``mmdc -i saga.mmd -o saga.svg``) or paste into a Markdown
+        block on a platform that renders Mermaid natively (GitHub /
+        GitLab / Notion).
+        """
+        lines: list[str] = []
+        if title:
+            lines.append(f"%% {title}")
+        lines.append("graph LR")
+        # Nodes. Steps without ``compensate`` get a distinct class
+        # so the renderer can highlight the irreversible ones.
+        for s in self.steps:
+            sid = _safe_id(s.name)
+            label = s.name.replace('"', "'")
+            shape_open, shape_close = ("[", "]") if s.compensate is not None else ("[/", "/]")
+            lines.append(f'  {sid}{shape_open}"{label}"{shape_close}')
+            if s.compensate is None:
+                lines.append(f"  class {sid} non_comp")
+        # Forward edges.
+        for prev, nxt in zip(self.steps, self.steps[1:]):
+            lines.append(f"  {_safe_id(prev.name)} --> {_safe_id(nxt.name)}")
+        # Compensation edges — each compensable step points back
+        # to its predecessor with a dotted line + the literal
+        # "compensate" label so the diagram is self-describing.
+        for prev, nxt in zip(self.steps, self.steps[1:]):
+            if nxt.compensate is None:
+                continue
+            lines.append(
+                f"  {_safe_id(nxt.name)} -.compensate.-> "
+                f"{_safe_id(prev.name)}"
+            )
+        # Class definition for the non-compensable nodes — Mermaid
+        # tolerates the directive at the bottom of the source.
+        lines.append("  classDef non_comp stroke:#d33,stroke-width:2px")
+        return "\n".join(lines)
+
+    def to_dot(self, *, title: str | None = None) -> str:
+        """Render this saga as a Graphviz ``digraph`` source string.
+
+        Equivalent semantics to :meth:`to_mermaid` — forward edges
+        solid, compensation edges dashed, non-compensable steps
+        styled in red. Feed the output to ``dot -Tsvg`` /
+        ``dot -Tpng`` for an image."""
+        lines: list[str] = []
+        lines.append("digraph Saga {")
+        lines.append('  rankdir=LR;')
+        if title:
+            safe = title.replace('"', "'")
+            lines.append(f'  label="{safe}"; labelloc="t";')
+        for s in self.steps:
+            sid = _safe_id(s.name)
+            label = s.name.replace('"', "'")
+            attrs = [f'label="{label}"']
+            if s.compensate is None:
+                attrs.append('color="red"')
+                attrs.append('penwidth="2"')
+            lines.append(f"  {sid} [{', '.join(attrs)}];")
+        for prev, nxt in zip(self.steps, self.steps[1:]):
+            lines.append(f"  {_safe_id(prev.name)} -> {_safe_id(nxt.name)};")
+        for prev, nxt in zip(self.steps, self.steps[1:]):
+            if nxt.compensate is None:
+                continue
+            lines.append(
+                f'  {_safe_id(nxt.name)} -> {_safe_id(prev.name)} '
+                f'[style="dashed", label="compensate"];'
+            )
+        lines.append("}")
+        return "\n".join(lines)
+
     def _compensate(self, run: SagaRun) -> None:
         # Walk completed steps in reverse, firing each non-None
         # ``compensate``. Each runs in its own atomic block so a
@@ -186,6 +264,24 @@ class Saga:
                 )
                 if self.stop_on_compensation_error:
                     return
+
+
+_SAFE_ID_TRANS = str.maketrans({c: "_" for c in " -.,/\\:;()[]{}<>!?@#$%^&*+=|'\""})
+
+
+def _safe_id(name: str) -> str:
+    """Coerce a step name to a Mermaid / Graphviz-friendly identifier.
+
+    Both renderers require nodes to be identifier-shaped before the
+    optional ``"label"`` text — punctuation and whitespace would
+    otherwise produce a parse error. Identifier collisions are
+    avoided upstream because :class:`Saga` rejects duplicate step
+    names at construction time.
+    """
+    out = name.translate(_SAFE_ID_TRANS)
+    if not out or not (out[0].isalpha() or out[0] == "_"):
+        out = "n_" + out
+    return out
 
 
 __all__ = ["Step", "Saga", "SagaRun"]
