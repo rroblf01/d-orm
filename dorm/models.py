@@ -80,6 +80,14 @@ class Options:
         self.pk: Any = None
         self.managers: list = []
         self._field_cache: dict[str, Any] = {}
+        # Hot-path caches — populated lazily on first access and
+        # invalidated whenever ``fields`` mutates (Field registration
+        # calls :meth:`invalidate_field_caches`). Walking
+        # ``meta.fields`` filtering for ``f.column`` runs on every
+        # row hydration; caching the result turns an O(N) list comp
+        # into a single attribute load.
+        self._concrete_fields_cache: list | None = None
+        self._insert_template_cache: dict[Any, str] = {}
 
     def contribute_to_class(self, cls, name: str):
         cls._meta = self
@@ -123,6 +131,11 @@ class Options:
             self._field_cache[field.attname] = field
         if field.primary_key:
             self.pk = field
+        # Invalidate hot-path caches — a new field may add a column
+        # that hydration / INSERT templating needs to see. The cache
+        # is rebuilt lazily on next access.
+        self._concrete_fields_cache = None
+        self._insert_template_cache.clear()
 
     def get_field(self, name: str):
         if name in self._field_cache:
@@ -139,7 +152,19 @@ class Options:
 
     @property
     def concrete_fields(self) -> list:
-        return [f for f in self.fields if getattr(f, "concrete", True) and f.column]
+        """Fields that map to a real column. Cached after first access
+        because hydration (``_from_db_row``) and INSERT building
+        iterate it on every row / write — the list comprehension
+        cost adds up under benchmarks."""
+        cached = self._concrete_fields_cache
+        if cached is not None:
+            return cached
+        result = [
+            f for f in self.fields
+            if getattr(f, "concrete", True) and f.column
+        ]
+        self._concrete_fields_cache = result
+        return result
 
     @property
     def local_fields(self) -> list:
@@ -578,9 +603,7 @@ class Model(metaclass=ModelBase):
 
         fields = []
         values = []
-        for field in meta.fields:
-            if not field.column:  # skip M2M and other non-column fields
-                continue
+        for field in meta.concrete_fields:
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
             col_val = field.get_db_prep_value(field.pre_save(self, add=True))
@@ -592,8 +615,24 @@ class Model(metaclass=ModelBase):
             fields.append(field)
             values.append(col_val)
 
-        query = SQLQuery(self.__class__)
-        sql, params = query.as_insert(fields, values, conn)
+        # INSERT template cache — the SQL string only varies with
+        # the set of fields and the backend dialect (PG uses ``%s``,
+        # SQLite uses ``?``). For a given Model + vendor combination
+        # the common case is "every column except auto-PK", so the
+        # cache typically holds one entry per model and skips a
+        # ``", ".join`` + f-string + placeholder-adapt cycle per
+        # save. The cache is per-Options instance and invalidated
+        # whenever a new field is added (see ``add_field``).
+        cache_key = (
+            tuple(f.column for f in fields),
+            getattr(conn, "vendor", "sqlite"),
+        )
+        sql = meta._insert_template_cache.get(cache_key)
+        if sql is None:
+            query = SQLQuery(self.__class__)
+            sql, _ = query.as_insert(fields, values, conn)
+            meta._insert_template_cache[cache_key] = sql
+        params = values
         # Composite PK has no single column to RETURNING; the user
         # supplied all components by hand. Skip the auto-pk dance —
         # ``execute_write`` runs the INSERT without trying to read
@@ -936,17 +975,30 @@ class Model(metaclass=ModelBase):
     def _from_db_row(cls, row, connection=None) -> "Self":
         """Construct a model instance from a database row."""
         instance = cls.__new__(cls)
-        instance.__dict__ = {"_state": _ModelState(adding=False)}
-        concrete = [f for f in cls._meta.fields if f.column]
+        instance_dict = {"_state": _ModelState(adding=False)}
+        instance.__dict__ = instance_dict
+        # Use the cached concrete-fields list — rebuilding it per
+        # row turned hot hydration loops (1k+ rows) into O(N²)
+        # field-list constructions under the bench.
+        concrete = cls._meta.concrete_fields
         if hasattr(row, "keys"):
-            data = dict(row)
+            # PG ``DictRow`` and ``sqlite3.Row`` both support
+            # ``__getitem__`` by column name; the dict-copy the
+            # original code did per row (``data = dict(row)``)
+            # showed up in profiles when hydrating thousands of
+            # rows. Direct lookup with a KeyError / IndexError
+            # fallback covers both row shapes without copying.
             for field in concrete:
-                raw = data.get(field.column)
-                instance.__dict__[field.attname] = field.from_db_value(raw)
+                try:
+                    raw = row[field.column]
+                except (KeyError, IndexError):
+                    raw = None
+                instance_dict[field.attname] = field.from_db_value(raw)
         else:
+            row_len = len(row)
             for i, field in enumerate(concrete):
-                if i < len(row):
-                    instance.__dict__[field.attname] = field.from_db_value(row[i])
+                if i < row_len:
+                    instance_dict[field.attname] = field.from_db_value(row[i])
         return instance
 
     @classmethod

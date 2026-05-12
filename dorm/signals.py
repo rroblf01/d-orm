@@ -152,6 +152,15 @@ class Signal:
     # ── Dispatch ─────────────────────────────────────────────────────────────
 
     def send(self, sender: Any, **kwargs: Any) -> list[tuple[Callable[..., Any], Any]]:
+        # Fast-path: no receivers connected → skip the weakref
+        # materialisation + async detection loop. ``Model.save()``
+        # fires ``pre_save`` and ``post_save`` on every call, so the
+        # zero-receiver case is the common case for projects that
+        # don't opt into temporal / audit / cache invalidation, and
+        # the early-out makes the empty-dispatch a single attribute
+        # lookup + boolean check.
+        if not self._receivers:
+            return []
         responses: list[tuple[Callable[..., Any], Any]] = []
         callables, live = self._live_receivers(sender)
         skipped_async = 0
@@ -199,6 +208,8 @@ class Signal:
         the same as on the sync path. If you want concurrency, fan out
         to ``asyncio.gather`` from inside one receiver.
         """
+        if not self._receivers:
+            return []
         responses: list[tuple[Callable[..., Any], Any]] = []
         callables, live = self._live_receivers(sender)
         for fn in callables:
