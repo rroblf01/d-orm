@@ -2515,13 +2515,17 @@ class QuerySet(Generic[_T]):
         purge doesn't hold a single transaction (and the associated
         row locks / WAL) for the duration of the operation.
 
-        Returns the total number of rows deleted. Unlike
-        :meth:`delete`, the batched variant does **not** walk
-        reverse-FK descriptors — pass an explicit ``ON DELETE
-        CASCADE`` at the schema level if the related tables need to
-        clean up, or invoke :meth:`delete_batched` separately on
-        each. Trading the FK-aware fan-out for predictable
-        per-batch latency is the whole point of the batched path.
+        Each batch dispatches through :meth:`delete`, so reverse-FK
+        descriptors (``on_delete=CASCADE`` / ``SET_NULL`` /
+        ``SET_DEFAULT`` / ``PROTECT``) fire as usual *per batch*.
+        On tables with deep cascade fan-out the batched call can
+        amplify the work; trim the cascade tree first
+        (``delete_batched`` on the child tables) when that matters.
+
+        Returns the total number of rows deleted in the parent
+        table. The per-model breakdown that :meth:`delete` exposes
+        is collapsed to a single integer — call :meth:`delete`
+        directly when you need the detailed accounting.
         """
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")

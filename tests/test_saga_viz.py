@@ -82,12 +82,27 @@ class TestDotRenderer:
 
 
 class TestSafeId:
-    def test_replaces_punctuation(self):
-        assert _safe_id("foo bar") == "foo_bar"
-        assert _safe_id("a-b.c") == "a_b_c"
+    def test_replaces_punctuation_and_disambiguates(self):
+        # Sanitised names get a hash suffix so two distinct source
+        # names that share the cleaned form stay separate ids.
+        a = _safe_id("foo bar")
+        b = _safe_id("foo_bar")
+        assert a != b
+        assert a.startswith("foo_bar_")
+        # Bare identifier — no sanitisation needed, no suffix.
+        assert b == "foo_bar"
 
     def test_prefixes_when_starts_with_digit(self):
-        assert _safe_id("9steps").startswith("n_")
+        # ``"9steps"`` starts with a digit — gets an ``n_`` prefix
+        # plus the disambiguation suffix.
+        out = _safe_id("9steps")
+        assert out.startswith("n_9steps_")
+
+    def test_collision_resistant(self):
+        """Three names that all clean to the same shape must produce
+        three distinct identifiers."""
+        ids = {_safe_id("a b"), _safe_id("a-b"), _safe_id("a.b")}
+        assert len(ids) == 3
 
 
 class TestSagaGraphCLI:

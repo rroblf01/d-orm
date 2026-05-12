@@ -51,7 +51,7 @@ class TestEraseSubjectBasics:
         _materialise(_U)
         u = _U.objects.create(email="a@x.com", name="Alice", score=10)
         summary = erase_subject(_U, u.pk)
-        assert summary == {"_U": 1}
+        assert summary == {"tests._U": 1}
         u.refresh_from_db()
         # String fields redacted; numeric left alone.
         assert u.email == "[REDACTED]"
@@ -104,7 +104,7 @@ class TestEraseSubjectBasics:
 
         _materialise(_U)
         summary = erase_subject(_U, 99999)
-        assert summary == {"_U": 0}
+        assert summary == {"tests._U": 0}
 
     def test_idempotent_on_redact(self, fresh_db):
         import dorm
@@ -151,7 +151,7 @@ class TestCascade:
         _Note.objects.create(owner=other, body="not erased")
 
         summary = erase_subject(_U, u.pk, cascade=[_Note])
-        assert summary == {"_U": 1, "_Note": 2}
+        assert summary == {"tests._U": 1, "tests._Note": 2}
         # Only the referencing rows got redacted.
         notes = list(_Note.objects.filter(owner=u))
         assert all(n.body == "[REDACTED]" for n in notes)
@@ -178,7 +178,7 @@ class TestCascade:
         u = _U.objects.create(name="x")
         _Unrelated.objects.create(label="kept")
         summary = erase_subject(_U, u.pk, cascade=[_Unrelated])
-        assert summary["_Unrelated"] == 0
+        assert summary["tests._Unrelated"] == 0
         row = _Unrelated.objects.first()
         assert row is not None
         assert row.label == "kept"

@@ -82,24 +82,50 @@ def _default_rules(model_cls: type) -> dict[str, _Strategy]:
 
 
 def _resolve_rules(
-    model_cls: type, rules: dict[str, str | _Strategy] | None
+    model_cls: type,
+    rules: dict[str, str | _Strategy] | None,
+    *,
+    strict: bool = True,
 ) -> dict[str, _Strategy]:
     """Validate + normalise *rules*. ``None`` → :func:`_default_rules`.
 
-    Raises ``ValueError`` if any rule references a field that
-    doesn't exist on *model_cls* — silently no-oping on a typo is
-    the worst possible failure mode for a compliance feature."""
+    When ``strict`` is True (default — used for the subject row),
+    a rule that names a field absent from *model_cls* raises
+    ``ValueError``: a compliance feature must not silently no-op on
+    a typo. When ``strict`` is False (used for cascade models),
+    unknown fields are *skipped* with a warning log so callers can
+    pass a single ``rules`` dict that names fields specific to the
+    subject without having to enumerate the per-model subset.
+    """
     if rules is None:
         return _default_rules(model_cls)
     meta = model_cls._meta  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     known = {f.name for f in meta.fields if not getattr(f, "many_to_many", False)}
     unknown = [n for n in rules if n not in known]
     if unknown:
-        raise ValueError(
-            f"erase_subject: rules reference unknown field(s) {unknown!r} "
-            f"on {model_cls.__name__}. Known: {sorted(known)!r}"
+        if strict:
+            raise ValueError(
+                f"erase_subject: rules reference unknown field(s) {unknown!r} "
+                f"on {model_cls.__name__}. Known: {sorted(known)!r}"
+            )
+        # Non-strict (cascade) path — silently skip fields that
+        # don't exist on the related model. Emit a debug-level log
+        # so accidental typos are still observable in verbose runs
+        # but the common case (rules describe the *subject*, not
+        # every cascade target) doesn't blow up.
+        import logging as _logging
+
+        _logging.getLogger("dorm.contrib.gdpr").debug(
+            "erase_subject: skipping rule(s) %r on cascade target %s "
+            "(field not present)",
+            unknown,
+            model_cls.__name__,
         )
-    return {name: _resolve_strategy(s) for name, s in rules.items()}
+    return {
+        name: _resolve_strategy(s)
+        for name, s in rules.items()
+        if name in known
+    }
 
 
 def _fks_pointing_at(target: type, model_cls: type) -> list[str]:
@@ -116,10 +142,17 @@ def _fks_pointing_at(target: type, model_cls: type) -> list[str]:
     for f in meta.fields:
         if not isinstance(f, _fields.ForeignKey):
             continue
-        # ``ForeignKey.remote_field_to`` holds the resolved target
-        # model class (string-based lazy references are upgraded to
-        # the actual class at registry-link time).
-        if getattr(f, "remote_field_to", None) is target:
+        # ``remote_field_to`` may still be a lazy string reference
+        # ("auth.User") when the target model hasn't been imported
+        # yet at decoration time. ``_resolve_related_model`` looks
+        # up the registry to upgrade the string to the actual class;
+        # bare ``is`` comparison would silently skip lazy FKs and
+        # leave dependent rows un-erased.
+        try:
+            resolved = f._resolve_related_model()
+        except (KeyError, AttributeError):
+            resolved = getattr(f, "remote_field_to", None)
+        if resolved is target:
             matches.append(f.attname or f.name)
     return matches
 
@@ -161,12 +194,29 @@ def erase_subject(
     Returns a dict mapping each touched model's class name to the
     number of rows erased.
     """
-    subject_rules = _resolve_rules(model_cls, rules)
+    subject_rules = _resolve_rules(model_cls, rules, strict=True)
     cascade_models = list(cascade or [])
+    # Cascade targets validate non-strictly: when the caller passed
+    # explicit ``rules`` they were almost certainly describing the
+    # subject's columns; raising on a cascade table that doesn't
+    # share every column would force boilerplate per-related-model
+    # ``rules`` dicts. Skip unknown fields with a debug log instead.
     cascade_rules: dict[type, dict[str, _Strategy]] = {
-        m: _resolve_rules(m, rules) for m in cascade_models
+        m: _resolve_rules(m, rules, strict=False) for m in cascade_models
     }
     summary: dict[str, int] = {}
+
+    def _key(cls: type) -> str:
+        """Compose a stable summary key that survives same-name
+        collisions between unrelated modules (``billing.User`` and
+        ``auth.User`` would otherwise share the bare ``"User"``
+        bucket and the caller would see only one of them in the
+        returned dict)."""
+        try:
+            label = cls._meta.app_label  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+            return f"{label}.{cls.__name__}"
+        except AttributeError:
+            return cls.__name__
 
     with transaction.atomic(using=using):
         # Subject row — fetch, apply, save. ``filter().first()``
@@ -177,20 +227,22 @@ def erase_subject(
         # there is no matching data).
         manager = model_cls.objects.using(using)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
         inst = manager.filter(pk=pk).first()
+        subject_key = _key(model_cls)
         if inst is not None and subject_rules:
             _apply_strategies(inst, subject_rules)
             inst.save(update_fields=list(subject_rules.keys()), using=using)
-            summary[model_cls.__name__] = 1
+            summary[subject_key] = 1
         else:
-            summary[model_cls.__name__] = 0
+            summary[subject_key] = 0
 
         # Cascade — for each related model find FK columns pointing
         # at *model_cls*, filter rows that reference *pk* on any of
         # them, then apply the rules.
         for related_cls in cascade_models:
+            related_key = _key(related_cls)
             fk_cols = _fks_pointing_at(model_cls, related_cls)
             if not fk_cols:
-                summary[related_cls.__name__] = 0
+                summary[related_key] = 0
                 continue
             related_mgr = related_cls.objects.using(using)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
             # Each FK column emits a separate ``filter()`` — most
@@ -213,7 +265,7 @@ def erase_subject(
                             using=using,
                         )
                     count += 1
-            summary[related_cls.__name__] = count
+            summary[related_key] = count
 
     return summary
 

@@ -61,12 +61,22 @@ _AUDIT_MODELS: dict[int, type] = {}
 # columns to diff and how to resolve the actor without re-reading
 # decorator arguments at signal-fire time.
 _AUDIT_CONFIG: dict[int, dict[str, Any]] = {}
-# Per-instance pre-save snapshot. Keyed by ``(model_id, pk)`` so two
-# unrelated decorated models writing in parallel don't clobber each
-# other's pending diff. ``WeakValueDictionary`` would suffice if pks
-# were hashable instance refs; sticking with the explicit tuple keeps
-# the lookup obvious.
-_PRE_SNAPSHOTS: dict[tuple[int, Any], dict[str, Any]] = {}
+# Per-instance pre-save snapshot. We hang it off the instance itself
+# (``instance.__dict__["__audit_pre__"]``) rather than a module-global
+# dict keyed by ``id(instance)``. Two reasons:
+#
+# 1. ``id(instance)`` is reused after garbage collection, so a global
+#    dict could mix snapshots between unrelated instances when the
+#    GC reaps an earlier one between ``pre_save`` and ``post_save``.
+# 2. If ``save()`` raises mid-flight (constraint violation, etc.)
+#    ``post_save`` never fires and the snapshot would leak forever
+#    — stale snapshots accumulate under repeated failures. Hanging
+#    the dict off the instance ties its lifetime to the instance,
+#    so the GC handles cleanup automatically.
+#
+# The slot is excluded from the model's declared field set, so dorm's
+# INSERT / UPDATE column emitters never see it.
+_AUDIT_PRE_KEY = "__audit_pre__"
 
 
 def _build_audit_model(model_cls: type, *, target_pk_field: Any) -> type:
@@ -232,7 +242,7 @@ def _on_pre_save(sender: Any, instance: Any, **_kwargs: Any) -> None:
         return
     pk_val = instance.__dict__.get(cfg["pk_attname"])
     if pk_val is None:
-        _PRE_SNAPSHOTS[(id(sender), id(instance))] = {}
+        instance.__dict__[_AUDIT_PRE_KEY] = {}
         return
     try:
         row = (
@@ -243,7 +253,7 @@ def _on_pre_save(sender: Any, instance: Any, **_kwargs: Any) -> None:
         )
     except Exception:
         row = None
-    _PRE_SNAPSHOTS[(id(sender), id(instance))] = dict(row) if row else {}
+    instance.__dict__[_AUDIT_PRE_KEY] = dict(row) if row else {}
 
 
 def _emit_diff(
@@ -300,7 +310,7 @@ def _on_post_save(
     audit_cls = _AUDIT_MODELS.get(id(sender))
     if cfg is None or audit_cls is None:
         return
-    pre = _PRE_SNAPSHOTS.pop((id(sender), id(instance)), {})
+    pre = instance.__dict__.pop(_AUDIT_PRE_KEY, {})
     operation = "+" if created else "~"
     _emit_diff(
         sender,

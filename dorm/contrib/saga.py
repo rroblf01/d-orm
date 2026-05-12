@@ -274,14 +274,27 @@ def _safe_id(name: str) -> str:
 
     Both renderers require nodes to be identifier-shaped before the
     optional ``"label"`` text — punctuation and whitespace would
-    otherwise produce a parse error. Identifier collisions are
-    avoided upstream because :class:`Saga` rejects duplicate step
-    names at construction time.
+    otherwise produce a parse error.
+
+    ``Saga`` enforces unique *step names* at construction time, but
+    naïve punctuation replacement would still collide: ``"a b"`` and
+    ``"a_b"`` would map to the same identifier and produce
+    ambiguous graphs. We append a short hex digest of the original
+    name whenever the cleaned form differs, so the identifier stays
+    distinct without polluting unaltered alphanumeric names.
     """
-    out = name.translate(_SAFE_ID_TRANS)
-    if not out or not (out[0].isalpha() or out[0] == "_"):
-        out = "n_" + out
-    return out
+    cleaned = name.translate(_SAFE_ID_TRANS)
+    if not cleaned or not (cleaned[0].isalpha() or cleaned[0] == "_"):
+        cleaned = "n_" + cleaned
+    if cleaned == name:
+        return cleaned
+    # Sanitised — disambiguate with a short hash so two different
+    # names that share the cleaned form still map to distinct
+    # identifiers.
+    import hashlib
+
+    suffix = hashlib.blake2b(name.encode("utf-8"), digest_size=3).hexdigest()
+    return f"{cleaned}_{suffix}"
 
 
 __all__ = ["Step", "Saga", "SagaRun"]

@@ -39,13 +39,29 @@ _VALID_INTERVAL = re.compile(
 )
 
 
-def _quote_ident(name: str) -> str:
+def _validate_unquoted_ident(name: str) -> str:
+    """Validate an identifier and return it unquoted.
+
+    Used in slots where the SQL grammar wants a ``NAME`` parameter
+    (column names inside ``create_hypertable(...)``) — wrapping in
+    double quotes would change semantics from "look up column ``ts``"
+    to "look up column literally named ``\"ts\"``".
+    """
     if not isinstance(name, str) or not _VALID_IDENT.match(name):
         raise ValueError(
             f"timescale: invalid identifier {name!r} — must match "
             r"[A-Za-z_][A-Za-z0-9_]*"
         )
-    return f'"{name}"'
+    return name
+
+
+def _quote_ident(name: str) -> str:
+    """Return a double-quoted SQL identifier, validated against the
+    allowlist. Use this when the slot expects an *identifier* (table
+    name in DDL); use :func:`_validate_unquoted_ident` when the slot
+    expects a ``NAME`` text parameter (column name inside a function
+    call)."""
+    return f'"{_validate_unquoted_ident(name)}"'
 
 
 def _validate_interval(spec: str) -> str:
@@ -101,21 +117,21 @@ def create_hypertable(
 
     conn = get_connection(using)
     _require_pg(conn)
+    # ``table`` is validated against the identifier allowlist + then
+    # quoted; PG's ``regclass`` cast resolves the quoted form to the
+    # underlying table OID. ``time_column`` flows into the helper's
+    # ``NAME`` parameter and must be passed *unquoted* — wrapping it
+    # in double quotes would make TimescaleDB look for a column
+    # literally named ``"ts"`` and raise "column does not exist".
     tbl_ident = _quote_ident(table)
-    col_ident = _quote_ident(time_column)
+    col_name = _validate_unquoted_ident(time_column)
     interval = _validate_interval(chunk_time_interval)
-    # ``create_hypertable`` accepts the table reference as text;
-    # quote it before substituting via parameter binding.
     sql = (
         "SELECT create_hypertable(%s, %s, "
         f"chunk_time_interval => INTERVAL '{interval}', "
         f"if_not_exists => {str(if_not_exists).upper()})"
     )
-    # The two %s slots receive the *quoted* identifier strings as
-    # SQL text — TimescaleDB parses them back as identifiers. Using
-    # parameter binding here closes the door on injection through
-    # the (validated) ``table`` / ``time_column`` arguments.
-    conn.execute(sql, [tbl_ident, col_ident])
+    conn.execute(sql, [tbl_ident, col_name])
 
 
 def add_retention_policy(

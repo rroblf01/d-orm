@@ -96,7 +96,10 @@ class TestSQLEmission:
         assert "create_hypertable(" in sql
         assert "INTERVAL '1 day'" in sql
         assert "if_not_exists => TRUE" in sql
-        assert params == ['"events"', '"ts"']
+        # Table goes in quoted (regclass cast strips the quotes);
+        # column goes in unquoted because the helper's NAME slot
+        # would otherwise look for a column literally named ``"ts"``.
+        assert params == ['"events"', "ts"]
 
     def test_create_hypertable_custom_interval(self, monkeypatch):
         fake = self._patched_pg(monkeypatch)
