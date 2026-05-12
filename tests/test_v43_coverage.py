@@ -243,7 +243,7 @@ class TestTasksCoverage:
                 app_label = "tests"
 
         evt = _ROb(event_type="x", payload={}, status="pending", attempts=2)
-        eta = retry_with_backoff(None, evt, base_seconds=5, jitter=False, max_seconds=10000)  # type: ignore[arg-type]
+        eta = retry_with_backoff(None, evt, base_seconds=5, jitter=False, max_seconds=10000)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         delta = (eta - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
         # base * 2^2 = 20
         assert 15 < delta < 25
@@ -350,7 +350,7 @@ class TestTemporal:
 
         qs = as_of(_Td, _dt.datetime.now(_dt.timezone.utc))
         # Result is a queryset against the temporal sibling.
-        assert qs.model is _Td._temporal_model  # type: ignore[attr-defined]
+        assert qs.model is _Td._temporal_model  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
 
     def test_temporal_history_manager_exposed(self):
         import dorm
@@ -363,7 +363,7 @@ class TestTemporal:
             class Meta:
                 app_label = "tests"
 
-        assert _Th.history is _Th._temporal_model.objects  # type: ignore[attr-defined]
+        assert _Th.history is _Th._temporal_model.objects  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
 
     def test_temporal_model_drops_pk(self):
         import dorm
@@ -378,7 +378,7 @@ class TestTemporal:
 
         # The temporal sibling has its own PK; the source PK is
         # demoted to indexed but not primary.
-        temp = _Tpk._temporal_model  # type: ignore[attr-defined]
+        temp = _Tpk._temporal_model  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
         pk_field = temp._meta.pk
         assert pk_field.name == "temporal_id"
 
@@ -410,7 +410,7 @@ class TestAnonymizer:
         from dorm.contrib.anonymizer import _resolve
 
         with pytest.raises(ValueError):
-            _resolve(42)  # type: ignore[arg-type]
+            _resolve(42)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
     def test_anonymize_model_empty_rules(self):
         import dorm

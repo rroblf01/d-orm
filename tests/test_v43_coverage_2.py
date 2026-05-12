@@ -220,14 +220,14 @@ class TestTemporalE2E:
             conn = get_connection()
             with SchemaEditor(conn) as se:
                 se.create_model(_Te)
-                se.create_model(_Te._temporal_model)  # type: ignore[attr-defined]
+                se.create_model(_Te._temporal_model)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
             # Create + update emits two temporal rows.
             obj = _Te.objects.create(name="v1")
-            assert _Te._temporal_model.objects.count() == 1  # type: ignore[attr-defined]
+            assert _Te._temporal_model.objects.count() == 1  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
             obj.name = "v2"
             obj.save()
             # Two rows: original (closed) + new (open).
-            assert _Te._temporal_model.objects.count() == 2  # type: ignore[attr-defined]
+            assert _Te._temporal_model.objects.count() == 2  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
             # Now query as_of: a recent timestamp should see v2 open row.
             now = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=1)
             rows = list(as_of(_Te, now))
@@ -235,7 +235,7 @@ class TestTemporalE2E:
             assert "v2" in names
             # Delete fires the temporal close + tombstone row.
             obj.delete()
-            assert _Te._temporal_model.objects.count() == 3  # type: ignore[attr-defined]
+            assert _Te._temporal_model.objects.count() == 3  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
         finally:
             dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
             _sync_connections.clear()
@@ -571,7 +571,7 @@ class TestLagRouterCoverage:
         from dorm.contrib.lag_router import LagAwareReadRouter
 
         r = LagAwareReadRouter(replicas=["r1"])
-        r._state["r1"] = type("S", (), {})()  # type: ignore[assignment]
+        r._state["r1"] = type("S", (), {})()  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         r.reset()
         assert r._state == {}
 
