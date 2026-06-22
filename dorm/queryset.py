@@ -18,6 +18,10 @@ from .query import SQLQuery, _validate_identifier
 
 _T = TypeVar("_T", bound=Model)
 
+# Cache for reverse FK resolution results to avoid O(N*M) registry scans
+# on repeated prefetch calls. Maps (model_class_id, field_name) → (target_model, target_field).
+_reverse_fk_cache: dict[tuple[int, str], tuple[Any, Any]] = {}
+
 
 class CTE:
     """A Common Table Expression body the user supplies as raw SQL.
@@ -2043,11 +2047,101 @@ class QuerySet(Generic[_T]):
             base_qs.filter(**{ct_attname: ct.pk, f"{fk_attname}__in": src_pks})
         )
 
+        self._group_generic_relation(
+            instances, related_objs, fk_attname, cache_key, src_pks
+        )
+
+    def _group_generic_relation(
+        self,
+        instances: list[_T],
+        related_objs: list[Any],
+        fk_attname: str,
+        cache_key: str,
+        src_pks: list[Any],
+    ) -> None:
+        """Group related objects by owner PK and assign to cache slots."""
         grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
         for obj in related_objs:
             owner_id = obj.__dict__.get(fk_attname)
             if owner_id in grouped:
                 grouped[owner_id].append(obj)
+        for inst in instances:
+            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
+
+    def _resolve_reverse_fk(self, fname: str) -> tuple[Any, Any]:
+        """Resolve a reverse FK relation name to (target_model, target_field).
+
+        Checks the model class descriptor first, then a cache, then falls
+        back to scanning the model registry.
+        """
+        from .related_managers import ReverseFKDescriptor
+
+        descriptor = self.model.__dict__.get(fname)
+        if isinstance(descriptor, ReverseFKDescriptor):
+            return descriptor.source_model, descriptor.fk_field
+
+        cache_lookup = (id(self.model), fname)
+        cached = _reverse_fk_cache.get(cache_lookup)
+        if cached is not None:
+            return cached
+
+        from .models import _model_registry
+        from .fields import ForeignKey, OneToOneField
+
+        target_field = None
+        target_model = None
+        seen: set[Any] = set()
+        for model_cls in _model_registry.values():
+            if model_cls in seen:
+                continue
+            seen.add(model_cls)
+            for f in model_cls._meta.fields:
+                if not isinstance(f, (ForeignKey, OneToOneField)):
+                    continue
+                try:
+                    rel = f._resolve_related_model()
+                except Exception:
+                    continue
+                if rel is not self.model:
+                    continue
+                rel_name = f.related_name or f"{model_cls.__name__.lower()}_set"
+                if rel_name == fname:
+                    target_field = f
+                    target_model = model_cls
+                    break
+            if target_field:
+                break
+
+        if target_field is None or target_model is None:
+            from .exceptions import FieldDoesNotExist
+
+            raise FieldDoesNotExist(
+                f"Cannot resolve {fname!r} on "
+                f"{self.model.__name__} for prefetch_related(): "
+                f"no field, reverse-FK descriptor, or registry match."
+            )
+
+        _reverse_fk_cache[cache_lookup] = (target_model, target_field)
+        return target_model, target_field
+
+    def _group_reverse_fk(
+        self,
+        instances: list[_T],
+        fname: str,
+        target_model: Any,
+        target_field: Any,
+        related_objs: list[Any],
+        to_attr: str | None = None,
+    ) -> None:
+        """Group related objects by parent PK and assign to cache slots."""
+        cache_key = to_attr if to_attr else f"_prefetch_{fname}"
+        src_pks = [inst.pk for inst in instances if inst.pk is not None]
+        fk_attname = target_field.attname
+        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        for obj in related_objs:
+            fk_val = obj.__dict__.get(fk_attname)
+            if fk_val in grouped:
+                grouped[fk_val].append(obj)
         for inst in instances:
             inst.__dict__[cache_key] = grouped.get(inst.pk, [])
 
@@ -2059,60 +2153,8 @@ class QuerySet(Generic[_T]):
         user_qs: "QuerySet[Any] | None" = None,
         to_attr: str | None = None,
     ) -> None:
-        from .related_managers import ReverseFKDescriptor
-
-        # ``to_attr`` writes directly to ``instance.<to_attr>``; without
-        # it we use the reverse-FK descriptor's standard cache slot.
         cache_key = to_attr if to_attr else f"_prefetch_{fname}"
-
-        # Primary path: ReverseFKDescriptor installed directly on model class
-        descriptor = self.model.__dict__.get(fname)
-        if isinstance(descriptor, ReverseFKDescriptor):
-            target_model = descriptor.source_model
-            target_field = descriptor.fk_field
-        else:
-            # Fallback: scan model registry (less reliable across name clashes)
-            from .models import _model_registry
-            from .fields import ForeignKey, OneToOneField
-
-            target_field = None
-            target_model = None
-            seen: set[Any] = set()
-            for model_cls in _model_registry.values():
-                if model_cls in seen:
-                    continue
-                seen.add(model_cls)
-                for f in model_cls._meta.fields:
-                    if not isinstance(f, (ForeignKey, OneToOneField)):
-                        continue
-                    try:
-                        rel = f._resolve_related_model()
-                    except Exception:
-                        continue
-                    if rel is not self.model:
-                        continue
-                    rel_name = f.related_name or f"{model_cls.__name__.lower()}_set"
-                    if rel_name == fname:
-                        target_field = f
-                        target_model = model_cls
-                        break
-                if target_field:
-                    break
-
-            if target_field is None or target_model is None:
-                # Neither the descriptor nor the registry scan resolved
-                # ``fname`` to a relation. Previously this silently
-                # returned and the caller assumed the prefetch had run —
-                # so a typo in ``prefetch_related("authrs")`` would just
-                # degrade back to N+1 with no warning. Raise so the
-                # mistake surfaces.
-                from .exceptions import FieldDoesNotExist
-
-                raise FieldDoesNotExist(
-                    f"Cannot resolve {fname!r} on "
-                    f"{self.model.__name__} for prefetch_related(): "
-                    f"no field, reverse-FK descriptor, or registry match."
-                )
+        target_model, target_field = self._resolve_reverse_fk(fname)
 
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
@@ -2120,9 +2162,6 @@ class QuerySet(Generic[_T]):
                 inst.__dict__[cache_key] = []
             return
 
-        # Forward through the user's queryset (with filters / order_by /
-        # select_related preserved) when supplied; otherwise fall back
-        # to a plain queryset on the target model.
         base_qs = (
             user_qs
             if user_qs is not None
@@ -2131,16 +2170,9 @@ class QuerySet(Generic[_T]):
         related_objs = list(
             base_qs.filter(**{f"{target_field.name}__in": src_pks})
         )
-
-        fk_attname = target_field.attname
-        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
-        for obj in related_objs:
-            fk_val = obj.__dict__.get(fk_attname)
-            if fk_val in grouped:
-                grouped[fk_val].append(obj)
-
-        for inst in instances:
-            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
+        self._group_reverse_fk(
+            instances, fname, target_model, target_field, related_objs, to_attr
+        )
 
     @staticmethod
     def _row_to_values_dict(row: Any, fields: list[str]) -> dict[str, Any]:
@@ -3262,15 +3294,15 @@ class QuerySet(Generic[_T]):
             if user_qs is not None
             else QuerySet(related_model, self._db)  # type: ignore[arg-type]
         )
-        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
+        related_objs: list[Any] = []
         async for obj in base_qs.filter(
             **{ct_attname: ct.pk, f"{fk_attname}__in": src_pks}
         ):
-            owner_id = obj.__dict__.get(fk_attname)
-            if owner_id in grouped:
-                grouped[owner_id].append(obj)
-        for inst in instances:
-            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
+            related_objs.append(obj)
+
+        self._group_generic_relation(
+            instances, related_objs, fk_attname, cache_key, src_pks
+        )
 
     async def _aprefetch_reverse_fk(
         self,
@@ -3281,51 +3313,8 @@ class QuerySet(Generic[_T]):
         to_attr: str | None = None,
     ) -> None:
         """Async counterpart of :meth:`_prefetch_reverse_fk`."""
-        from .related_managers import ReverseFKDescriptor
-        from .fields import ForeignKey, OneToOneField
-
         cache_key = to_attr if to_attr else f"_prefetch_{fname}"
-        descriptor = self.model.__dict__.get(fname)
-        if isinstance(descriptor, ReverseFKDescriptor):
-            target_model = descriptor.source_model
-            target_field = descriptor.fk_field
-        else:
-            from .models import _model_registry
-
-            target_field = None
-            target_model = None
-            seen: set[Any] = set()
-            for model_cls in _model_registry.values():
-                if model_cls in seen:
-                    continue
-                seen.add(model_cls)
-                for f in model_cls._meta.fields:
-                    if not isinstance(f, (ForeignKey, OneToOneField)):
-                        continue
-                    try:
-                        rel = f._resolve_related_model()
-                    except Exception:
-                        continue
-                    if rel is not self.model:
-                        continue
-                    rel_name = f.related_name or f"{model_cls.__name__.lower()}_set"
-                    if rel_name == fname:
-                        target_field = f
-                        target_model = model_cls
-                        break
-                if target_field:
-                    break
-
-            if target_field is None or target_model is None:
-                # Same rationale as :meth:`_prefetch_reverse_fk`: surface
-                # typos instead of degrading to N+1 silently.
-                from .exceptions import FieldDoesNotExist
-
-                raise FieldDoesNotExist(
-                    f"Cannot resolve {fname!r} on "
-                    f"{self.model.__name__} for prefetch_related(): "
-                    f"no field, reverse-FK descriptor, or registry match."
-                )
+        target_model, target_field = self._resolve_reverse_fk(fname)
 
         src_pks = [inst.pk for inst in instances if inst.pk is not None]
         if not src_pks:
@@ -3344,14 +3333,9 @@ class QuerySet(Generic[_T]):
         ):
             related_objs.append(obj)
 
-        fk_attname = target_field.attname
-        grouped: dict[Any, list[Any]] = {pk: [] for pk in src_pks}
-        for obj in related_objs:
-            fk_val = obj.__dict__.get(fk_attname)
-            if fk_val in grouped:
-                grouped[fk_val].append(obj)
-        for inst in instances:
-            inst.__dict__[cache_key] = grouped.get(inst.pk, [])
+        self._group_reverse_fk(
+            instances, fname, target_model, target_field, related_objs, to_attr
+        )
 
     async def _ado_prefetch_related(self, instances: list[_T]) -> None:
         """Run every prefetch concurrently with ``asyncio.gather``.
@@ -3581,13 +3565,14 @@ class QuerySet(Generic[_T]):
 
     async def aupdate(self, **kwargs: Any) -> int:
         from .expressions import CombinedExpression, F, Value
+        from .functions import Case
 
         conn = self._get_async_connection()
         col_kwargs = {}
         for k, v in kwargs.items():
             try:
                 field = self.model._meta.get_field(k)
-                if isinstance(v, (F, Value, CombinedExpression)):
+                if isinstance(v, (F, Value, CombinedExpression, Case)):
                     col_kwargs[field.column] = v
                 else:
                     col_kwargs[field.column] = field.get_db_prep_value(v)
