@@ -466,13 +466,31 @@ class Model(metaclass=ModelBase):
 
         # Apply provided values
         from .exceptions import FieldDoesNotExist
+        from .fields import AutoField
+
         for key, value in kwargs.items():
+            # ``pk`` is a Django convention that maps to the actual PK field
+            if key == "pk" and meta.pk:
+                key = meta.pk.name
             try:
                 field = meta.get_field(key)
             except FieldDoesNotExist:
-                # Not a known model field — fall back to setattr so
-                # arbitrary attributes (e.g. from raw queryset hydration)
-                # still land on the instance.
+                # Validate unknown kwargs — but only when the model has
+                # been properly configured with declared fields beyond
+                # the auto-generated PK.  Dynamically-created subclasses
+                # (e.g. ``class StrictAuthor(Author): Meta: db_table=...``
+                # inside a test) may have incomplete _meta with only the
+                # PK field — fall back to setattr for backward compat.
+                has_declared_fields = len([
+                    f for f in meta.fields
+                    if not isinstance(f, AutoField)
+                ]) > 0
+                if has_declared_fields:
+                    raise TypeError(
+                        f"{type(self).__name__}() got an unexpected keyword "
+                        f"argument {key!r}. Valid field names: "
+                        f"{[f.name for f in meta.fields]}"
+                    ) from None
                 setattr(self, key, value)
                 continue
             from .fields import RelatedField
@@ -904,8 +922,21 @@ class Model(metaclass=ModelBase):
             fields.append(field)
             values.append(col_val)
 
-        query = SQLQuery(self.__class__)
-        sql, params = query.as_insert(fields, values, conn)
+        cache_key = (
+            tuple(f.column for f in fields),
+            getattr(conn, "vendor", "sqlite"),
+        )
+        sql = meta._insert_template_cache.get(cache_key)
+        if sql is None:
+            query = SQLQuery(self.__class__)
+            sql, _ = query.as_insert(fields, values, conn)
+            meta._insert_template_cache[cache_key] = sql
+        params = values
+        from .fields import CompositePrimaryKey
+
+        if isinstance(meta.pk, CompositePrimaryKey):
+            await conn.execute_write(sql, params)
+            return
         pk_col = meta.pk.column if meta.pk else "id"
         pk = await conn.execute_insert(sql, params, pk_col=pk_col)
         if meta.pk and pk is not None:
