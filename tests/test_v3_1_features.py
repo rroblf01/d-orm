@@ -167,7 +167,8 @@ def test_dates_python_truncation_works_on_real_dates():
     ]
 
     months = qs.dates("created_at", "month")
-    assert months == [_dt.date(2026, 3, 1), _dt.date(2026, 5, 1)]
+    # dates() now returns a QuerySet — materialise to compare.
+    assert list(months) == [_dt.date(2026, 3, 1), _dt.date(2026, 5, 1)]
 
 
 def test_datetimes_python_truncation():
@@ -181,7 +182,11 @@ def test_datetimes_python_truncation():
     ]
     out = qs.datetimes("ts", "hour")
     # Two distinct hours: 2026-03-05 12:00 and 2026-03-06 00:00.
-    assert len(out) == 2
+    # dates()/datetimes() now return a QuerySet — materialise to compare.
+    assert list(out) == [
+        _dt.datetime(2026, 3, 5, 12, 0),
+        _dt.datetime(2026, 3, 6, 0, 0),
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

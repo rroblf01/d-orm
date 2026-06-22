@@ -20,6 +20,7 @@ from dorm import (
     Mode,
     PercentileCont,
     PercentileDisc,
+    QuerySet,
     StringAgg,
 )
 from dorm.aggregates import _OrderedSetAggregate
@@ -355,7 +356,7 @@ async def test_adates_returns_truncated_dates():
     Async-only sanity: the call awaits + returns a list."""
     Author.objects.create(name="ad-a", age=10, email="ad@x.com")
     out = await Author.objects.adates("age", "year", order="ASC")
-    assert isinstance(out, list)
+    assert isinstance(out, QuerySet)
 
 
 @pytest.mark.asyncio

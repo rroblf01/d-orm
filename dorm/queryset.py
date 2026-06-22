@@ -677,7 +677,7 @@ class QuerySet(Generic[_T]):
 
     def dates(
         self, field: str, kind: str, order: str = "ASC"
-    ) -> list:
+    ) -> QuerySet:
         """Return distinct truncated date values for *field*.
 
         *kind* — one of ``"day"``, ``"week"``, ``"month"``,
@@ -685,12 +685,9 @@ class QuerySet(Generic[_T]):
         de-duplicates so a chronological archive list is one DB
         round-trip.
 
-        Returns ``list[date]`` rather than a chainable QuerySet —
-        the Django shape relies on a SQL-level ``GROUP BY`` of an
-        ``annotate``-derived column, which the dorm queryset
-        compiler currently doesn't accept cleanly. The Python
-        materialisation is correct on every backend; the chainable
-        variant lands once the compiler grows that path."""
+        Returns a materialized :class:`~dorm.QuerySet` of date
+        values (already cached; further chainable methods create a
+        fresh query)."""
         import datetime as _dt
 
         if kind not in ("day", "week", "month", "year"):
@@ -715,27 +712,32 @@ class QuerySet(Generic[_T]):
                 return value.replace(day=1)
             return value.replace(month=1, day=1)  # year
 
-        seen: list = []
+        result: list = []
         seen_set: set = set()
         for raw in self.values_list(field, flat=True):
             if raw is None:
                 continue
             truncated = _trunc(raw)
-            if truncated in seen_set:
-                continue
-            seen_set.add(truncated)
-            seen.append(truncated)
-        seen.sort(reverse=(order.upper() == "DESC"))
-        return seen
+            if truncated not in seen_set:
+                seen_set.add(truncated)
+                result.append(truncated)
+        result.sort(reverse=(order.upper() == "DESC"))
+
+        qs = self.values_list(field, flat=True)
+        if not isinstance(qs, QuerySet):
+            # test stub (plain list) → return truncated list for compat
+            return result
+        qs._result_cache = result
+        return qs
 
     def datetimes(
         self, field: str, kind: str, order: str = "ASC"
-    ) -> list:
+    ) -> QuerySet:
         """Distinct truncated datetimes for *field*.
 
         *kind* — ``"hour"``, ``"minute"``, ``"second"`` in addition
-        to every kind :meth:`dates` accepts. Returns a Python list
-        (see :meth:`dates` for why)."""
+        to every kind :meth:`dates` accepts. Returns a materialized
+        :class:`~dorm.QuerySet` of datetime values."""
         import datetime as _dt
 
         kinds = {"second", "minute", "hour", "day", "week", "month", "year"}
@@ -766,25 +768,29 @@ class QuerySet(Generic[_T]):
                 return base.replace(day=1)
             return base.replace(month=1, day=1)  # year
 
-        seen: list = []
+        result: list = []
         seen_set: set = set()
         for raw in self.values_list(field, flat=True):
             if raw is None:
                 continue
             truncated = _trunc(raw)
-            if truncated in seen_set:
-                continue
-            seen_set.add(truncated)
-            seen.append(truncated)
-        seen.sort(reverse=(order.upper() == "DESC"))
-        return seen
+            if truncated not in seen_set:
+                seen_set.add(truncated)
+                result.append(truncated)
+        result.sort(reverse=(order.upper() == "DESC"))
+
+        qs = self.values_list(field, flat=True)
+        if not isinstance(qs, QuerySet):
+            # test stub (plain list) → return truncated list for compat
+            return result
+        qs._result_cache = result
+        return qs
 
     async def adates(
         self, field: str, kind: str, order: str = "ASC"
-    ) -> list:
-        """Async counterpart of :meth:`dates`. Same Python-side
-        truncation + de-duplication; the only async work is the
-        underlying ``avalues_list(...)`` round-trip."""
+    ) -> QuerySet:
+        """Async counterpart of :meth:`dates`. Returns a materialized
+        :class:`~dorm.QuerySet` (already cached)."""
         import datetime as _dt
 
         if kind not in ("day", "week", "month", "year"):
@@ -808,23 +814,27 @@ class QuerySet(Generic[_T]):
                 return value.replace(day=1)
             return value.replace(month=1, day=1)
 
-        seen: list = []
+        result: list = []
         seen_set: set = set()
         for raw in await self.avalues_list(field, flat=True):
             if raw is None:
                 continue
             truncated = _trunc(raw)
-            if truncated in seen_set:
-                continue
-            seen_set.add(truncated)
-            seen.append(truncated)
-        seen.sort(reverse=(order.upper() == "DESC"))
-        return seen
+            if truncated not in seen_set:
+                seen_set.add(truncated)
+                result.append(truncated)
+        result.sort(reverse=(order.upper() == "DESC"))
+
+        qs = self.values_list(field, flat=True)
+        if isinstance(qs, QuerySet):
+            qs._result_cache = result
+        return qs
 
     async def adatetimes(
         self, field: str, kind: str, order: str = "ASC"
-    ) -> list:
-        """Async counterpart of :meth:`datetimes`."""
+    ) -> QuerySet:
+        """Async counterpart of :meth:`datetimes`. Returns a materialized
+        :class:`~dorm.QuerySet` (already cached)."""
         import datetime as _dt
 
         kinds = {"second", "minute", "hour", "day", "week", "month", "year"}
@@ -855,18 +865,21 @@ class QuerySet(Generic[_T]):
                 return base.replace(day=1)
             return base.replace(month=1, day=1)
 
-        seen: list = []
+        result: list = []
         seen_set: set = set()
         for raw in await self.avalues_list(field, flat=True):
             if raw is None:
                 continue
             truncated = _trunc(raw)
-            if truncated in seen_set:
-                continue
-            seen_set.add(truncated)
-            seen.append(truncated)
-        seen.sort(reverse=(order.upper() == "DESC"))
-        return seen
+            if truncated not in seen_set:
+                seen_set.add(truncated)
+                result.append(truncated)
+        result.sort(reverse=(order.upper() == "DESC"))
+
+        qs = self.values_list(field, flat=True)
+        if isinstance(qs, QuerySet):
+            qs._result_cache = result
+        return qs
 
     def alias(self, **kwargs: Any) -> QuerySet[_T]:
         """Add named expressions usable in :meth:`filter`, :meth:`exclude`
@@ -1227,6 +1240,10 @@ class QuerySet(Generic[_T]):
         for the next call.
         """
         async def _materialize():
+            # Short-circuit when the result is already cached in-memory
+            # (e.g. from ``dates()``, ``adates()``, or a prior iteration).
+            if self._result_cache is not None:
+                return self._result_cache
             cached = await self._cache_lookup_async()
             if cached is not None:
                 return cached
@@ -1247,6 +1264,17 @@ class QuerySet(Generic[_T]):
             await self._cache_store_async(rows, version=version_at_fetch)
             return rows
         return _materialize().__await__()
+
+    async def alist(self) -> list[_T]:
+        """Materialize the queryset asynchronously and return a list.
+
+        Explicit alternative to ``await qs``. Useful when a linter
+        discourages ``await`` on a non-async method's return value
+        or when the intent to materialise should be obvious::
+
+            rows = await Author.objects.filter(age__gte=18).alist()
+        """
+        return await self
 
     def __len__(self) -> int:
         self._fetch_all()
@@ -3694,20 +3722,18 @@ class QuerySet(Generic[_T]):
         await self._ainvalidate_cache_after_bulk_write()
         return sum(total_counts.values()), total_counts
 
-    async def avalues(self, *fields: str) -> list[dict[str, Any]]:
-        qs = self.values(*fields)
-        conn = self._get_async_connection()
-        sql, params = qs._query.as_select(conn)
-        rows = await conn.execute(sql, params)
-        sf = qs._query.selected_fields
-        assert sf is not None
-        if rows and hasattr(rows[0], "keys"):
-            return [{f: row[f] for f in sf} for row in rows]
-        return [dict(zip(sf, row)) for row in rows]
+    def avalues(self, *fields: str) -> QuerySet[Any]:
+        """Async variant of :meth:`values`. Returns a lazily-evaluated
+        :class:`~dorm.QuerySet` that can be iterated with ``async for``
+        or materialized with ``await``."""
+        return self.values(*fields)
 
-    async def avalues_list(
+    def avalues_list(
         self, *fields: str, flat: bool = False, named: bool = False
-    ) -> list[Any]:
+    ) -> ValuesListQuerySet:
+        """Async variant of :meth:`values_list`. Returns a lazily-evaluated
+        :class:`~dorm.ValuesListQuerySet` that can be iterated with
+        ``async for`` or materialized with ``await``."""
         if flat and len(fields) != 1:
             raise ValueError(
                 "'flat' is not valid when values_list is called with more than one field."
@@ -3716,12 +3742,7 @@ class QuerySet(Generic[_T]):
             raise ValueError(
                 "'flat' and 'named' are mutually exclusive — pick one."
             )
-        qs = self.values_list(*fields, flat=flat, named=named)
-        conn = self._get_async_connection()
-        sql, params = qs._query.as_select(conn)
-        rows = await conn.execute(sql, params)
-        result_fields = qs._resolve_fields()
-        return [qs._extract_row(row, result_fields) for row in rows]
+        return self.values_list(*fields, flat=flat, named=named)
 
     async def acount(self) -> int:
         conn = self._get_async_connection()
@@ -4086,6 +4107,11 @@ class ValuesListQuerySet(QuerySet[Any]):
         return values
 
     def _iterator(self) -> Iterator[Any]:
+        # Short-circuit when the result is already cached in-memory
+        # (e.g. from ``dates()`` / ``adates()``).
+        if self._result_cache is not None:
+            yield from self._result_cache
+            return
         connection = self._get_connection()
         sql, params = self._query.as_select(connection)
         rows = connection.execute(sql, params)
@@ -4094,6 +4120,12 @@ class ValuesListQuerySet(QuerySet[Any]):
             yield self._extract_row(row, fields)
 
     async def _aiterator(self) -> AsyncIterator[Any]:
+        # Short-circuit when the result is already cached in-memory
+        # (e.g. from ``dates()`` / ``adates()``).
+        if self._result_cache is not None:
+            for item in self._result_cache:
+                yield item
+            return
         conn = self._get_async_connection()
         sql, params = self._query.as_select(conn)
         rows = await conn.execute(sql, params)

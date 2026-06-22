@@ -136,10 +136,10 @@ class BaseManager(Generic[_T]):
     ) -> ValuesListQuerySet:
         return self.get_queryset().values_list(*fields, flat=flat, named=named)
 
-    def dates(self, field: str, kind: str, order: str = "ASC") -> list:
+    def dates(self, field: str, kind: str, order: str = "ASC") -> QuerySet:
         return self.get_queryset().dates(field, kind, order)
 
-    def datetimes(self, field: str, kind: str, order: str = "ASC") -> list:
+    def datetimes(self, field: str, kind: str, order: str = "ASC") -> QuerySet:
         return self.get_queryset().datetimes(field, kind, order)
 
     def get(self, *args: Any, **kwargs: Any) -> _T:
@@ -784,10 +784,10 @@ class BaseManager(Generic[_T]):
             analyze=analyze, format=format, verbose=verbose
         )
 
-    async def adates(self, field: str, kind: str, order: str = "ASC") -> list:
+    async def adates(self, field: str, kind: str, order: str = "ASC") -> QuerySet:
         return await self.get_queryset().adates(field, kind, order)
 
-    async def adatetimes(self, field: str, kind: str, order: str = "ASC") -> list:
+    async def adatetimes(self, field: str, kind: str, order: str = "ASC") -> QuerySet:
         return await self.get_queryset().adatetimes(field, kind, order)
 
     def raw(self, sql: str, params: list[Any] | None = None) -> "RawQuerySet[_T]":
