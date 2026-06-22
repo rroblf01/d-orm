@@ -907,10 +907,7 @@ class Model(metaclass=ModelBase):
 
         fields = []
         values = []
-        for field in meta.fields:
-            # Skip M2M and other non-column fields (their `column` is None).
-            if not field.column:
-                continue
+        for field in meta.concrete_fields:
             if isinstance(field, AutoField) and self.__dict__.get(field.attname) is None:
                 continue
             col_val = field.get_db_prep_value(field.pre_save(self, add=True))

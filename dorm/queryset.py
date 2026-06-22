@@ -1214,7 +1214,7 @@ class QuerySet(Generic[_T]):
         if len(items) == page_size:
             last = items[-1]
             if isinstance(last, dict):
-                next_cursor = {fname: last[fname]}
+                next_cursor = {fname: last.get(fname)}
             elif hasattr(last, "__dict__"):
                 try:
                     f = self.model._meta.get_field(fname)
@@ -2660,33 +2660,40 @@ class QuerySet(Generic[_T]):
 
         total_counts: dict[str, int] = {}
 
-        for attr_val in self.model.__dict__.values():
-            if not isinstance(attr_val, ReverseFKDescriptor):
-                continue
-            fk_field = attr_val.fk_field
-            on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
-            if on_delete == DO_NOTHING:
-                continue
+        # Walk the full MRO so descriptors on parent classes are not
+        # missed (mirrors Model._iter_reverse_fk_descriptors).
+        seen: set[str] = set()
+        for klass in self.model.__mro__:
+            for attr_name, attr_val in klass.__dict__.items():
+                if attr_name in seen:
+                    continue
+                if not isinstance(attr_val, ReverseFKDescriptor):
+                    continue
+                seen.add(attr_name)
+                fk_field = attr_val.fk_field
+                on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
+                if on_delete == DO_NOTHING:
+                    continue
 
-            related_qs = QuerySet(attr_val.source_model, self._db).filter(
-                **{f"{fk_field.name}__in": pks}
-            )
+                related_qs = QuerySet(attr_val.source_model, self._db).filter(
+                    **{f"{fk_field.name}__in": pks}
+                )
 
-            if on_delete == PROTECT:
-                if related_qs.exists():
-                    raise ProtectedError(
-                        f"Cannot delete {self.model.__name__} objects because related "
-                        f"{attr_val.source_model.__name__} objects exist.",
-                        list(related_qs[:5]),
-                    )
-            elif on_delete == CASCADE:
-                sub_count, sub_detail = related_qs.delete()
-                for label, cnt in sub_detail.items():
-                    total_counts[label] = total_counts.get(label, 0) + cnt
-            elif on_delete == SET_NULL:
-                related_qs.update(**{fk_field.name: None})
-            elif on_delete == SET_DEFAULT:
-                related_qs.update(**{fk_field.name: fk_field.get_default()})
+                if on_delete == PROTECT:
+                    if related_qs.exists():
+                        raise ProtectedError(
+                            f"Cannot delete {self.model.__name__} objects because related "
+                            f"{attr_val.source_model.__name__} objects exist.",
+                            list(related_qs[:5]),
+                        )
+                elif on_delete == CASCADE:
+                    sub_count, sub_detail = related_qs.delete()
+                    for label, cnt in sub_detail.items():
+                        total_counts[label] = total_counts.get(label, 0) + cnt
+                elif on_delete == SET_NULL:
+                    related_qs.update(**{fk_field.name: None})
+                elif on_delete == SET_DEFAULT:
+                    related_qs.update(**{fk_field.name: fk_field.get_default()})
 
         connection = self._get_connection()
         # If the queryset was sliced (LIMIT/OFFSET), the WHERE
@@ -3634,28 +3641,35 @@ class QuerySet(Generic[_T]):
         set_null_specs: list[tuple[QuerySet[Any], str]] = []
         set_default_specs: list[tuple[QuerySet[Any], str, Any]] = []
 
-        for attr_val in self.model.__dict__.values():
-            if not isinstance(attr_val, ReverseFKDescriptor):
-                continue
-            fk_field = attr_val.fk_field
-            on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
-            if on_delete == DO_NOTHING:
-                continue
+        # Walk the full MRO so descriptors on parent classes are not
+        # missed (mirrors Model._iter_reverse_fk_descriptors).
+        seen: set[str] = set()
+        for klass in self.model.__mro__:
+            for attr_name, attr_val in klass.__dict__.items():
+                if attr_name in seen:
+                    continue
+                if not isinstance(attr_val, ReverseFKDescriptor):
+                    continue
+                seen.add(attr_name)
+                fk_field = attr_val.fk_field
+                on_delete = getattr(fk_field, "on_delete", DO_NOTHING)
+                if on_delete == DO_NOTHING:
+                    continue
 
-            related_qs = QuerySet(attr_val.source_model, self._db).filter(
-                **{f"{fk_field.name}__in": pks}
-            )
-
-            if on_delete == PROTECT:
-                protect_descs.append((attr_val, related_qs))
-            elif on_delete == CASCADE:
-                cascade_qs.append(related_qs)
-            elif on_delete == SET_NULL:
-                set_null_specs.append((related_qs, fk_field.name))
-            elif on_delete == SET_DEFAULT:
-                set_default_specs.append(
-                    (related_qs, fk_field.name, fk_field.get_default())
+                related_qs = QuerySet(attr_val.source_model, self._db).filter(
+                    **{f"{fk_field.name}__in": pks}
                 )
+
+                if on_delete == PROTECT:
+                    protect_descs.append((attr_val, related_qs))
+                elif on_delete == CASCADE:
+                    cascade_qs.append(related_qs)
+                elif on_delete == SET_NULL:
+                    set_null_specs.append((related_qs, fk_field.name))
+                elif on_delete == SET_DEFAULT:
+                    set_default_specs.append(
+                        (related_qs, fk_field.name, fk_field.get_default())
+                    )
 
         for attr_val, related_qs in protect_descs:
             if await related_qs.aexists():

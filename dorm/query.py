@@ -280,7 +280,7 @@ class SQLQuery:
                     _validate_identifier(col)
                     parts.append(f'{ta}"{col}"')
             return ", ".join(parts)
-        concrete = [f for f in self.model._meta.fields if f.column]
+        concrete = self.model._meta.concrete_fields
         return ", ".join(f'{ta}"{f.column}"' for f in concrete)
 
     def _compile_ctes(self, connection) -> tuple[str, list]:
