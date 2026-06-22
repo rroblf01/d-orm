@@ -784,7 +784,7 @@ class Model(metaclass=ModelBase):
                         objs,
                     )
             elif on_delete == CASCADE:
-                for obj in list(related_qs):
+                for obj in related_qs:
                     obj.delete(using=using)
             elif on_delete == SET_NULL:
                 related_qs.update(**{fk_field.name: None})
@@ -1052,7 +1052,7 @@ class Model(metaclass=ModelBase):
         state = _ModelState(adding=False)
         state.db = db
         instance.__dict__ = {"_state": state}
-        concrete = [f for f in cls._meta.fields if f.column]
+        concrete = cls._meta.concrete_fields
         # Build a column → value map from the parallel lists. We
         # accept either column names or attnames in ``field_names``
         # so callers can hand us either Django-style.

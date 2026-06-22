@@ -391,7 +391,8 @@ def verify_payload(blob: bytes) -> bytes | None:
         return blob
     if not isinstance(blob, (bytes, bytearray, memoryview)):
         return None
-    blob = bytes(blob)
+    if type(blob) is not bytes:
+        blob = bytes(blob)
     if len(blob) < _HEADER_LEN:
         return None
     if not blob.startswith(_SIGN_PREFIX):

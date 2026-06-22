@@ -11,6 +11,10 @@ if TYPE_CHECKING:
 
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+# Pre-compiled regex for PostgreSQL placeholder adaptation.
+# Matches either a single-quoted string literal or a bare ``%s``.
+_ADAPT_TOKEN_RE = re.compile(r"'(?:[^']|'')*'|%s")
+
 
 def _validate_identifier(name: str, kind: str = "field") -> None:
     if not _SAFE_IDENTIFIER.match(name):
@@ -135,6 +139,10 @@ class SQLQuery:
         self.group_by_fields: list[str] = []
         self.having_nodes: list = []
         self.select_related_fields: list[str] = []
+        # Side-channel: set by ``_resolve_column`` to the leaf field it
+        # resolved, so ``_compile_leaf`` can reuse it without walking
+        # the FK chain a second time.
+        self._last_resolved_leaf_field: Any = None
         # When ``only()`` / ``defer()`` is called with a dotted path
         # (``only("name", "publisher__name")``) the trailing parts apply
         # to a select_related-loaded relation rather than the parent
@@ -941,7 +949,7 @@ class SQLQuery:
         # reach the cursor in their wire form. Skipped for lookups that
         # imply scalar / structural values the field shouldn't transform
         # (range tuples, NULL checks, regex patterns).
-        leaf_field = self._resolve_field(field_parts)
+        leaf_field = self._last_resolved_leaf_field or self._resolve_field(field_parts)
         if leaf_field is not None and lookup not in (
             "isnull", "in", "range", "regex", "iregex"
         ):
@@ -1509,6 +1517,7 @@ class SQLQuery:
         try:
             field = model._meta.get_field(fname)
             col_name = field.column
+            self._last_resolved_leaf_field = field
         except FieldDoesNotExist:
             # Single-part lookups for reverse-FK / reverse-O2O / M2M
             # accessors — the descriptor lives on the model class.
@@ -1587,14 +1596,6 @@ class SQLQuery:
         # including ones inside ``'foo%s_bar'`` — corrupting raw
         # SQL and any LIKE pattern containing the placeholder
         # sequence as part of the literal text.
-        import re
-
-        # Tokenise: alternation matches a quoted-string run OR a
-        # bare ``%s``. Bare matches are renumbered, quoted runs
-        # pass through verbatim. Doubled quotes (``''``) inside a
-        # literal are part of the literal — captured by the
-        # ``(?:[^']|'')*`` body.
-        token_re = re.compile(r"'(?:[^']|'')*'|%s")
         idx = [0]
 
         def repl(m: re.Match[str]) -> str:
@@ -1604,4 +1605,4 @@ class SQLQuery:
                 return f"${idx[0]}"
             return tok
 
-        return token_re.sub(repl, sql)
+        return _ADAPT_TOKEN_RE.sub(repl, sql)

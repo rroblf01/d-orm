@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 from typing import (
     Any,
     AsyncIterator,
@@ -371,9 +370,7 @@ class QuerySet(Generic[_T]):
         q = Q(**kwargs)
         q.negated = True
         for a in args:
-            a_copy = copy.deepcopy(a)
-            a_copy.negated = not a_copy.negated
-            qs._query.where_nodes.append(a_copy)
+            qs._query.where_nodes.append(~a)
         if kwargs:
             qs._query.where_nodes.append(q)
         return qs
@@ -1626,7 +1623,7 @@ class QuerySet(Generic[_T]):
 
     @staticmethod
     def _hydrate_select_related(
-        model: type[Model], instance: _T, sr_fields: list[str], row_dict: dict
+        model: type[Model], instance: _T, sr_fields: list[str], row: Any
     ) -> None:
         # Collect all unique path prefixes, sorted by depth (shortest first)
         all_paths: list[str] = []
@@ -1659,7 +1656,13 @@ class QuerySet(Generic[_T]):
                 continue
 
             prefix = f"_sr_{step_path}_"
-            rel_data = {k[len(prefix):]: v for k, v in row_dict.items() if k.startswith(prefix)}
+            # Look up related columns directly from the row
+            # instead of building a full dict.
+            rel_data: dict[str, Any] = {}
+            if hasattr(row, "keys"):
+                for key in row.keys():
+                    if key.startswith(prefix):
+                        rel_data[key[len(prefix):]] = row[key]
             if rel_data and any(v is not None for v in rel_data.values()):
                 rel_inst = current_model.__new__(current_model)
                 rel_inst.__dict__ = {}
@@ -2212,16 +2215,19 @@ class QuerySet(Generic[_T]):
 
             instance = self.model._from_db_row(row, connection)  # type: ignore[misc]
 
-            # Hydrate annotation values onto the instance
+            # Hydrate annotation values onto the instance — look up
+            # each alias directly from the row instead of building a
+            # full dict (avoids O(N) dict build per row).
             if self._query.annotations:
-                row_dict = dict(row) if hasattr(row, "keys") else {}
                 for alias in self._query.annotations:
-                    if alias in row_dict:
-                        instance.__dict__[alias] = row_dict[alias]
+                    try:
+                        instance.__dict__[alias] = row[alias]
+                    except (KeyError, IndexError):
+                        pass
 
             if sr_fields:
                 self._hydrate_select_related(
-                    self.model, instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
+                    self.model, instance, sr_fields, row
                 )
 
             if collect_for_prefetch:
@@ -3471,14 +3477,15 @@ class QuerySet(Generic[_T]):
             # so ``Author.objects.annotate(n=Count("books"))``
             # async-iterated produced instances without ``.n``.
             if self._query.annotations:
-                row_dict = dict(row) if hasattr(row, "keys") else {}
                 for alias in self._query.annotations:
-                    if alias in row_dict:
-                        instance.__dict__[alias] = row_dict[alias]
+                    try:
+                        instance.__dict__[alias] = row[alias]
+                    except (KeyError, IndexError):
+                        pass
 
             if sr_fields:
                 self._hydrate_select_related(
-                    self.model, instance, sr_fields, dict(row) if hasattr(row, "keys") else {}
+                    self.model, instance, sr_fields, row
                 )
 
             if collect_for_prefetch:
