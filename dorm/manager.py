@@ -689,13 +689,13 @@ class BaseManager(Generic[_T]):
 
     # ── Async proxy methods ───────────────────────────────────────────────────
 
-    async def avalues(self, *fields: str) -> list[dict[str, Any]]:
-        return await self.get_queryset().avalues(*fields)
+    def avalues(self, *fields: str) -> QuerySet[Any]:
+        return self.get_queryset().avalues(*fields)
 
-    async def avalues_list(
+    def avalues_list(
         self, *fields: str, flat: bool = False, named: bool = False
-    ) -> list[Any]:
-        return await self.get_queryset().avalues_list(
+    ) -> ValuesListQuerySet:
+        return self.get_queryset().avalues_list(
             *fields, flat=flat, named=named
         )
 
@@ -795,8 +795,8 @@ class BaseManager(Generic[_T]):
         assert self.model is not None
         return RawQuerySet(self.model, sql, params, using=self._db)  # type: ignore[arg-type]
 
-    async def araw(self, sql: str, params: list[Any] | None = None) -> list[_T]:
-        return list(await self.raw(sql, params)._afetch_all())
+    def araw(self, sql: str, params: list[Any] | None = None) -> "RawQuerySet[_T]":
+        return self.raw(sql, params)
 
     @classmethod
     def from_queryset(

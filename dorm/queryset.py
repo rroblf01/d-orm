@@ -4424,17 +4424,26 @@ class RawQuerySet(Generic[_T]):
         return f"<RawQuerySet: {self.raw_sql!r}>"
 
     async def _afetch_all(self) -> list[_T]:
+        if self._result_cache is not None:
+            return self._result_cache
         conn = self._get_async_connection()
         sql = self._adapt(conn)
         rows = await conn.execute(sql, self.params)
         if not rows:
-            return []
+            self._result_cache = []
+            return self._result_cache
         cols = (
             list(rows[0].keys())
             if hasattr(rows[0], "keys")
             else [f.column for f in self.model._meta.fields if f.column]
         )
-        return [self._hydrate(row, cols) for row in rows]
+        self._result_cache = [self._hydrate(row, cols) for row in rows]
+        return self._result_cache
+
+    def __await__(self):
+        async def _materialize():
+            return await self._afetch_all()
+        return _materialize().__await__()
 
     def __aiter__(self) -> AsyncIterator[_T]:
         return self._aiterator()
