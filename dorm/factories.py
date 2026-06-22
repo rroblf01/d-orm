@@ -139,6 +139,8 @@ def _collect_declarations(cls: type) -> dict[str, Any]:
                 # methods — factories only treat ``_Declaration``
                 # instances + plain values as field defaults.
                 continue
+            if isinstance(value, (classmethod, staticmethod)):
+                continue
             out[name] = value
     return out
 

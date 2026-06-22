@@ -248,7 +248,7 @@ class UniqueConstraint(BaseConstraint):
         return (
             self.name == other.name
             and self.fields == other.fields
-            and self.condition is other.condition
+            and self.condition == other.condition
         )
 
     def __hash__(self) -> int:

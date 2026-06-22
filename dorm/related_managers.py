@@ -539,6 +539,94 @@ class ReverseFKManager:
     def __iter__(self) -> Iterator:
         return iter(self.get_queryset())
 
+    # ── Async counterparts ────────────────────────────────────────────────
+
+    async def aget_queryset(self):
+        from .queryset import QuerySet
+
+        cache_key = f"_prefetch_{self._rel_name}"
+        if cache_key in self.instance.__dict__:
+            qs: QuerySet = QuerySet(self.source_model, self._db)
+            qs._result_cache = list(self.instance.__dict__[cache_key])
+            return qs
+        return QuerySet(self.source_model, self._db).filter(
+            **{self.fk_field.name: self.instance.pk}
+        )
+
+    async def acount(self) -> int:
+        return await (await self.aget_queryset()).acount()
+
+    async def aget_or_create(
+        self, defaults: dict | None = None, **kwargs: Any
+    ) -> tuple[Any, bool]:
+        kwargs[self.fk_field.name] = self.instance
+        return await self.source_model.objects.aget_or_create(
+            defaults=defaults, **kwargs
+        )
+
+    async def aupdate_or_create(
+        self, defaults: dict | None = None, **kwargs: Any
+    ) -> tuple[Any, bool]:
+        kwargs[self.fk_field.name] = self.instance
+        return await self.source_model.objects.aupdate_or_create(
+            defaults=defaults, **kwargs
+        )
+
+    async def aadd(self, *objs: Any, bulk: bool = True) -> None:
+        if not objs:
+            return
+        ids = [o.pk for o in objs]
+        if bulk:
+            await self.source_model.objects.filter(pk__in=ids).aupdate(
+                **{self.fk_field.name: self.instance}
+            )
+            for o in objs:
+                setattr(o, self.fk_field.name, self.instance)
+        else:
+            for o in objs:
+                setattr(o, self.fk_field.name, self.instance)
+                await o.asave()
+
+    async def aremove(self, *objs: Any) -> None:
+        if not objs:
+            return
+        if not getattr(self.fk_field, "null", False):
+            raise ValueError(
+                f"Cannot aremove() — {self.source_model.__name__}.{self.fk_field.name} "
+                "is NOT NULL. Use ``.adelete()`` to remove the rows entirely."
+            )
+        ids = [o.pk for o in objs]
+        await self.source_model.objects.filter(pk__in=ids).aupdate(
+            **{self.fk_field.name: None}
+        )
+
+    async def aclear(self) -> None:
+        if not getattr(self.fk_field, "null", False):
+            raise ValueError(
+                f"Cannot aclear() — {self.source_model.__name__}.{self.fk_field.name} "
+                "is NOT NULL. Use ``.adelete()`` instead."
+            )
+        await (await self.aget_queryset()).aupdate(**{self.fk_field.name: None})
+
+    async def aset(self, objs: list, *, bulk: bool = True, clear: bool = False) -> None:
+        existing = {o.pk for o in await (await self.aget_queryset()).alist()}
+        target = {o.pk for o in objs}
+        to_add_ids = target - existing
+        to_remove_ids = existing - target
+        if to_add_ids:
+            adds = [o for o in objs if o.pk in to_add_ids]
+            await self.aadd(*adds, bulk=bulk)
+        if to_remove_ids:
+            if not getattr(self.fk_field, "null", False):
+                raise ValueError(
+                    "aset() with diff would orphan NOT NULL rows. "
+                    "Use ``clear=True`` only when the FK is nullable, "
+                    "or pass the full target set so nothing is removed."
+                )
+            await self.source_model.objects.filter(
+                pk__in=list(to_remove_ids)
+            ).aupdate(**{self.fk_field.name: None})
+
     def __repr__(self) -> str:
         return (
             f"<ReverseFKManager: {self.source_model.__name__}."
