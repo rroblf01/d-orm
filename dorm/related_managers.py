@@ -59,6 +59,7 @@ class ManyRelatedManager:
     # ── Queryset access ───────────────────────────────────────────────────────
 
     def get_queryset(self):
+        from .expressions import RawSQL
         from .queryset import QuerySet
 
         # Return prefetch cache if populated
@@ -68,17 +69,18 @@ class ManyRelatedManager:
             qs._result_cache = list(self.instance.__dict__[cache_key])
             return qs
 
-        conn = self._get_connection()
+        # Single query with subquery: SELECT * FROM target WHERE pk IN
+        # (SELECT tgt_col FROM through WHERE src_col = ?)
         through = self._through_table
         src_col, tgt_col = self._through_columns
-        sql = self._adapt(
-            f'SELECT "{tgt_col}" FROM "{through}" WHERE "{src_col}" = %s', conn
+        target_pk_field = self._rel_model._meta.pk.name
+        subquery = RawSQL(
+            f'(SELECT "{tgt_col}" FROM "{through}" WHERE "{src_col}" = %s)',
+            params=(self.instance.pk,),
         )
-        rows = conn.execute(sql, [self.instance.pk])
-        pks = [r[tgt_col] if hasattr(r, "keys") else r[0] for r in rows]
-        if not pks:
-            return QuerySet(self._rel_model, self._db).none()
-        return QuerySet(self._rel_model, self._db).filter(pk__in=pks)
+        return QuerySet(self._rel_model, self._db).filter(
+            **{f"{target_pk_field}__in": subquery}
+        )
 
     def all(self):
         return self.get_queryset()
@@ -260,6 +262,7 @@ class ManyRelatedManager:
     # ── Async variants ────────────────────────────────────────────────────────
 
     async def aget_queryset(self):
+        from .expressions import RawSQL
         from .queryset import QuerySet
 
         # Mirror :meth:`get_queryset`: if the instance was the
@@ -274,17 +277,17 @@ class ManyRelatedManager:
             qs._result_cache = list(self.instance.__dict__[cache_key])
             return qs
 
-        conn = self._get_async_connection()
+        # Single query with subquery — mirrors :meth:`get_queryset`.
         through = self._through_table
         src_col, tgt_col = self._through_columns
-        sql = self._adapt(
-            f'SELECT "{tgt_col}" FROM "{through}" WHERE "{src_col}" = %s', conn
+        target_pk_field = self._rel_model._meta.pk.name
+        subquery = RawSQL(
+            f'(SELECT "{tgt_col}" FROM "{through}" WHERE "{src_col}" = %s)',
+            params=(self.instance.pk,),
         )
-        rows = await conn.execute(sql, [self.instance.pk])
-        pks = [r[tgt_col] if hasattr(r, "keys") else r[0] for r in rows]
-        if not pks:
-            return QuerySet(self._rel_model, self._db).none()
-        return QuerySet(self._rel_model, self._db).filter(pk__in=pks)
+        return QuerySet(self._rel_model, self._db).filter(
+            **{f"{target_pk_field}__in": subquery}
+        )
 
     async def aadd(self, *objs: Any, through_defaults: dict | None = None) -> None:
         """Async counterpart of :meth:`add`. Same 2-query batching.
@@ -583,9 +586,16 @@ class ReverseOneToOneDescriptor:
         cache = self._cache_name()
         if cache in instance.__dict__:
             return instance.__dict__[cache]
+        from .db.connection import router_db_for_read
         from .queryset import QuerySet
 
-        qs = QuerySet(self.source_model, "default").filter(
+        # Respect multi-database routing: use the instance's own DB alias
+        # if known, otherwise consult the router.
+        db = getattr(instance, "_state", None) and instance._state.db
+        if not db:
+            db = router_db_for_read(self.source_model, default="default")
+
+        qs = QuerySet(self.source_model, db).filter(
             **{self.fk_field.name: instance.pk}
         )
         try:

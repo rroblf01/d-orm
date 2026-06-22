@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from .expressions import CombinedExpression, Exists, F, OuterRef, Q, Subquery, Value
+from .expressions import CombinedExpression, Exists, F, OuterRef, Q, RawSQL, Subquery, Value
 from .lookups import build_lookup_sql, parse_lookup_key
 
 if TYPE_CHECKING:
@@ -874,6 +874,12 @@ class SQLQuery:
         if lookup == "in" and hasattr(value, "_query") and hasattr(value, "model"):
             sub_sql, sub_params = self._compile_subquery(value, connection)
             return f"{col} IN ({sub_sql})", sub_params
+
+        # RawSQL as value for __in → inject raw subquery SQL directly.
+        # Used by ManyRelatedManager to inline the through-table lookup.
+        if lookup == "in" and isinstance(value, RawSQL):
+            raw_sql, raw_params = value.as_sql()
+            return f"{col} IN {raw_sql}", raw_params
 
         # Subquery() / Exists() as a scalar comparison RHS — compile in
         # place against this query's outer-context state so any
