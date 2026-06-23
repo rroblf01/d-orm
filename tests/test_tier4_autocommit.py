@@ -18,7 +18,7 @@ class ACItem(dorm.Model):
 # ── Fixture ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _create_table(clean_db):
+def _create_table():
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
 

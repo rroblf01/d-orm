@@ -23,7 +23,7 @@ class Timestamped(dorm.Model):
 
 
 @pytest.fixture(autouse=True)
-def ensure_timestamped_table(clean_db):
+def ensure_timestamped_table():
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
     conn = get_connection()

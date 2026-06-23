@@ -34,7 +34,7 @@ class OBBook(dorm.Model):
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _create_tables(clean_db):
+def _create_tables():
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
 

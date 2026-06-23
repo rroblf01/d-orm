@@ -120,7 +120,7 @@ def s3_storage(s3_bucket, minio_endpoint):
 
 
 @pytest.fixture
-def s3_documents_table(clean_db, s3_bucket, minio_endpoint):
+def s3_documents_table(s3_bucket, minio_endpoint):
     """Create the ``s3_documents`` table and reconfigure dorm so the
     default storage points at the per-test MinIO bucket. Restores
     settings + storage cache on teardown so other tests aren't

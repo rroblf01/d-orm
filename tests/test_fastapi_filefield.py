@@ -112,7 +112,7 @@ def media_root(tmp_path: Path):
 
 
 @pytest.fixture
-def documents_table(clean_db):
+def documents_table():
     """Create the ``fa_documents`` table for the integration tests."""
     from dorm.migrations.operations import _field_to_column_sql
 

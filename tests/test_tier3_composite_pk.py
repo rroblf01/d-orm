@@ -34,7 +34,7 @@ class OrderLine(dorm.Model):
 
 
 @pytest.fixture
-def _create_cpk_table(clean_db):
+def _create_cpk_table():
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
     conn.execute_script(f'DROP TABLE IF EXISTS "cpk_order_lines"{cascade}')

@@ -83,7 +83,7 @@ def media_root(tmp_path: Path):
 
 
 @pytest.fixture
-def documents_table(clean_db):
+def documents_table():
     """Create the ``fs_documents`` table for the FileField integration
     tests. Lives outside the autouse table list since FileField is the
     only test using it."""

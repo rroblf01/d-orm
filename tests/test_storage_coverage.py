@@ -416,7 +416,7 @@ def media_root(tmp_path: Path):
 
 
 @pytest.fixture
-def docs_table(clean_db):
+def docs_table():
     from dorm.migrations.operations import _field_to_column_sql
     from dorm.db.connection import get_connection
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import time as _time
+import unittest.mock
 from contextlib import contextmanager
 
 import pytest
@@ -415,10 +416,11 @@ def test_token_timeout_enforced():
         u = _FakeUser()
         gen = PasswordResetTokenGenerator(timeout=0)
         token = gen.make_token(u)
-        # Sleep over zero-second timeout window to make sure the
-        # comparison is strictly past, not merely ≥.
-        _time.sleep(1.5)
-        assert gen.check_token(u, token) is False
+        # Advance the clock past the zero-second timeout window
+        # without sleeping — mock time.time() to return a future value.
+        with unittest.mock.patch("dorm.contrib.auth.tokens.time") as mock_time:
+            mock_time.time.return_value = _time.time() + 10
+            assert gen.check_token(u, token) is False
 
 
 def test_token_requires_signing_key():

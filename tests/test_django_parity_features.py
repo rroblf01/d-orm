@@ -38,7 +38,7 @@ class _DatedPost(dorm.Model):
 
 
 @pytest.fixture
-def _dated_table(clean_db):
+def _dated_table():
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
 

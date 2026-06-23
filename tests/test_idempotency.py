@@ -110,7 +110,7 @@ def test_purge_expired():
         ctx.store({"v": 1})
     with idempotency_key("kp2", model=_IdpTbl) as ctx:
         ctx.store({"v": 2})
-    time.sleep(1.0)
+    time.sleep(0.1)
     n = purge_expired(_IdpTbl, older_than_seconds=0)
     assert n == 2
     assert _IdpTbl.objects.count() == 0

@@ -81,7 +81,7 @@ def media_root(tmp_path: Path):
 
 
 @pytest.fixture
-def txdoc_table(clean_db):
+def txdoc_table():
     from dorm.migrations.operations import _field_to_column_sql
 
     conn = get_connection()

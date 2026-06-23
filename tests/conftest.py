@@ -511,11 +511,6 @@ def clean_data(schema_manager):
     _async_connections.clear()
 
 
-# Backward-compatible alias: test files that list ``clean_db`` as a
-# fixture parameter get the autouse ``clean_data`` fixture.
-clean_db = clean_data
-
-
 @pytest.fixture
 def isolated_db(schema_manager, clean_data):
     """Function-scoped fixture for tests that need ad-hoc DDL.

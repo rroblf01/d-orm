@@ -102,7 +102,7 @@ def media_root(tmp_path: Path):
 
 
 @pytest.fixture
-def docs_table(clean_db):
+def docs_table():
     """Create the table for ``_Doc``. Lives outside the autouse
     table list since we declare a brand-new model here."""
     from dorm.migrations.operations import _field_to_column_sql

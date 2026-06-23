@@ -59,7 +59,7 @@ class GFKTag(dorm.Model):
 
 
 @pytest.fixture
-def _create_gfk_tables(clean_db):
+def _create_gfk_tables():
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
 

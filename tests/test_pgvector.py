@@ -464,7 +464,7 @@ class TestPgvectorMigrationWriter:
 
 
 @pytest.fixture
-def pgvector_table(clean_db):
+def pgvector_table():
     """Skip + create a table with a real ``vector(3)`` column.
 
     Skipped automatically when the backend is SQLite or pgvector

@@ -68,7 +68,7 @@ class Reservation(dorm.Model):
 
 
 @pytest.fixture
-def _create_simple_tables(clean_db):
+def _create_simple_tables():
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
 
@@ -101,7 +101,7 @@ def _create_simple_tables(clean_db):
 
 
 @pytest.fixture
-def _create_range_tables(clean_db):
+def _create_range_tables():
     """Range fields are PG-only; this fixture skips on SQLite so the
     rest of the field tests still exercise on both backends."""
     conn = get_connection()

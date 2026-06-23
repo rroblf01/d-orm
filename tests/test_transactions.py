@@ -11,14 +11,14 @@ from tests.models import Author
 # ── Sync atomic ───────────────────────────────────────────────────────────────
 
 
-def test_atomic_commit(clean_db):
+def test_atomic_commit():
     with dorm.transaction.atomic():
         Author.objects.create(name="Alice", age=30)
         Author.objects.create(name="Bob", age=25)
     assert Author.objects.count() == 2
 
 
-def test_atomic_rollback(clean_db):
+def test_atomic_rollback():
     try:
         with dorm.transaction.atomic():
             Author.objects.create(name="Alice", age=30)
@@ -28,7 +28,7 @@ def test_atomic_rollback(clean_db):
     assert Author.objects.count() == 0
 
 
-def test_atomic_nested_savepoint(clean_db):
+def test_atomic_nested_savepoint():
     """Inner failure rolls back only the inner block; outer block commits."""
     with dorm.transaction.atomic():
         Author.objects.create(name="Alice", age=30)
@@ -45,7 +45,7 @@ def test_atomic_nested_savepoint(clean_db):
     assert Author.objects.count() == 1
 
 
-def test_atomic_full_rollback_on_outer_exception(clean_db):
+def test_atomic_full_rollback_on_outer_exception():
     """If outer atomic raises, everything is rolled back."""
     try:
         with dorm.transaction.atomic():
@@ -61,14 +61,14 @@ def test_atomic_full_rollback_on_outer_exception(clean_db):
 # ── Async atomic ──────────────────────────────────────────────────────────────
 
 
-async def test_aatomic_commit(clean_db):
+async def test_aatomic_commit():
     async with dorm.transaction.aatomic():
         await Author.objects.acreate(name="Alice", age=30)
         await Author.objects.acreate(name="Bob", age=25)
     assert await Author.objects.acount() == 2
 
 
-async def test_aatomic_rollback(clean_db):
+async def test_aatomic_rollback():
     try:
         async with dorm.transaction.aatomic():
             await Author.objects.acreate(name="Alice", age=30)
@@ -78,7 +78,7 @@ async def test_aatomic_rollback(clean_db):
     assert await Author.objects.acount() == 0
 
 
-async def test_aatomic_nested_savepoint(clean_db):
+async def test_aatomic_nested_savepoint():
     """Inner failure rolls back only the inner block; outer block commits."""
     async with dorm.transaction.aatomic():
         await Author.objects.acreate(name="Alice", age=30)
@@ -93,7 +93,7 @@ async def test_aatomic_nested_savepoint(clean_db):
     assert await Author.objects.acount() == 1
 
 
-async def test_aatomic_full_rollback_on_outer_exception(clean_db):
+async def test_aatomic_full_rollback_on_outer_exception():
     try:
         async with dorm.transaction.aatomic():
             await Author.objects.acreate(name="Alice", age=30)
@@ -108,7 +108,7 @@ async def test_aatomic_full_rollback_on_outer_exception(clean_db):
 # ── get_or_create / update_or_create ─────────────────────────────────────────
 
 
-def test_get_or_create_returns_existing(clean_db):
+def test_get_or_create_returns_existing():
     Author.objects.create(name="Alice", email="alice@example.com", age=30)
     obj, created = Author.objects.get_or_create(
         email="alice@example.com",
@@ -119,7 +119,7 @@ def test_get_or_create_returns_existing(clean_db):
     assert Author.objects.count() == 1
 
 
-def test_get_or_create_creates_new(clean_db):
+def test_get_or_create_creates_new():
     obj, created = Author.objects.get_or_create(
         email="new@example.com",
         defaults={"name": "New", "age": 20},
@@ -128,7 +128,7 @@ def test_get_or_create_creates_new(clean_db):
     assert obj.name == "New"
 
 
-def test_update_or_create_updates_existing(clean_db):
+def test_update_or_create_updates_existing():
     Author.objects.create(name="Alice", email="alice@example.com", age=30)
     obj, created = Author.objects.update_or_create(
         email="alice@example.com",
@@ -139,7 +139,7 @@ def test_update_or_create_updates_existing(clean_db):
     assert Author.objects.count() == 1
 
 
-async def test_aget_or_create_returns_existing(clean_db):
+async def test_aget_or_create_returns_existing():
     await Author.objects.acreate(name="Alice", email="alice@example.com", age=30)
     obj, created = await Author.objects.aget_or_create(
         email="alice@example.com",

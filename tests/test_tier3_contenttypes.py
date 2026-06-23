@@ -66,7 +66,7 @@ class CTTag(dorm.Model):
 
 
 @pytest.fixture
-def _create_ct_tables(clean_db):
+def _create_ct_tables():
     """Create the ContentType, polymorphic-target, and Tag tables.
 
     ``clean_db`` (autouse) already wiped the per-test schema; here we

@@ -25,7 +25,7 @@ class ReverseOrderedAuthor(dorm.Model):
 
 
 @pytest.fixture(autouse=True)
-def _create_ordered_tables(clean_db):
+def _create_ordered_tables():
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
 

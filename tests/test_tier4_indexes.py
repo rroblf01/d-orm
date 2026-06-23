@@ -28,7 +28,7 @@ class IndexedProduct(dorm.Model):
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _create_tables(clean_db):
+def _create_tables():
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
 
@@ -75,7 +75,7 @@ def test_index_equality():
 
 # ── AddIndex / RemoveIndex operations ─────────────────────────────────────────
 
-def test_add_index_creates_index(clean_db):
+def test_add_index_creates_index():
     from dorm.db.connection import get_connection
     from dorm.migrations.state import ProjectState
 
@@ -103,7 +103,7 @@ def test_add_index_creates_index(clean_db):
     op.database_backwards("tests", conn, from_state, to_state)
 
 
-def test_remove_index_drops_index(clean_db):
+def test_remove_index_drops_index():
     from dorm.db.connection import get_connection
     from dorm.migrations.state import ProjectState
 
