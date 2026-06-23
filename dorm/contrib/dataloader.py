@@ -101,11 +101,11 @@ class DataLoader(Generic[_K, _V]):
             return self._cache[key]
         fut = self._pending.get(key)
         if fut is None:
-            fut = asyncio.get_event_loop().create_future()
+            fut = asyncio.get_running_loop().create_future()
             self._pending[key] = fut
             if not self._scheduled:
                 self._scheduled = True
-                asyncio.get_event_loop().call_soon(self._kick)
+                asyncio.get_running_loop().call_soon(self._kick)
         return await fut
 
     async def load_many(self, keys: list[_K]) -> list[_V]:
