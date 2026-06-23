@@ -2484,7 +2484,11 @@ def _field_to_column_sql(fname: str, field, connection) -> str:
     if db_comment:
         vendor = getattr(connection, "vendor", "sqlite")
         if vendor == "mysql":
-            escaped = str(db_comment).replace("'", "''")
+            escaped = (
+                str(db_comment)
+                .replace("\\", "\\\\")
+                .replace("'", "''")
+            )
             parts.append(f"COMMENT '{escaped}'")
 
     return " ".join(parts)

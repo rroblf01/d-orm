@@ -272,7 +272,9 @@ class TaskQueue:
             # Use a raw psycopg connection to wait on notifications.
             with conn._get_pool().connection() as raw:
                 with raw.cursor() as cur:
-                    cur.execute(f"LISTEN {self.channel}")
+                    from ..query import _validate_identifier
+                    _validate_identifier(self.channel, kind="LISTEN channel")
+                    cur.execute(f'LISTEN "{self.channel}"')
                 raw.commit()
                 # ``raw.notifies()`` is a generator; we want a
                 # bounded wait.
