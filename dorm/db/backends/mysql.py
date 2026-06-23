@@ -134,15 +134,19 @@ class MySQLDatabaseWrapper:
     def get_connection(self):
         if self._conn is not None and self._conn.open:
             return self._conn
-        pymysql = _import_pymysql()
-        try:
-            self._conn = pymysql.connect(**self._kwargs)
-        except Exception as exc:
-            raise _normalize_exception(exc) from exc
-        # Force ANSI_QUOTES so dorm's double-quoted identifiers parse.
-        with self._conn.cursor() as cur:
-            cur.execute("SET SESSION sql_mode='ANSI_QUOTES,STRICT_ALL_TABLES'")
-        return self._conn
+        with self._lock:
+            # Double-check after acquiring the lock.
+            if self._conn is not None and self._conn.open:
+                return self._conn
+            pymysql = _import_pymysql()
+            try:
+                self._conn = pymysql.connect(**self._kwargs)
+            except Exception as exc:
+                raise _normalize_exception(exc) from exc
+            # Force ANSI_QUOTES so dorm's double-quoted identifiers parse.
+            with self._conn.cursor() as cur:
+                cur.execute("SET SESSION sql_mode='ANSI_QUOTES,STRICT_ALL_TABLES'")
+            return self._conn
 
     def close(self) -> None:
         if self._conn is not None:
@@ -162,7 +166,13 @@ class MySQLDatabaseWrapper:
         depth = self._atomic_depth
         conn = self.get_connection()
         if depth == 0:
-            conn.begin()
+            try:
+                conn.begin()
+            except Exception:
+                # Connection is broken; close and get a fresh one.
+                self.close()
+                conn = self.get_connection()
+                conn.begin()
         else:
             with conn.cursor() as cur:
                 cur.execute(f"SAVEPOINT _sp{depth}")
@@ -454,7 +464,8 @@ class MySQLAsyncDatabaseWrapper:
             async with conn.cursor() as cur:
                 await cur.execute("SET SESSION sql_mode='ANSI_QUOTES'")
                 await cur.execute(sql, tuple(params or ()))
-                await conn.commit()
+                if not self._in_async_atomic():
+                    await conn.commit()
                 return cur.rowcount
         except Exception as exc:
             try:
@@ -474,7 +485,8 @@ class MySQLAsyncDatabaseWrapper:
                 await cur.execute("SET SESSION sql_mode='ANSI_QUOTES'")
                 await cur.execute(sql, tuple(params or ()))
                 pk = cur.lastrowid
-                await conn.commit()
+                if not self._in_async_atomic():
+                    await conn.commit()
                 return pk
         except Exception as exc:
             try:
@@ -509,28 +521,65 @@ class MySQLAsyncDatabaseWrapper:
 
     # ── Async transaction helpers ──────────────────────────────────────────
 
+    def _in_async_atomic(self) -> bool:
+        """Return True if currently inside an ``aatomic()`` block."""
+        from ..utils import ASYNC_ATOMIC_STATE
+
+        state = ASYNC_ATOMIC_STATE.get()
+        return state is not None and state[0] is self
+
     @asynccontextmanager
     async def aatomic(self):
         """Async counterpart of :meth:`MySQLDatabaseWrapper.atomic`.
         Borrows a connection from the pool (or opens a fresh one)
         and runs BEGIN / COMMIT / ROLLBACK manually so nested
         ``aatomic`` blocks fall back to savepoints."""
-        conn = await self._acquire()
-        try:
+        from ..utils import ASYNC_ATOMIC_STATE
+
+        state = ASYNC_ATOMIC_STATE.get()
+
+        if state is None or state[0] is not self:
+            # Top-level: acquire connection and begin transaction.
+            conn = await self._acquire()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("SET SESSION sql_mode='ANSI_QUOTES'")
+                await conn.begin()
+                token = ASYNC_ATOMIC_STATE.set((self, conn, 1))
+                try:
+                    yield
+                    await conn.commit()
+                except Exception:
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        pass
+                    raise
+                finally:
+                    ASYNC_ATOMIC_STATE.reset(token)
+            finally:
+                await self._release(conn)
+        else:
+            # Nested: use savepoint on the already-held connection.
+            _, conn, depth = state
+            sp = f"_sp{depth}"
             async with conn.cursor() as cur:
-                await cur.execute("SET SESSION sql_mode='ANSI_QUOTES'")
-            await conn.begin()
+                await cur.execute(f"SAVEPOINT {sp}")
+            token = ASYNC_ATOMIC_STATE.set((self, conn, depth + 1))
             try:
                 yield
-                await conn.commit()
+                async with conn.cursor() as cur:
+                    await cur.execute(f"RELEASE SAVEPOINT {sp}")
             except Exception:
                 try:
-                    await conn.rollback()
+                    async with conn.cursor() as cur:
+                        await cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                        await cur.execute(f"RELEASE SAVEPOINT {sp}")
                 except Exception:
                     pass
                 raise
-        finally:
-            await self._release(conn)
+            finally:
+                ASYNC_ATOMIC_STATE.reset(token)
 
     async def commit(self) -> None:
         # Single-connection commit doesn't apply with the connection-
