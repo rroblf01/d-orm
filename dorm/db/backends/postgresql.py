@@ -682,6 +682,7 @@ class PostgreSQLAsyncDatabaseWrapper:
         self._pool_lock = asyncio.Lock()
         self._autocommit: bool = False
         self._autocommit_conn = None
+        self._autocommit_lock = asyncio.Lock()
 
     async def _get_pool(self):
         current_loop = asyncio.get_running_loop()
@@ -702,6 +703,7 @@ class PostgreSQLAsyncDatabaseWrapper:
             self._pool = None
             self._loop = None
             self._pool_lock = asyncio.Lock()
+            self._autocommit_lock = asyncio.Lock()
             graceful_scheduled = False
             if old_loop is not None and not old_loop.is_closed():
                 try:
@@ -846,13 +848,18 @@ class PostgreSQLAsyncDatabaseWrapper:
                 raise
 
     async def _get_autocommit_conn(self):
-        if self._autocommit_conn is None or self._autocommit_conn.closed:
+        if self._autocommit_conn is not None and not self._autocommit_conn.closed:
+            return self._autocommit_conn
+        async with self._autocommit_lock:
+            # Double-check after acquiring the lock.
+            if self._autocommit_conn is not None and not self._autocommit_conn.closed:
+                return self._autocommit_conn
             import psycopg
             from psycopg.rows import dict_row
             self._autocommit_conn = await psycopg.AsyncConnection.connect(
                 _dsn_to_conninfo(self._dsn), row_factory=dict_row, autocommit=True  # type: ignore
             )
-        return self._autocommit_conn
+            return self._autocommit_conn
 
     async def _choose_conn(self):
         """Return atomic conn, pinned conn, autocommit persistent conn,
