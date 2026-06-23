@@ -736,5 +736,4 @@ def test_libsql_module_can_be_imported_without_pyturso() -> None:
     )
 
 
-def test_redis_module_can_be_imported_without_redis() -> None:
-    from dorm.cache import redis as redis_mod  # noqa: F401
+

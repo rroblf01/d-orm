@@ -68,7 +68,8 @@ def _create_tables(clean_db):
 
 def test_min_value_passes():
     p = ValidatedProduct(name="Widget", price=1.0, sku="AB-1234")
-    p.full_clean()  # Should not raise
+    p.full_clean()
+    assert p.price == 1.0
 
 
 def test_min_value_fails():
@@ -80,6 +81,7 @@ def test_min_value_fails():
 def test_max_value_passes():
     p = ValidatedProduct(name="Widget", price=9999.99, sku="AB-1234")
     p.full_clean()
+    assert p.price == 9999.99
 
 
 def test_max_value_fails():
@@ -109,6 +111,7 @@ def test_max_value_validator_directly():
 def test_min_length_passes():
     p = ValidatedProduct(name="Widget", price=1.0, sku="AB-1234")
     p.full_clean()
+    assert p.name == "Widget"
 
 
 def test_min_length_fails():
@@ -142,6 +145,7 @@ def test_max_length_validator_directly():
 def test_regex_passes():
     p = ValidatedProduct(name="Widget", price=1.0, sku="AB-1234")
     p.full_clean()
+    assert p.sku == "AB-1234"
 
 
 def test_regex_fails():
@@ -183,6 +187,7 @@ def test_validate_email_shortcut():
 def test_email_field_in_model_passes():
     p = ValidatedProduct(name="Widget", price=1.0, sku="AB-1234", email="a@b.com")
     p.full_clean()
+    assert p.email == "a@b.com"
 
 
 def test_email_field_in_model_fails():
@@ -193,7 +198,8 @@ def test_email_field_in_model_fails():
 
 def test_email_field_null_skips_validation():
     p = ValidatedProduct(name="Widget", price=1.0, sku="AB-1234", email=None)
-    p.full_clean()  # null value should not trigger email validator
+    p.full_clean()
+    assert p.email is None
 
 
 # ── Custom callable validator ─────────────────────────────────────────────────

@@ -169,7 +169,8 @@ def test_full_clean_raises_on_invalid_email():
 
 def test_full_clean_passes_on_valid_data():
     a = Author(name="Valid", age=25, email="valid@example.com")
-    a.full_clean()  # should not raise
+    a.full_clean()
+    assert a.name == "Valid"
 
 
 def test_validate_unique_raises_on_duplicate_unique_field():
@@ -182,13 +183,15 @@ def test_validate_unique_raises_on_duplicate_unique_field():
 def test_validate_unique_ok_for_different_value():
     Tag.objects.create(name="python")
     other = Tag(name="django")
-    other.validate_unique()  # should not raise
+    other.validate_unique()
+    assert other.name == "django"
 
 
 def test_validate_unique_excludes_self_on_update():
     tag = Tag.objects.create(name="python")
     tag.name = "python"  # same value, updating same instance
-    tag.validate_unique()  # should not raise
+    tag.validate_unique()
+    assert tag.name == "python"
 
 
 def test_clean_is_hookable():

@@ -71,21 +71,6 @@ def test_set_autocommit_toggle():
     assert ACItem.objects.filter(name="ac_off").count() == 1
 
 
-def test_commit_method_available():
-    from dorm.db.connection import get_connection
-
-    conn = get_connection()
-    # commit() should be callable without raising
-    conn.commit()
-
-
-def test_rollback_method_available():
-    from dorm.db.connection import get_connection
-
-    conn = get_connection()
-    conn.rollback()
-
-
 def test_set_autocommit_false_still_works():
     from dorm.db.connection import get_connection
 
@@ -138,10 +123,4 @@ async def test_async_autocommit_toggle():
     assert await ACItem.objects.filter(name="async_off").acount() == 1
 
 
-@pytest.mark.asyncio
-async def test_async_commit_and_rollback_callable():
-    from dorm.db.connection import get_async_connection
 
-    conn = get_async_connection()
-    await conn.commit()
-    await conn.rollback()

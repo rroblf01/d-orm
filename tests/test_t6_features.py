@@ -141,6 +141,7 @@ class TestSQLAllowList:
             sql="SELECT * FROM allowed_table WHERE id = 42",
             params=None,
         )
+        assert sql_allowlist.rejected_templates() == []
 
     def test_ddl_bypass_default(self):
         from dorm import signals
@@ -153,6 +154,7 @@ class TestSQLAllowList:
         signals.pre_query.send(
             sender="sqlite", sql="CREATE TABLE x (id INTEGER)", params=None
         )
+        assert sql_allowlist.rejected_templates() == []
 
     def test_ddl_enforced_when_disabled(self):
         from dorm import signals
@@ -191,6 +193,7 @@ class TestSQLAllowList:
         signals.pre_query.send(
             sender="sqlite", sql="SELECT anything", params=None
         )
+        assert sql_allowlist.rejected_templates() == []
 
     def test_dump_and_reload(self, tmp_path):
         from dorm.contrib import sql_allowlist

@@ -68,7 +68,8 @@ def test_guard_raise_mode_outside_loop_smoke():
 
     enable_async_guard(mode="raise")
     # No event loop running → guard inert. Should NOT raise.
-    Author.objects.filter(name="z").count()
+    result = Author.objects.filter(name="z").count()
+    assert isinstance(result, int)
 
 
 # NOTE: end-to-end tests for ``mode="raise"`` and ``mode="raise_first"``

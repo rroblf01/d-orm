@@ -104,7 +104,7 @@ class TestAutoInstallDebugNPlusOne:
 
         dorm.configure(DATABASES={"default": {"ENGINE": "sqlite", "NAME": ":memory:"}})
         # Setting absent — no auto-install.
-        assert np._GLOBAL_DEBUG_DETECTOR is None or True
+        assert np._GLOBAL_DEBUG_DETECTOR is None
 
     def test_configure_with_falsy_setting_no_op(self):
         import dorm
@@ -112,10 +112,7 @@ class TestAutoInstallDebugNPlusOne:
 
         dorm.configure(DEBUG_NPLUSONE=False)
         # Falsy → install skipped even though the key was present.
-        # (Previous installer may exist from a prior test, but a
-        #  fresh-fixture invocation cleared the slot.)
-        if np._GLOBAL_DEBUG_DETECTOR is None:
-            assert True
+        assert np._GLOBAL_DEBUG_DETECTOR is None
 
 
 # ── querystats in prometheus.metrics_response ───────────────────────────────

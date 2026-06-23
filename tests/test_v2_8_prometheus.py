@@ -19,10 +19,14 @@ def _reset_prom():
 
 
 def test_install_idempotent():
-    from dorm.contrib.prometheus import install
+    from dorm.contrib.prometheus import install, metrics_response
 
     install()
     install()  # second call must not raise / double-attach.
+    # Metrics endpoint must still render without error after double-install.
+    body = metrics_response()
+    assert isinstance(body, str)
+    assert len(body) > 0
 
 
 def test_metrics_render_after_query():

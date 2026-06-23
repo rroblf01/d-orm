@@ -320,8 +320,8 @@ def test_redis_cache_set_swallows_exception(fakeredis_cache: Any) -> None:
         raise RuntimeError("redis down")
 
     with patch.object(fakeredis_cache._sync_client, "set", _boom):
-        # Must NOT raise.
-        fakeredis_cache.set("k", b"x")
+        result = fakeredis_cache.set("k", b"x")
+        assert result is None
 
 
 def test_redis_cache_delete_swallows_exception(
@@ -331,7 +331,8 @@ def test_redis_cache_delete_swallows_exception(
         raise RuntimeError("redis down")
 
     with patch.object(fakeredis_cache._sync_client, "delete", _boom):
-        fakeredis_cache.delete("k")
+        result = fakeredis_cache.delete("k")
+        assert result is None
 
 
 def test_redis_cache_delete_pattern_swallows_exception(
@@ -453,7 +454,8 @@ def test_drop_model_handles_missing_settings() -> None:
 
     # Sender without _meta — namespace lookup fails, function
     # must not raise.
-    _drop_model(_NoMeta)
+    result = _drop_model(_NoMeta)
+    assert result is None
 
 
 def test_drop_model_handles_cache_outage() -> None:
@@ -465,7 +467,8 @@ def test_drop_model_handles_cache_outage() -> None:
         "default": {"BACKEND": "nonexistent.module.Backend"},
     }
     try:
-        _drop_model(Author)  # must not raise
+        result = _drop_model(Author)
+        assert result is None
     finally:
         settings.CACHES = prev
 
@@ -486,7 +489,8 @@ async def test_adrop_model_handles_cache_outage() -> None:
     try:
         # Calling from an async test gives us a running loop,
         # exercising the async branch of ``_drop_model``.
-        _drop_model(Author, using="default")  # must not raise
+        result = _drop_model(Author, using="default")
+        assert result is None
     finally:
         settings.CACHES = prev
 
@@ -528,7 +532,8 @@ def test_cache_store_sync_no_op_without_alias() -> None:
     """Store path must early-exit (no errors, no writes) when the
     queryset isn't opted into caching."""
     qs = Author.objects.filter(name="x")
-    qs._cache_store_sync([])  # Must NOT raise.
+    result = qs._cache_store_sync([])
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -540,7 +545,8 @@ async def test_cache_lookup_async_returns_none_without_alias() -> None:
 @pytest.mark.asyncio
 async def test_cache_store_async_no_op_without_alias() -> None:
     qs = Author.objects.filter(name="x")
-    await qs._cache_store_async([])  # Must NOT raise.
+    result = await qs._cache_store_async([])
+    assert result is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -730,8 +736,8 @@ def test_libsql_sync_replica_no_op_when_no_sync_attr() -> None:
 
     w = LibSQLDatabaseWrapper({"ENGINE": "libsql", "NAME": ":memory:"})
     try:
-        # Local-only mode: no sync() method → must not raise.
-        w.sync_replica()
+        result = w.sync_replica()
+        assert result is None
     finally:
         w.close()
 

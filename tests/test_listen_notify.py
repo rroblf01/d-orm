@@ -30,7 +30,8 @@ def test_notify_pg(db_config):
         pytest.skip("PG-only")
     # Bare smoke test: NOTIFY without a listener is a no-op but must
     # not raise.
-    notify("smoke_ch", "hi")
+    result = notify("smoke_ch", "hi")
+    assert result is None
 
 
 @pytest.mark.asyncio

@@ -265,7 +265,12 @@ def test_redis_cache_import_does_not_crash() -> None:
     """Importing :mod:`dorm.cache.redis` must succeed even if
     redis-py is not installed; the helpful error surfaces only
     when the user actually tries to query the backend."""
+    import types
+
     from dorm.cache import redis as redis_mod  # noqa: F401
+
+    assert isinstance(redis_mod, types.ModuleType)
+    assert hasattr(redis_mod, "RedisCache")
 
 
 def test_redis_cache_get_raises_when_redis_missing() -> None:
