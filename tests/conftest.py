@@ -38,6 +38,60 @@ from dorm.test import transactional_db, atransactional_db  # noqa: F401
 _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
 os.close(_db_fd)
 
+# Track which database config was last passed to configure().
+# Used by clean_data to detect variant switches (sqlite → postgres)
+# in alternative test runners that don't isolate session-scoped
+# fixtures between parametrized variants.
+_active_db_config: dict | None = None
+
+
+def _recreate_schema(conn):
+    """Drop and recreate the 6 base tables on *conn*.
+
+    Called by clean_data when a backend switch is detected — the
+    tables created by schema_manager (session-scoped) don't exist
+    on the new backend.
+    """
+    from dorm.migrations.operations import _field_to_column_sql
+    from tests.models import Article, Author, Book, Publisher, Tag  # noqa: PLC0415
+
+    cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""
+    vendor = getattr(conn, "vendor", "sqlite")
+
+    for tbl in ["articles_tags", "books", "articles", "tags", "authors", "publishers"]:
+        conn.execute_script(f'DROP TABLE IF EXISTS "{tbl}"{cascade}')
+
+    for model, tbl in [
+        (Publisher, "publishers"),
+        (Author, "authors"),
+        (Book, "books"),
+        (Tag, "tags"),
+        (Article, "articles"),
+    ]:
+        cols = [
+            _field_to_column_sql(f.name, f, conn)
+            for f in model._meta.fields
+            if f.db_type(conn)
+        ]
+        conn.execute_script(
+            f'CREATE TABLE IF NOT EXISTS "{tbl}" (\n  '
+            + ",\n  ".join(filter(None, cols))
+            + "\n)"
+        )
+
+    pk_type = (
+        "INTEGER PRIMARY KEY AUTOINCREMENT"
+        if vendor == "sqlite"
+        else "SERIAL PRIMARY KEY"
+    )
+    conn.execute_script(
+        f'CREATE TABLE IF NOT EXISTS "articles_tags" (\n'
+        f'  "id" {pk_type},\n'
+        f'  "article_id" BIGINT NOT NULL REFERENCES "articles"("id"),\n'
+        f'  "tag_id" BIGINT NOT NULL REFERENCES "tags"("id")\n'
+        f")"
+    )
+
 
 def _docker_available() -> bool:
     try:
@@ -309,11 +363,13 @@ def db_config(request, tmp_path_factory):
 
 @pytest.fixture(scope="session", autouse=True)
 def configure_dorm(db_config):
+    global _active_db_config
     reset_connections()
     configure(
         DATABASES={"default": db_config},
         INSTALLED_APPS=["tests"],
     )
+    _active_db_config = dict(db_config)
     yield
     # Force sync release of any async wrappers left behind by the final
     # test before close_all(): otherwise pytest's unraisableexception
@@ -408,7 +464,28 @@ def clean_data(schema_manager):
 
     If a previous test dropped a base table via DDL, this fixture
     automatically recreates it so subsequent tests aren't broken.
+
+    Also detects backend variant switches (e.g. sqlite → postgres) in
+    alternative test runners that don't isolate session-scoped fixtures
+    between parametrized variants.  When a switch is detected, dorm is
+    reconfigured and the schema is recreated on the new backend.
     """
+    global _active_db_config
+    from dorm.conf import settings, configure
+    from dorm.db.connection import get_connection, reset_connections
+
+    # Detect variant change: if the current DATABASES config differs
+    # from what configure() last saw, reconfigure and recreate schema.
+    current_db = dict(settings.DATABASES.get("default", {}))
+    if _active_db_config is not None and current_db != _active_db_config:
+        reset_connections()
+        configure(
+            DATABASES={"default": current_db},
+            INSTALLED_APPS=["tests"],
+        )
+        _active_db_config = dict(current_db)
+        _recreate_schema(get_connection())
+
     from dorm.contrib.contenttypes.models import ContentType
     ContentType.objects.clear_cache()
     yield
