@@ -99,14 +99,16 @@ class DormTestCase:
         self._dorm_atomic_cm.__enter__()
 
     def tearDown(self):
-        cm = self._dorm_atomic_cm
-        if cm is not None:
-            try:
-                cm.set_rollback(True)
-            finally:
-                cm.__exit__(None, None, None)
-                self._dorm_atomic_cm = None
-        super().tearDown()  # type: ignore
+        try:
+            cm = self._dorm_atomic_cm
+            if cm is not None:
+                try:
+                    cm.set_rollback(True)
+                finally:
+                    cm.__exit__(None, None, None)
+                    self._dorm_atomic_cm = None
+        finally:
+            super().tearDown()  # type: ignore
 
 
 # ── Query-count assertions ───────────────────────────────────────────────────

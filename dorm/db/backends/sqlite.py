@@ -539,13 +539,20 @@ class SQLiteAsyncDatabaseWrapper:
             self._loop = current_loop
             self._lock = asyncio.Lock()
             # Best-effort cleanup of the connection from the previous loop.
-            # If that loop is still alive, schedule the proper async close on
-            # it; otherwise force-close the underlying sqlite3 handle so we
-            # don't leak it to the GC as an unraisable ResourceWarning.
+            # Attempt a rollback on the old loop so in-flight transactions
+            # unwind their writes before the socket is closed.
             if old_conn is not None:
                 if old_loop is not None and not old_loop.is_closed():
                     try:
-                        asyncio.run_coroutine_threadsafe(old_conn.close(), old_loop)
+                        asyncio.run_coroutine_threadsafe(
+                            old_conn.rollback(), old_loop
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            old_conn.close(), old_loop
+                        )
                     except RuntimeError:
                         self._force_close_sync(old_conn)
                 else:

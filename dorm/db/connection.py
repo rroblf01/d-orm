@@ -344,7 +344,10 @@ def get_async_connection(alias: str = "default"):
 def close_all():
     for conn in _sync_connections.values():
         if hasattr(conn, "close"):
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
     _sync_connections.clear()
 
 

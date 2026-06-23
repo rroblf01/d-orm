@@ -124,14 +124,29 @@ def on_commit(
     the way up to the outermost commit; a rollback at any depth discards
     callbacks scheduled inside that block.
 
+    When this is called from inside an ``aatomic()`` block, the
+    callback is registered on the async stack and fires from the
+    async pop path — matching the sync semantics.
+
     Exceptions from a callback are logged on the ``dorm.transaction`` logger
     but do **not** roll back the (already-committed) transaction — by the
     time the callback fires, the DB state is durable. Wire that logger to
     your alerting if you depend on these for correctness.
     """
+    # Prefer the sync stack (tracks per-thread atomic frames). Fall back
+    # to the active async stack so the same helper works inside both
+    # ``atomic()`` and ``aatomic()`` — which matters for ``FileField``,
+    # whose ``pre_save`` is sync even on the async ORM path.
     stack = _sync_stack(using)
     if not stack:
-        # No active atomic — degrade to direct call. Django does the same.
+        # Also check async stack — if inside aatomic(), defer.
+        async_stack = _aon_commit_stack()
+        for frame in reversed(async_stack):
+            frame_using, commit_cbs, _rollback_cbs = frame
+            if frame_using == using:
+                commit_cbs.append(callback)
+                return
+        # Outside any active atomic — degrade to direct call.
         callback()
         return
     stack[-1].append(callback)
