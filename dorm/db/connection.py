@@ -349,6 +349,14 @@ def close_all():
             except Exception:
                 pass
     _sync_connections.clear()
+    for conn in _async_connections.values():
+        force = getattr(conn, "force_close_sync", None)
+        if force is not None:
+            try:
+                force()
+            except Exception:
+                pass
+    _async_connections.clear()
 
 
 async def close_all_async():
@@ -520,27 +528,7 @@ def reset_connections():
     except Exception:
         pass
 
-    for conn in _sync_connections.values():
-        if hasattr(conn, "close"):
-            try:
-                conn.close()
-            except Exception:
-                pass
-    _sync_connections.clear()
-    # Async wrappers can't be awaited from here, but each backend exposes
-    # a ``force_close_sync`` that releases its underlying handles
-    # deterministically — without it the GC finalises the SQLite
-    # connection later (``ResourceWarning: unclosed database``) and
-    # leaves the aiosqlite worker thread parked on its queue, which under
-    # ``pytest -n 4`` can keep the interpreter from exiting.
-    for conn in _async_connections.values():
-        force = getattr(conn, "force_close_sync", None)
-        if force is not None:
-            try:
-                force()
-            except Exception:
-                pass
-    _async_connections.clear()
+    close_all()
 
 
 def _atexit_close() -> None:

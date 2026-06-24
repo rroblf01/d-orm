@@ -20,13 +20,10 @@ def fresh_db(tmp_path):
     the conftest settings on teardown so the next PG test in the
     suite still resolves to the right alias."""
     from dorm.conf import settings
-    from dorm.db.connection import _async_connections, _sync_connections
 
     saved_db = {alias: dict(cfg) for alias, cfg in settings.DATABASES.items()}
     saved_apps = list(settings.INSTALLED_APPS)
 
-    _sync_connections.clear()
-    _async_connections.clear()
     db = tmp_path / "ase.sqlite3"
     dorm.configure(
         DATABASES={"default": {"ENGINE": "sqlite", "NAME": str(db)}},
@@ -34,8 +31,6 @@ def fresh_db(tmp_path):
     )
     yield
     dorm.configure(DATABASES=saved_db, INSTALLED_APPS=saved_apps)
-    _sync_connections.clear()
-    _async_connections.clear()
 
 
 class TestAsyncSchemaEditor:

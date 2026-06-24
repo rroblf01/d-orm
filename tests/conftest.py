@@ -490,6 +490,23 @@ def clean_data(schema_manager):
     ContentType.objects.clear_cache()
     yield
 
+    # Post-test teardown: force-close every async wrapper opened by the
+    # test before touching the sync connection. Without this, an async
+    # pool can survive into the next test; on Python 3.14 the GC
+    # sometimes reaches it BEFORE ``reset_connections`` does, finalises
+    # against a session loop in an inconsistent state, and SIGSEGVs the
+    # process.
+    from dorm.db.connection import _async_connections
+
+    for async_conn in list(_async_connections.values()):
+        force = getattr(async_conn, "force_close_sync", None)
+        if force is not None:
+            try:
+                force()
+            except Exception:
+                pass
+    _async_connections.clear()
+
     from dorm.db.connection import get_connection
     from dorm.migrations.operations import _field_to_column_sql
     from tests.models import Article, Author, Book, Publisher, Tag  # noqa: PLC0415
@@ -570,22 +587,6 @@ def clean_data(schema_manager):
     # Re-enable FK enforcement after cleanup.
     if vendor == "sqlite":
         conn.execute_script("PRAGMA foreign_keys = ON")
-
-    # Post-test teardown: force-close every async wrapper opened by the
-    # test. Without this, an async pool can survive into the next test;
-    # on Python 3.14 the GC sometimes reaches it BEFORE
-    # ``reset_connections`` does, finalises against a session loop in an
-    # inconsistent state, and SIGSEGVs the process.
-    from dorm.db.connection import _async_connections
-
-    for async_conn in list(_async_connections.values()):
-        force = getattr(async_conn, "force_close_sync", None)
-        if force is not None:
-            try:
-                force()
-            except Exception:
-                pass
-    _async_connections.clear()
 
 
 @pytest.fixture
