@@ -501,7 +501,7 @@ def _teardown_recreate_tables(conn, vendor, cascade):
 
 
 @pytest.fixture(autouse=True)
-def clean_data(schema_manager):
+def clean_data(schema_manager, db_config):
     """DELETE all rows from base tables after each test.
 
     Unlike the old ``clean_db`` (DROP+CREATE every test), tables are
@@ -520,10 +520,10 @@ def clean_data(schema_manager):
     reconfigured and the schema is recreated on the new backend.
     """
     global _active_db_config
-    from dorm.conf import settings, configure
+    from dorm.conf import configure
     from dorm.db.connection import get_connection, reset_connections
 
-    current_db = dict(settings.DATABASES.get("default", {}))
+    current_db = dict(db_config)
     if _active_db_config is not None and current_db != _active_db_config:
         reset_connections()
         configure(
@@ -538,6 +538,10 @@ def clean_data(schema_manager):
         reset_connections()
         if _active_db_config is None:
             _active_db_config = dict(current_db)
+        configure(
+            DATABASES={"default": current_db},
+            INSTALLED_APPS=["tests"],
+        )
         _recreate_schema(get_connection())
 
     from dorm.contrib.contenttypes.models import ContentType
@@ -562,8 +566,6 @@ def clean_data(schema_manager):
     _async_connections.clear()
 
     from dorm.db.connection import get_connection
-    from dorm.migrations.operations import _field_to_column_sql
-    from tests.models import Article, Author, Book, Publisher, Tag  # noqa: PLC0415
 
     conn = get_connection()
     cascade = " CASCADE" if getattr(conn, "vendor", "sqlite") == "postgresql" else ""

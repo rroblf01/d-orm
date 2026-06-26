@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import gc
-import weakref
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -471,7 +470,7 @@ class TestExclusionConstraint:
             ExclusionConstraint(
                 name="bad",
                 expressions=[("col", "=")],
-                condition="not a q",
+                condition="not a q",  # ty: ignore[invalid-argument-type]
             )
 
     def test_invalid_deferrable_raises(self):

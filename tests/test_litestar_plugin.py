@@ -8,7 +8,7 @@ litestar = pytest.importorskip("litestar")
 
 
 def test_plugin_installs_middlewares_and_hooks():
-    from litestar.config.app import AppConfig  # type: ignore[import-not-found]  # ty:ignore[unresolved-import]
+    from litestar.config.app import AppConfig  # type: ignore[import-not-found]
 
     from dorm.contrib.litestar import DormPlugin
 
@@ -27,7 +27,7 @@ def test_plugin_installs_middlewares_and_hooks():
 
 
 def test_otel_flag_adds_middleware():
-    from litestar.config.app import AppConfig  # type: ignore[import-not-found]  # ty:ignore[unresolved-import]
+    from litestar.config.app import AppConfig  # type: ignore[import-not-found]
 
     from dorm.contrib.litestar import DormPlugin
 

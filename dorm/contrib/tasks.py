@@ -260,6 +260,7 @@ class TaskQueue:
         """Block on the configured NOTIFY channel for at most
         ``poll_interval_s``. PG-only — silently falls back to a sleep
         on other vendors so the loop keeps making forward progress."""
+        assert self.channel is not None
         from ..db.connection import get_connection
 
         conn = get_connection(self.using)

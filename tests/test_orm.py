@@ -3,6 +3,7 @@
 import asyncio
 import os
 import tempfile
+import pytest
 
 import dorm
 
@@ -25,9 +26,6 @@ def _configure_and_setup():
         INSTALLED_APPS=["test_app"],
     )
     setup_tables()
-
-
-import pytest
 
 
 @pytest.fixture(scope="module", autouse=True)

@@ -216,8 +216,8 @@ class QueryLog:
         installed; install via ``pip install pyarrow``.
         """
         try:
-            import pyarrow as pa  # type: ignore[import-not-found]  # ty:ignore[unresolved-import]
-            import pyarrow.parquet as pq  # type: ignore[import-not-found]  # ty:ignore[unresolved-import]
+            import pyarrow as pa  # type: ignore[import-not-found]
+            import pyarrow.parquet as pq  # type: ignore[import-not-found]
         except ImportError as e:
             raise ImportError(
                 "QueryLog.dump_parquet requires pyarrow. Install with "
