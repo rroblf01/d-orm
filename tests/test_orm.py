@@ -6,18 +6,33 @@ import tempfile
 
 import dorm
 
-# Use a file-based SQLite DB so that both sync and async share the same data
-_db_file = os.path.join(tempfile.mkdtemp(), "test_dorm.db")
+# Module-level dorm.configure() would pollute the global state for other test
+# modules when run under oxytest.  Use a module-scoped autouse fixture instead.
+_db_file = None
 
-dorm.configure(
-    DATABASES={
-        "default": {
-            "ENGINE": "sqlite",
-            "NAME": _db_file,
-        }
-    },
-    INSTALLED_APPS=["test_app"],
-)
+
+def _configure_and_setup():
+    """Configure dorm for this test and create tables."""
+    global _db_file
+    _db_file = os.path.join(tempfile.mkdtemp(), "test_dorm.db")
+    dorm.configure(
+        DATABASES={
+            "default": {
+                "ENGINE": "sqlite",
+                "NAME": _db_file,
+            }
+        },
+        INSTALLED_APPS=["test_app"],
+    )
+    setup_tables()
+
+
+import pytest
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _setup_orm_module():
+    _configure_and_setup()
 
 
 class Author(dorm.Model):
@@ -305,7 +320,7 @@ def test_migrations():
 
 
 if __name__ == "__main__":
-    setup_tables()
+    _configure_and_setup()
     test_sync()
     asyncio.run(test_async())
     test_migrations()

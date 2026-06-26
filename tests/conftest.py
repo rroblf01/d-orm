@@ -451,6 +451,55 @@ def schema_manager(configure_dorm):
         conn.execute_script(f'DROP TABLE IF EXISTS "{tbl}"{cascade}')
 
 
+def _teardown_recreate_tables(conn, vendor, cascade):
+    """Drop and recreate the 6 base tables.  Used by clean_data teardown."""
+    from dorm.migrations.operations import _field_to_column_sql
+    from tests.models import Article, Author, Book, Publisher, Tag
+
+    for tbl in ["articles_tags", "books", "articles", "tags", "authors", "publishers"]:
+        try:
+            conn.execute_script(f'DROP TABLE IF EXISTS "{tbl}"{cascade}')
+        except Exception:
+            pass
+
+    for model, tbl in [
+        (Publisher, "publishers"),
+        (Author, "authors"),
+        (Book, "books"),
+        (Tag, "tags"),
+        (Article, "articles"),
+    ]:
+        try:
+            cols = [
+                _field_to_column_sql(f.name, f, conn)
+                for f in model._meta.fields
+                if f.db_type(conn)
+            ]
+            conn.execute_script(
+                f'CREATE TABLE IF NOT EXISTS "{tbl}" (\n  '
+                + ",\n  ".join(filter(None, cols))
+                + "\n)"
+            )
+        except Exception:
+            pass
+
+    pk_type = (
+        "INTEGER PRIMARY KEY AUTOINCREMENT"
+        if vendor == "sqlite"
+        else "SERIAL PRIMARY KEY"
+    )
+    try:
+        conn.execute_script(
+            f'CREATE TABLE IF NOT EXISTS "articles_tags" (\n'
+            f'  "id" {pk_type},\n'
+            f'  "article_id" BIGINT NOT NULL REFERENCES "articles"("id"),\n'
+            f'  "tag_id" BIGINT NOT NULL REFERENCES "tags"("id")\n'
+            f")"
+        )
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def clean_data(schema_manager):
     """DELETE all rows from base tables after each test.
@@ -474,8 +523,6 @@ def clean_data(schema_manager):
     from dorm.conf import settings, configure
     from dorm.db.connection import get_connection, reset_connections
 
-    # Detect variant change: if the current DATABASES config differs
-    # from what configure() last saw, reconfigure and recreate schema.
     current_db = dict(settings.DATABASES.get("default", {}))
     if _active_db_config is not None and current_db != _active_db_config:
         reset_connections()
@@ -484,6 +531,13 @@ def clean_data(schema_manager):
             INSTALLED_APPS=["tests"],
         )
         _active_db_config = dict(current_db)
+        _recreate_schema(get_connection())
+    else:
+        # Close and reopen connections every test to prevent cumulative
+        # connection state issues (e.g. SQLite readonly after many tests).
+        reset_connections()
+        if _active_db_config is None:
+            _active_db_config = dict(current_db)
         _recreate_schema(get_connection())
 
     from dorm.contrib.contenttypes.models import ContentType
@@ -534,40 +588,7 @@ def clean_data(schema_manager):
             break
 
     if needs_recreate:
-        # Drop whatever remains and recreate everything.
-        for tbl in ["articles_tags", "books", "articles", "tags", "authors", "publishers"]:
-            conn.execute_script(f'DROP TABLE IF EXISTS "{tbl}"{cascade}')
-
-        for model, tbl in [
-            (Publisher, "publishers"),
-            (Author, "authors"),
-            (Book, "books"),
-            (Tag, "tags"),
-            (Article, "articles"),
-        ]:
-            cols = [
-                _field_to_column_sql(f.name, f, conn)
-                for f in model._meta.fields
-                if f.db_type(conn)
-            ]
-            conn.execute_script(
-                f'CREATE TABLE IF NOT EXISTS "{tbl}" (\n  '
-                + ",\n  ".join(filter(None, cols))
-                + "\n)"
-            )
-
-        pk_type = (
-            "INTEGER PRIMARY KEY AUTOINCREMENT"
-            if vendor == "sqlite"
-            else "SERIAL PRIMARY KEY"
-        )
-        conn.execute_script(
-            f'CREATE TABLE IF NOT EXISTS "articles_tags" (\n'
-            f'  "id" {pk_type},\n'
-            f'  "article_id" BIGINT NOT NULL REFERENCES "articles"("id"),\n'
-            f'  "tag_id" BIGINT NOT NULL REFERENCES "tags"("id")\n'
-            f")"
-        )
+        _teardown_recreate_tables(conn, vendor, cascade)
     else:
         # Fast path: reset auto-increment sequences so PKs start at 1.
         if vendor == "sqlite":
