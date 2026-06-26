@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.4.0] - 2026-05-12
+## [4.4.0] - 2026-05-26
 
 Minor release. No breaking changes vs 4.3 — every addition is opt-in.
 
