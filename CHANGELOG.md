@@ -20,6 +20,8 @@ Minor release. No breaking changes.
   - `djanorm[postgresql]`: `psycopg[binary,pool]>=3.3.6` (was `>=3.3.3`; `psycopg-binary` first ships a `cp315` wheel at 3.3.6).
   - `djanorm[parquet]`: `pyarrow>=26.0` (was `>=14.0`; first release with `cp315` wheels).
   - `djanorm[libsql]`: `pyturso>=0.6.0` (was `>=0.5.1`; first release with `cp315` wheels; 0.7+ also ships `abi3`).
+  - `djanorm[image]` and `djanorm[dev]`: `Pillow>=12.3.0` (was `>=12.2.0` / `>=10.0`; first release with `cp315` manylinux wheels — without one, a 3.15 install falls back to an sdist build that needs system libjpeg headers).
+- **Lockfile refreshed to versions that ship `cp315` manylinux wheels** so a Python 3.15 `uv sync --extra=all` installs binaries instead of compiling from source: `numpy` 2.5.x, `pydantic` 2.14 / `pydantic-core` 2.50, `msgspec` 0.22, `markupsafe` 3.0.4, `cffi` 2.1, `pillow` 12.3.
 - **Test suite isolation sped up ~2.4×.** The autouse `clean_data` fixture was still calling `_recreate_schema` (DROP + CREATE of all 6 base tables) on the common same-backend path, contradicting its own docstring and doubling work with the DELETE-based teardown. Schema is now created once per session by `schema_manager` and only rows are cleaned between tests. Full suite (SQLite + Postgres parametrisation): ~15.5 min → ~6.5 min locally; the SQLite-only CI leg drops from ~95 s to ~64 s.
 
 ## [4.4.0] - 2026-05-26

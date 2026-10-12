@@ -69,7 +69,10 @@ dev = [
     # Pillow powers tests for ``dorm.ImageField``. Same opt-in
     # rationale as the other extras; production users only install
     # ``djanorm[image]`` if they actually use ImageField.
-    "Pillow>=10.0",
+    # Floor is 12.3.0 because that's the first release with cp315
+    # manylinux wheels — without one, a Python 3.15 install falls
+    # back to an sdist build that needs system libjpeg headers.
+    "Pillow>=12.3.0",
 ]
 # Standalone group for users who want to wire dorm.contrib.otel — kept
 # separate from ``dev`` so production installs don't pull SDK + exporters.
@@ -91,7 +94,8 @@ s3 = ["boto3>=1.43.1"]
 # Pillow powers ``dorm.ImageField`` — used at assignment time to
 # verify uploads parse as recognisable images before they hit
 # storage. Skip this extra if you only use ``FileField``.
-image = ["Pillow>=12.2.0"]
+# 12.3.0 is the first release with cp315 manylinux wheels.
+image = ["Pillow>=12.3.0"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
 # Email/URL/IP format validation is done by dorm's own field code on
