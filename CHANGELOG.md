@@ -6,6 +6,22 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-10-12
+
+Minor release. No breaking changes.
+
+### Added
+
+- **Python 3.15 support.** Added the `Programming Language :: Python :: 3.15` trove classifier and extended the CI test matrix (SQLite, DuckDB, Postgres, MySQL, siblings, release smoke) to Python 3.15. The minimum supported version remains 3.11. The classifier is also declared in the `djanorm-mypy` sibling package.
+
+### Changed
+
+- **Dependency floors raised for Python 3.15 wheels** (users on 3.11–3.14 are unaffected — these are the first releases that publish `cp315` / `abi3` wheels):
+  - `djanorm[postgresql]`: `psycopg[binary,pool]>=3.3.6` (was `>=3.3.3`; `psycopg-binary` first ships a `cp315` wheel at 3.3.6).
+  - `djanorm[parquet]`: `pyarrow>=26.0` (was `>=14.0`; first release with `cp315` wheels).
+  - `djanorm[libsql]`: `pyturso>=0.6.0` (was `>=0.5.1`; first release with `cp315` wheels; 0.7+ also ships `abi3`).
+- **Test suite isolation sped up ~2.4×.** The autouse `clean_data` fixture was still calling `_recreate_schema` (DROP + CREATE of all 6 base tables) on the common same-backend path, contradicting its own docstring and doubling work with the DELETE-based teardown. Schema is now created once per session by `schema_manager` and only rows are cleaned between tests. Full suite (SQLite + Postgres parametrisation): ~15.5 min → ~6.5 min locally; the SQLite-only CI leg drops from ~95 s to ~64 s.
+
 ## [4.4.0] - 2026-05-26
 
 Minor release. No breaking changes vs 4.3 — every addition is opt-in.

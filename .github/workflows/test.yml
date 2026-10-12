@@ -30,7 +30,7 @@ jobs:
       # runners under the free-tier comfort window.
       max-parallel: 3
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
 
     steps:
       - uses: actions/checkout@v7
@@ -61,7 +61,7 @@ jobs:
 
   # Postgres matrix — pinned PG 16 (LTS-style middle-of-the-road)
   # plus the two flanking majors most production users run. Runs
-  # only on Python 3.14 (Python compat is covered by the SQLite
+  # only on Python 3.15 (Python compat is covered by the SQLite
   # job above).
   postgres:
     name: PostgreSQL ${{ matrix.postgres-version }}
@@ -109,8 +109,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python 3.14
-        run: uv python install 3.14
+      - name: Set up Python 3.15
+        run: uv python install 3.15
 
       - name: Install dependencies
         run: uv sync --extra=all
@@ -167,8 +167,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python 3.14
-        run: uv python install 3.14
+      - name: Set up Python 3.15
+        run: uv python install 3.15
 
       - name: Install dependencies
         run: uv sync --extra=all
@@ -201,7 +201,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: ["3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -227,8 +227,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-      - name: Set up Python 3.14
-        run: uv python install 3.14
+      - name: Set up Python 3.15
+        run: uv python install 3.15
       - name: Build djanorm
         run: uv build
       - name: Build djanorm-mypy
@@ -254,8 +254,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-      - name: Set up Python 3.14
-        run: uv python install 3.14
+      - name: Set up Python 3.15
+        run: uv python install 3.15
       - name: Build wheel
         run: uv build
       - name: Install wheel into a fresh venv
