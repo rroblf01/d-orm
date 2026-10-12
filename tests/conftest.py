@@ -525,6 +525,9 @@ def clean_data(schema_manager, db_config):
 
     current_db = dict(db_config)
     if _active_db_config is not None and current_db != _active_db_config:
+        # Backend switch (rare — alternative runners that don't isolate
+        # session fixtures between parametrized variants). Rebuild schema
+        # on the new backend.
         reset_connections()
         configure(
             DATABASES={"default": current_db},
@@ -533,8 +536,12 @@ def clean_data(schema_manager, db_config):
         _active_db_config = dict(current_db)
         _recreate_schema(get_connection())
     else:
-        # Close and reopen connections every test to prevent cumulative
-        # connection state issues (e.g. SQLite readonly after many tests).
+        # Common path: same backend. Tables already exist (created once
+        # by session-scoped ``schema_manager``). Only reset connections
+        # so no cumulative connection state leaks across tests; the
+        # teardown below DELETEs rows. Calling ``_recreate_schema`` here
+        # used to DROP+CREATE all 6 base tables on every test, which
+        # dominated suite runtime (~100ms x N tests).
         reset_connections()
         if _active_db_config is None:
             _active_db_config = dict(current_db)
@@ -542,7 +549,6 @@ def clean_data(schema_manager, db_config):
             DATABASES={"default": current_db},
             INSTALLED_APPS=["tests"],
         )
-        _recreate_schema(get_connection())
 
     from dorm.contrib.contenttypes.models import ContentType
     ContentType.objects.clear_cache()
