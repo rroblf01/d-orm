@@ -1,6 +1,6 @@
 [project]
 name = "djanorm"
-version = "4.4.0"
+version = "4.5.0"
 description = "A Django-like ORM with synchronous and asynchronous support"
 readme = "README.md"
 authors = [{ name = "Ricardo Robles", email = "ricardo.r.f@hotmail.com" }]
@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Database",
     "Framework :: AsyncIO",
     "Typing :: Typed",
@@ -68,7 +69,10 @@ dev = [
     # Pillow powers tests for ``dorm.ImageField``. Same opt-in
     # rationale as the other extras; production users only install
     # ``djanorm[image]`` if they actually use ImageField.
-    "Pillow>=10.0",
+    # Floor is 12.3.0 because that's the first release with cp315
+    # manylinux wheels — without one, a Python 3.15 install falls
+    # back to an sdist build that needs system libjpeg headers.
+    "Pillow>=12.3.0",
 ]
 # Standalone group for users who want to wire dorm.contrib.otel — kept
 # separate from ``dev`` so production installs don't pull SDK + exporters.
@@ -81,7 +85,7 @@ otel = [
 # aiosqlite.Connection. Untested on 0.23+; bump only after verifying the
 # attribute name still exists (and update the runtime warning if not).
 sqlite = ["aiosqlite>=0.22.1,<0.23"]
-postgresql = ["psycopg[binary,pool]>=3.3.3"]
+postgresql = ["psycopg[binary,pool]>=3.3.6"]
 # Optional S3 storage backend for ``dorm.FileField`` — see
 # ``dorm.contrib.storage.s3``. boto3 picks up credentials from the
 # ambient environment (IAM role, ``~/.aws/credentials``, env vars) by
@@ -90,7 +94,8 @@ s3 = ["boto3>=1.43.1"]
 # Pillow powers ``dorm.ImageField`` — used at assignment time to
 # verify uploads parse as recognisable images before they hit
 # storage. Skip this extra if you only use ``FileField``.
-image = ["Pillow>=12.2.0"]
+# 12.3.0 is the first release with cp315 manylinux wheels.
+image = ["Pillow>=12.3.0"]
 # Optional Pydantic v2 interop — needed for dorm.contrib.pydantic.schema_for(),
 # which generates FastAPI-friendly request/response schemas from dorm models.
 # Email/URL/IP format validation is done by dorm's own field code on
@@ -132,7 +137,7 @@ vector = ["djanorm[pgvector,sqlite-vec]"]
 # fresh connection — the ``vendor == "libsql"`` branch in
 # ``VectorField`` picks the right column type and SQL emitter.
 libsql = [
-    "pyturso>=0.5.1",
+    "pyturso>=0.6.0",
 ]
 # Redis-backed result cache for ``QuerySet.cache(timeout=…)``.
 # Sync (``redis.Redis``) and async (``redis.asyncio.Redis``)
@@ -187,7 +192,7 @@ litestar = ["litestar>=2.10"]
 # Parquet dump for ``dorm.contrib.querylog.QueryLog.dump_parquet``.
 # Pyarrow is heavy; gate it behind its own extra so a typical
 # install doesn't pull a ~40 MB wheel.
-parquet = ["pyarrow>=14.0"]
+parquet = ["pyarrow>=26.0"]
 # CockroachDB backend reuses the PostgreSQL psycopg pipeline.
 # This alias makes ``pip install 'djanorm[cockroachdb]'`` work
 # without the user having to remember the underlying extra.

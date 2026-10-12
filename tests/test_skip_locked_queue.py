@@ -32,11 +32,16 @@ def test_skip_locked_two_workers_claim_disjoint_rows(db_config):
     )
 
     claimed: dict[str, list[int]] = {"a": [], "b": []}
-    barrier = threading.Barrier(2)
+    # Two barriers: one so both workers start together, one so both
+    # hold their row locks before either commits. Without the second
+    # barrier the workers can serialise — each then re-claims the same
+    # first 10 rows (SKIP LOCKED only skips *currently* locked rows),
+    # so the union is 10 instead of 20.
+    start_barrier = threading.Barrier(2)
+    claim_barrier = threading.Barrier(2)
 
     def _worker(name: str) -> None:
-        # Synchronise both threads at the start so they overlap.
-        barrier.wait()
+        start_barrier.wait()
         with transaction.atomic():
             qs = (
                 Author.objects.select_for_update(skip_locked=True)
@@ -44,11 +49,8 @@ def test_skip_locked_two_workers_claim_disjoint_rows(db_config):
             )
             for row in qs:
                 claimed[name].append(row.pk)
-                # Hold the transaction long enough that the other
-                # worker reaches its own SELECT FOR UPDATE before we
-                # commit; otherwise both workers serialise and one
-                # claims everything.
-            # Implicit commit on context-manager exit.
+            # Hold the locks until the other worker has claimed too.
+            claim_barrier.wait(timeout=10.0)
 
     t1 = threading.Thread(target=_worker, args=("a",))
     t2 = threading.Thread(target=_worker, args=("b",))
